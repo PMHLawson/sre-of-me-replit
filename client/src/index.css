@@ -38,80 +38,80 @@
   --color-status-critical: hsl(var(--status-critical));
 }
 
-/* LIGHT MODE - Refined, polished, warmer */
+/* LIGHT MODE - Neutral-first, aligned with Utility Fork spec */
 :root {
-  --background: 40 10% 98%; /* Warm off-white */
-  --foreground: 220 20% 15%; /* Deep slate grey */
+  --background: 0 0% 98%; /* True neutral off-white */
+  --foreground: 0 0% 10%; /* Deep neutral slate */
   
   --card: 0 0% 100%;
-  --card-foreground: 220 20% 15%;
+  --card-foreground: 0 0% 15%;
   
   --popover: 0 0% 100%;
-  --popover-foreground: 220 20% 15%;
+  --popover-foreground: 0 0% 15%;
   
-  --primary: 225 10% 25%; /* Subtle dark grey/blue for primary actions */
-  --primary-foreground: 0 0% 98%;
+  --primary: 180 100% 25%; /* Deep Teal for primary interactions */
+  --primary-foreground: 0 0% 100%;
   
-  --secondary: 40 10% 95%;
-  --secondary-foreground: 220 20% 25%;
+  --secondary: 0 0% 95%;
+  --secondary-foreground: 0 0% 25%;
   
-  --muted: 40 10% 95%;
-  --muted-foreground: 220 10% 45%;
+  --muted: 0 0% 95%;
+  --muted-foreground: 0 0% 45%;
   
-  --accent: 40 10% 92%;
-  --accent-foreground: 220 20% 15%;
+  --accent: 180 20% 95%; /* Subtle teal tint for accents */
+  --accent-foreground: 0 0% 15%;
   
-  --border: 220 10% 90%;
+  --border: 0 0% 90%;
   
-  --radius: 1rem; /* Softer, rounder corners */
+  --radius: 0.5rem; /* Crisper, utility-focused corners */
 
-  /* Domain Colors (Comfortable, legible contrasts) */
-  --martial-arts: 340 75% 55%; /* Softer Crimson */
-  --meditation: 205 85% 45%; /* Calming Cerulean */
-  --fitness: 155 65% 40%; /* Earthy Emerald */
-  --music: 260 65% 60%; /* Warm Lavender */
+  /* Domain Colors - Unified muted palette */
+  --martial-arts: 0 0% 45%; 
+  --meditation: 0 0% 45%; 
+  --fitness: 0 0% 45%; 
+  --music: 0 0% 45%; 
 
-  /* Status Colors */
-  --status-healthy: 155 65% 45%; /* Balanced Green */
-  --status-degraded: 35 90% 50%; /* Warm Amber */
-  --status-critical: 340 75% 55%; /* Soft Red */
+  /* Status Colors - Explicit semantics */
+  --status-healthy: 142 71% 35%; /* Restrained green */
+  --status-degraded: 35 90% 45%; /* Restrained amber */
+  --status-critical: 0 75% 50%; /* Restrained red */
 }
 
-/* DARK MODE - Softer, less bleak, twilight tones */
+/* DARK MODE - Neutral-first, aligned with Utility Fork spec */
 .dark {
-  --background: 225 15% 11%; /* Soft twilight grey/blue instead of pitch black */
-  --foreground: 210 20% 94%; /* Gentle off-white */
+  --background: 0 0% 7%; /* Deep neutral black */
+  --foreground: 0 0% 93%; /* Crisp off-white */
   
-  --card: 225 15% 15%; /* Slightly elevated from background */
-  --card-foreground: 210 20% 94%;
+  --card: 0 0% 10%; /* Subtle elevation */
+  --card-foreground: 0 0% 93%;
   
-  --popover: 225 15% 15%;
-  --popover-foreground: 210 20% 94%;
+  --popover: 0 0% 10%;
+  --popover-foreground: 0 0% 93%;
   
-  --primary: 210 20% 90%; /* Soft light grey for primary buttons */
-  --primary-foreground: 225 15% 15%;
+  --primary: 180 80% 40%; /* Vibrant Teal for primary interactions */
+  --primary-foreground: 0 0% 10%;
   
-  --secondary: 225 15% 20%;
-  --secondary-foreground: 210 20% 94%;
+  --secondary: 0 0% 15%;
+  --secondary-foreground: 0 0% 93%;
   
-  --muted: 225 15% 20%;
-  --muted-foreground: 215 15% 65%;
+  --muted: 0 0% 15%;
+  --muted-foreground: 0 0% 65%;
   
-  --accent: 225 15% 24%;
-  --accent-foreground: 210 20% 94%;
+  --accent: 180 20% 15%; /* Subtle teal tint for accents */
+  --accent-foreground: 0 0% 93%;
   
-  --border: 225 15% 22%; /* Gentle borders */
+  --border: 0 0% 18%; /* Crisp borders */
 
-  /* Domain Colors - Pastel tinted for dark mode comfort */
-  --martial-arts: 340 85% 70%; /* Soft Coral */
-  --meditation: 205 90% 65%; /* Soft Sky */
-  --fitness: 155 70% 60%; /* Soft Mint */
-  --music: 260 85% 75%; /* Soft Lilac */
+  /* Domain Colors - Unified muted palette */
+  --martial-arts: 0 0% 65%; 
+  --meditation: 0 0% 65%; 
+  --fitness: 0 0% 65%; 
+  --music: 0 0% 65%; 
 
-  /* Status Colors */
-  --status-healthy: 155 70% 60%; 
-  --status-degraded: 35 90% 65%; 
-  --status-critical: 340 85% 70%; 
+  /* Status Colors - Explicit semantics */
+  --status-healthy: 142 60% 50%; 
+  --status-degraded: 35 90% 55%; 
+  --status-critical: 0 80% 60%; 
 }
 
 @layer base {

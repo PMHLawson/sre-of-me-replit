@@ -15,30 +15,49 @@ interface AppState {
   sessions: Session[];
   addSession: (session: Omit<Session, 'id'>) => void;
   getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; };
-  getWeakestDomain: () => Domain;
+  getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
   toggleTheme: () => void;
+  demoState: 'default' | 'overperforming' | 'degraded' | 'mixed';
+  setDemoState: (state: 'default' | 'overperforming' | 'degraded' | 'mixed') => void;
 }
 
 // Generate some initial mock data
-const generateMockSessions = (): Session[] => {
+const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded' | 'mixed' = 'default'): Session[] => {
   const sessions: Session[] = [];
   const now = new Date();
   const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
   
-  // Create roughly 30 days of history
   for (let i = 0; i < 30; i++) {
     domains.forEach(domain => {
-      // Randomly skip some days to create realistic data
-      if (Math.random() > 0.3) {
+      let probability = 0.3; // Default 70% chance of skipping a day
+      let baseDuration = 30;
+      
+      if (scenario === 'overperforming') {
+        probability = 0.8; // 80% chance of hitting it
+        baseDuration = 45;
+      } else if (scenario === 'degraded') {
+        probability = 0.15; // 15% chance
+        baseDuration = 15;
+      } else if (scenario === 'mixed') {
+        if (domain === 'fitness' || domain === 'music') {
+          probability = 0.8;
+          baseDuration = 45;
+        } else {
+          probability = 0.1;
+          baseDuration = 15;
+        }
+      }
+
+      if (Math.random() < probability) {
         const date = new Date(now);
         date.setDate(date.getDate() - i);
-        date.setHours(Math.floor(Math.random() * 14) + 6); // Random time between 6am and 8pm
+        date.setHours(Math.floor(Math.random() * 14) + 6);
         
         sessions.push({
           id: `mock-${i}-${domain}`,
           domain,
-          durationMinutes: Math.floor(Math.random() * 60) + 15, // 15 to 75 mins
+          durationMinutes: Math.floor(Math.random() * 30) + baseDuration,
           timestamp: date.toISOString(),
         });
       }
@@ -81,8 +100,13 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
-      sessions: generateMockSessions(),
+      sessions: generateMockSessions('default'),
       theme: 'dark',
+      demoState: 'default',
+      setDemoState: (demoState) => set({ 
+        demoState, 
+        sessions: generateMockSessions(demoState) 
+      }),
       toggleTheme: () => {
         set((state) => {
           const newTheme = state.theme === 'dark' ? 'light' : 'dark';
@@ -109,16 +133,21 @@ export const useAppStore = create<AppState>()(
         
         let weakest: Domain = 'fitness';
         let lowestScore = 101;
+        let isDegradedOrCritical = false;
         
         domains.forEach(d => {
-          const { score } = calculateDomainStatus(sessions, d);
+          const { score, status } = calculateDomainStatus(sessions, d);
           if (score < lowestScore) {
             lowestScore = score;
             weakest = d;
           }
+          if (status === 'critical' || status === 'degraded') {
+            isDegradedOrCritical = true;
+          }
         });
         
-        return weakest;
+        // Return boolean to indicate if the weakest domain actually needs urgent attention
+        return { domain: weakest, isDegradedOrCritical };
       }
     }),
     {

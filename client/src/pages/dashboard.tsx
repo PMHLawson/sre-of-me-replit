@@ -33,10 +33,13 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
   
   const domainStatus = getDomainStatus(domain);
-  const weakest = getWeakestDomain();
+  const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
   
   const { score, trend, status, recentMinutes, targetMinutes } = domainStatus;
-  const isWeakest = weakest === domain;
+  
+  // Only apply aggressive visual signaling if the domain is ACTUALLY in trouble
+  // Just being the "lowest score" among 4 perfectly healthy domains shouldn't trigger red alerts.
+  const isTargetForRecovery = weakestDomain === domain && isDegradedOrCritical;
   
   const getStatusColor = () => {
     switch (status) {
@@ -58,36 +61,36 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   
   return (
     <Card 
-      className={`relative overflow-hidden cursor-pointer transition-all active:scale-[0.98] bg-card border-border/60 hover:bg-accent/30 shadow-sm ${isWeakest ? 'ring-1 ring-status-critical/30' : ''}`}
+      className={`relative overflow-hidden cursor-pointer transition-all active:scale-[0.98] bg-card border-border hover:bg-accent/50 shadow-sm ${isTargetForRecovery ? 'ring-1 ring-status-critical/50' : ''}`}
       onClick={() => setLocation(`/domain/${domain}`)}
       data-testid={`card-domain-${domain}`}
     >
-      <div className={`absolute top-0 left-0 w-1.5 h-full ${getStatusColor()} opacity-80`} />
+      <div className={`absolute top-0 left-0 w-1.5 h-full ${getStatusColor()} opacity-90`} />
       
-      {isWeakest && (
-        <div className="absolute top-3 right-3 flex h-2.5 w-2.5">
+      {isTargetForRecovery && (
+        <div className="absolute top-3 right-3 flex h-2 w-2" title="Priority Recovery Target">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-critical opacity-60"></span>
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-status-critical"></span>
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-status-critical"></span>
         </div>
       )}
 
       <CardContent className="p-4 pl-6 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <div className={`p-3.5 rounded-2xl bg-${domain}/10 text-${domain}`}>
-            <DomainIcon domain={domain} className="w-6 h-6" />
+          <div className="p-3 rounded-lg bg-muted text-foreground">
+            <DomainIcon domain={domain} className="w-5 h-5 opacity-70" />
           </div>
           <div>
-            <h3 className="font-semibold text-lg tracking-tight text-foreground">{title}</h3>
+            <h3 className="font-semibold text-base tracking-tight text-foreground">{title}</h3>
             <div className="flex items-center gap-2 mt-0.5">
-              <div className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <span className="font-mono text-foreground/80">{score}/100</span>
                 <span className="opacity-40 text-[10px]">•</span>
-                <span className="text-xs">{recentMinutes}m / {targetMinutes}m</span>
+                <span>{recentMinutes}m / {targetMinutes}m</span>
                 <span className="opacity-40 text-[10px]">•</span>
                 <span>
                   {trend === 'up' && <span className="text-status-healthy font-bold" title="Trending up vs history">↗</span>}
                   {trend === 'down' && <span className="text-status-critical font-bold" title="Trending down vs history">↘</span>}
-                  {trend === 'flat' && <span className="text-blue-500 font-bold" title="Holding steady">→</span>}
+                  {trend === 'flat' && <span className="text-foreground/50 font-bold" title="Holding steady">→</span>}
                 </span>
               </div>
             </div>
@@ -95,7 +98,7 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
         </div>
         
         <div className="text-muted-foreground/30 pr-2">
-          <ChevronRight className="w-5 h-5" />
+          <ChevronRight className="w-4 h-4" />
         </div>
       </CardContent>
     </Card>
@@ -140,19 +143,25 @@ export default function Dashboard() {
     let sysStatus = 'Healthy';
     let sysColor = 'text-status-healthy';
     let sysBg = 'bg-status-healthy/10';
+    let rationale = 'All domains are currently tracking well against targets. Surplus capacity is available.';
     
     if (criticalCount > 0) {
-      sysStatus = 'Critical';
+      sysStatus = 'Critical Deficit';
       sysColor = 'text-status-critical';
       sysBg = 'bg-status-critical/10';
+      rationale = `${criticalCount} domain(s) have fallen critically behind baseline. Shed optional load to focus on recovery.`;
     } else if (degradedCount > 0) {
       sysStatus = 'Degraded';
       sysColor = 'text-status-degraded';
       sysBg = 'bg-status-degraded/10';
+      rationale = `${degradedCount} domain(s) are tracking behind baseline. Time-box demands to prevent further decay.`;
     }
     
-    return { score: average, status: sysStatus, color: sysColor, bg: sysBg };
+    return { score: average, status: sysStatus, color: sysColor, bg: sysBg, rationale };
   }, [sessions]); // Re-calculate when sessions change
+
+  const demoState = useAppStore(state => state.demoState);
+  const setDemoState = useAppStore(state => state.setDemoState);
 
   return (
     <div className="min-h-screen bg-background text-foreground pb-24 font-sans transition-colors duration-300">
@@ -184,26 +193,47 @@ export default function Dashboard() {
         {/* Composite Health Overview */}
         <div className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden">
           <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/5 rounded-full blur-3xl"></div>
-          <div className="flex items-center justify-between relative z-10">
-            <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">System Health</div>
-              <div className="flex items-center gap-3">
-                <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
-                  {systemHealth.score}
-                </span>
+          <div className="flex flex-col relative z-10">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">System Health</div>
+                <div className="flex items-center gap-3">
+                  <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
+                    {systemHealth.score}
+                  </span>
+                </div>
               </div>
-              <div className="text-xs text-muted-foreground mt-2 opacity-80 font-medium">Aggregate of 4 domain vitals</div>
+              <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
+                {systemHealth.status}
+              </div>
             </div>
-            <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
-              {systemHealth.status}
+            
+            <div className="pt-4 border-t border-border/40">
+              <p className="text-sm text-foreground/80 leading-relaxed font-medium">
+                {systemHealth.rationale}
+              </p>
             </div>
           </div>
         </div>
       </header>
 
       <main className="px-4 space-y-4">
-        <div className="px-2 mb-2">
+        <div className="px-2 mb-2 flex items-center justify-between">
           <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Domains</h2>
+          
+          {/* Validation Data Control */}
+          <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg border border-border/50">
+            <select 
+              value={demoState}
+              onChange={(e) => setDemoState(e.target.value as any)}
+              className="text-[10px] font-mono uppercase bg-transparent text-muted-foreground font-bold focus:outline-none cursor-pointer py-1 px-2"
+            >
+              <option value="default">Data: Standard</option>
+              <option value="overperforming">Data: Healthy</option>
+              <option value="degraded">Data: Degraded</option>
+              <option value="mixed">Data: Mixed</option>
+            </select>
+          </div>
         </div>
         <div className="grid gap-3">
           <DomainCard domain="martial-arts" title="Martial Arts" />

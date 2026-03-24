@@ -92,8 +92,8 @@ export default function DomainDetail() {
             <ArrowLeft className="w-6 h-6" />
           </button>
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl bg-${domain}/10 text-${domain}`}>
-              <DomainIcon domain={domain} className="w-5 h-5" />
+            <div className={`p-2 rounded-xl bg-muted text-foreground`}>
+              <DomainIcon domain={domain} className="w-5 h-5 opacity-70" />
             </div>
             <h1 className="text-xl font-bold tracking-tight">{domainName}</h1>
           </div>
