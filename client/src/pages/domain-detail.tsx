@@ -28,7 +28,7 @@ export default function DomainDetail() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   
   const domainSessions = sessions.filter(s => s.domain === domain);
-  const { score, status, trend } = getDomainStatus(domain);
+  const { score, status, trend, recentMinutes, targetMinutes } = getDomainStatus(domain);
   
   // Generate last 7 days data for chart
   const chartData = Array.from({ length: 7 }).map((_, i) => {
@@ -102,26 +102,37 @@ export default function DomainDetail() {
 
       <main className="px-4 py-6 space-y-8">
         {/* Status Header */}
-        <section className="flex items-center justify-between">
-          <div>
-            <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Current Status</div>
-            <div className="flex items-center gap-3">
-              <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor()}`}>
-                {score}
-              </span>
-              <div className={`px-3 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wide ${getStatusBgColor()} ${getStatusColor()}`}>
-                {status}
+        <section className="bg-card border border-border/60 rounded-3xl p-6 shadow-sm">
+          <div className="flex items-start justify-between mb-5">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Current Status</div>
+              <div className="flex items-center gap-3">
+                <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor()}`}>
+                  {score}
+                </span>
+                <div className={`px-3 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wide ${getStatusBgColor()} ${getStatusColor()}`}>
+                  {status}
+                </div>
+              </div>
+            </div>
+            
+            <div className="text-right">
+              <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Trend</div>
+              <div className="flex items-center justify-end gap-1.5 font-bold text-xl">
+                {trend === 'up' && <><span className="text-status-healthy">↗</span> Up</>}
+                {trend === 'down' && <><span className="text-status-critical">↘</span> Down</>}
+                {trend === 'flat' && <><span className="text-blue-500">→</span> Flat</>}
               </div>
             </div>
           </div>
           
-          <div className="text-right">
-            <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Trend</div>
-            <div className="flex items-center justify-end gap-1.5 font-bold text-xl">
-              {trend === 'up' && <><span className="text-status-healthy">↗</span> Up</>}
-              {trend === 'down' && <><span className="text-status-critical">↘</span> Down</>}
-              {trend === 'flat' && <><span className="text-blue-500">→</span> Flat</>}
-            </div>
+          <div className="pt-4 border-t border-border/40">
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              <strong className="text-foreground">Why this score?</strong> You have logged <strong className="text-foreground">{recentMinutes} minutes</strong> in the past 7 days against a baseline target of <strong className="text-foreground">{targetMinutes} minutes</strong>. 
+              {trend === 'up' ? ' This represents an improvement over your historical average.' : 
+               trend === 'down' ? ' This represents a decline compared to your historical average.' : 
+               ' Your engagement is holding steady compared to your historical average.'}
+            </p>
           </div>
         </section>
 

@@ -14,7 +14,7 @@ export interface Session {
 interface AppState {
   sessions: Session[];
   addSession: (session: Omit<Session, 'id'>) => void;
-  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical' };
+  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; };
   getWeakestDomain: () => Domain;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
@@ -64,7 +64,8 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
   const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   const olderMinutesAvg = olderSessions.reduce((sum, s) => sum + s.durationMinutes, 0) / (23 / 7); // Avg per week in the older period
   
-  const score = Math.min(100, Math.round((recentMinutes / 120) * 100));
+  const targetMinutes = 120;
+  const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
   
   let trend: 'up' | 'down' | 'flat' = 'flat';
   if (recentMinutes > olderMinutesAvg * 1.2) trend = 'up';
@@ -74,7 +75,7 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
   if (score < 40) status = 'critical';
   else if (score < 70) status = 'degraded';
   
-  return { score, trend, status };
+  return { score, trend, status, recentMinutes, targetMinutes };
 };
 
 export const useAppStore = create<AppState>()(

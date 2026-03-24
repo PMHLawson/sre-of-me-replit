@@ -13,21 +13,30 @@ export default function Decide() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   
   const weakest = getWeakestDomain();
-  const { status, score } = getDomainStatus(weakest);
+  const weakestStatus = getDomainStatus(weakest);
+  
+  // Aggregate data for reasoning engine
+  const domains: ('martial-arts' | 'meditation' | 'fitness' | 'music')[] = ['martial-arts', 'meditation', 'fitness', 'music'];
+  const allStatuses = domains.map(d => ({ domain: d, ...getDomainStatus(d) }));
+  const criticalDomains = allStatuses.filter(s => s.status === 'critical');
+  const degradedDomains = allStatuses.filter(s => s.status === 'degraded');
+  
+  const isSystemCritical = criticalDomains.length > 0;
+  const isSystemDegraded = degradedDomains.length > 0;
+  
+  const formatDomainsList = (doms: typeof allStatuses) => 
+    doms.map(d => d.domain.replace('-', ' ')).join(', ');
   
   // Logic engine for decisions
   const evaluate = () => {
     if (!priority) return null;
     
-    const isSystemCritical = status === 'critical' || score < 50;
-    const isSystemDegraded = status === 'degraded' || score < 75;
-    
     if (priority === 'P1') {
       return {
         recommendation: 'Accept',
-        action: 'Accept and Execute',
+        action: 'Immediate Execution Required',
         state: 'Override',
-        reason: 'P1 demands bypass normal system protection policies.',
+        reason: `Priority 1 overrides all current system protections. Accept the demand, but note that this will further delay recovery of ${weakest.replace('-',' ')} which is currently at ${weakestStatus.score}% health.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -37,18 +46,28 @@ export default function Decide() {
       if (isSystemCritical) {
         return {
           recommendation: 'Decline / Defer',
-          action: `Prioritize ${weakest.replace('-', ' ')} recovery`,
-          state: 'Critical Protection',
-          reason: `System is critically degraded (${weakest}). P2 demands cannot be safely absorbed.`,
+          action: `Protect schedule. Recover ${weakest.replace('-', ' ')}.`,
+          state: 'Active Load Shedding',
+          reason: `System is in a protective state. ${criticalDomains.length} domains (including ${weakest.replace('-', ' ')}) are in critical condition. P2 demands introduce an unacceptable risk of systemic failure right now.`,
+          color: 'text-status-degraded',
+          bg: 'bg-status-degraded/10'
+        };
+      }
+      if (isSystemDegraded) {
+        return {
+          recommendation: 'Accept with Constraints',
+          action: 'Strictly time-box the execution.',
+          state: 'Degraded Capacity',
+          reason: `System is degraded in ${formatDomainsList(degradedDomains)}. P2 can be absorbed, but strict time-boxing is required to ensure recovery tasks aren't cannibalized.`,
           color: 'text-status-degraded',
           bg: 'bg-status-degraded/10'
         };
       }
       return {
         recommendation: 'Accept',
-        action: 'Accept with monitoring',
-        state: 'Safe to absorb',
-        reason: 'System health is adequate to absorb P2 demands.',
+        action: 'Execute normally.',
+        state: 'Absorbable Capacity',
+        reason: 'System health is strong across all domains. Sufficient resilience exists to absorb P2 demands without destabilizing core routines.',
         color: 'text-status-healthy',
         bg: 'bg-status-healthy/10'
       };
@@ -58,9 +77,9 @@ export default function Decide() {
     if (isSystemCritical || isSystemDegraded) {
       return {
         recommendation: 'Decline',
-        action: 'Reject immediately',
-        state: 'Active Shedding',
-        reason: 'System is degraded. Load shedding all P3 demands.',
+        action: 'Reject immediately without guilt.',
+        state: 'Capacity Exhausted',
+        reason: `System is currently running a deficit (weakest: ${weakest.replace('-', ' ')}). All P3 (optional) demands must be shed to protect baseline recovery.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -68,9 +87,9 @@ export default function Decide() {
     
     return {
       recommendation: 'Evaluate',
-      action: 'Evaluate vs Optional',
-      state: 'Healthy',
-      reason: 'System is healthy. Accept only if it aligns with goals.',
+      action: 'Verify alignment with core goals.',
+      state: 'Surplus Capacity',
+      reason: 'System is healthy and can absorb this. However, as a P3, only accept if it genuinely provides high value or joy, otherwise preserve the surplus capacity.',
       color: 'text-blue-500',
       bg: 'bg-blue-500/10'
     };

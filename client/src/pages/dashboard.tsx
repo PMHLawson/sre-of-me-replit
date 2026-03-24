@@ -35,7 +35,7 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   const domainStatus = getDomainStatus(domain);
   const weakest = getWeakestDomain();
   
-  const { score, trend, status } = domainStatus;
+  const { score, trend, status, recentMinutes, targetMinutes } = domainStatus;
   const isWeakest = weakest === domain;
   
   const getStatusColor = () => {
@@ -80,11 +80,14 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
             <h3 className="font-semibold text-lg tracking-tight text-foreground">{title}</h3>
             <div className="flex items-center gap-2 mt-0.5">
               <div className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-                <span className="font-mono text-foreground/80">{score}</span>
+                <span className="font-mono text-foreground/80">{score}/100</span>
+                <span className="opacity-40 text-[10px]">•</span>
+                <span className="text-xs">{recentMinutes}m / {targetMinutes}m</span>
+                <span className="opacity-40 text-[10px]">•</span>
                 <span>
-                  {trend === 'up' && <span className="text-status-healthy font-bold">↗</span>}
-                  {trend === 'down' && <span className="text-status-critical font-bold">↘</span>}
-                  {trend === 'flat' && <span className="text-blue-500 font-bold">→</span>}
+                  {trend === 'up' && <span className="text-status-healthy font-bold" title="Trending up vs history">↗</span>}
+                  {trend === 'down' && <span className="text-status-critical font-bold" title="Trending down vs history">↘</span>}
+                  {trend === 'flat' && <span className="text-blue-500 font-bold" title="Holding steady">→</span>}
                 </span>
               </div>
             </div>
@@ -189,6 +192,7 @@ export default function Dashboard() {
                   {systemHealth.score}
                 </span>
               </div>
+              <div className="text-xs text-muted-foreground mt-2 opacity-80 font-medium">Aggregate of 4 domain vitals</div>
             </div>
             <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
               {systemHealth.status}
