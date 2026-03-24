@@ -1,0 +1,21 @@
+{
+  "name": "SRE of Me",
+  "short_name": "SRE-of-Me",
+  "description": "Personal observability and decision support tool for life domains.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
