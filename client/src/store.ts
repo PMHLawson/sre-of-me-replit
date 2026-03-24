@@ -16,6 +16,8 @@ interface AppState {
   addSession: (session: Omit<Session, 'id'>) => void;
   getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical' };
   getWeakestDomain: () => Domain;
+  theme: 'dark' | 'light';
+  toggleTheme: () => void;
 }
 
 // Generate some initial mock data
@@ -79,6 +81,17 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       sessions: generateMockSessions(),
+      theme: 'dark',
+      toggleTheme: () => {
+        set((state) => {
+          const newTheme = state.theme === 'dark' ? 'light' : 'dark';
+          // Update the DOM class for tailwind
+          const root = window.document.documentElement;
+          root.classList.remove('light', 'dark');
+          root.classList.add(newTheme);
+          return { theme: newTheme };
+        });
+      },
       addSession: (session) => 
         set((state) => ({
           sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]

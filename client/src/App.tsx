@@ -8,6 +8,7 @@ import Dashboard from "@/pages/dashboard";
 import LogSession from "@/pages/log-session";
 import Decide from "@/pages/decide";
 import History from "@/pages/history";
+import DomainDetail from "@/pages/domain-detail";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -17,6 +18,7 @@ function Router() {
       <Route path="/log" component={LogSession}/>
       <Route path="/decide" component={Decide}/>
       <Route path="/history" component={History}/>
+      <Route path="/domain/:domain" component={DomainDetail}/>
       <Route component={NotFound} />
     </Switch>
   );

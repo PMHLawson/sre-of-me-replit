@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useLocation } from 'wouter';
-import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check } from 'lucide-react';
 import { useAppStore } from '@/store';
 
 type Priority = 'P1' | 'P2' | 'P3' | null;
@@ -79,11 +79,11 @@ export default function Decide() {
   const result = evaluate();
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans">
+    <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-200">
       <header className="px-4 py-4 flex items-center gap-4 sticky top-0 bg-background/80 backdrop-blur-md">
         <button 
           onClick={() => setLocation('/')}
-          className="p-2 -ml-2 rounded-full active:bg-white/5"
+          className="p-2 -ml-2 rounded-full active:bg-black/5 dark:active:bg-white/5"
         >
           <ArrowLeft className="w-6 h-6" />
         </button>
@@ -108,7 +108,7 @@ export default function Decide() {
                 className={`w-full p-4 rounded-xl border text-left transition-all flex items-center justify-between ${
                   priority === p.id 
                     ? 'border-primary bg-primary/5 text-foreground ring-1 ring-primary/20' 
-                    : 'border-white/5 bg-card text-muted-foreground'
+                    : 'border-border/50 bg-card text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5'
                 }`}
                 data-testid={`button-priority-${p.id}`}
               >
@@ -124,8 +124,8 @@ export default function Decide() {
 
         {result && (
           <section className="animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div className={`rounded-2xl border border-white/5 p-6 space-y-6 ${result.bg} bg-opacity-50`}>
-              <div className="flex items-start justify-between border-b border-white/10 pb-4">
+            <div className={`rounded-2xl border border-black/5 dark:border-white/5 p-6 space-y-6 ${result.bg} bg-opacity-50 dark:bg-opacity-20`}>
+              <div className="flex items-start justify-between border-b border-black/10 dark:border-white/10 pb-4">
                 <div>
                   <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground mb-1">Recommendation</div>
                   <div className={`text-3xl font-bold tracking-tight ${result.color}`}>
@@ -140,17 +140,17 @@ export default function Decide() {
               <div className="space-y-4">
                 <div>
                   <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground mb-1">System State</div>
-                  <div className="font-medium">{result.state}</div>
+                  <div className="font-medium text-foreground">{result.state}</div>
                 </div>
                 
                 <div>
                   <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground mb-1">Rationale</div>
-                  <div className="text-sm leading-relaxed">{result.reason}</div>
+                  <div className="text-sm leading-relaxed text-foreground/90">{result.reason}</div>
                 </div>
                 
                 <div className="pt-2">
                   <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground mb-1">Next Action</div>
-                  <div className="font-medium bg-black/20 p-3 rounded-lg border border-white/5">
+                  <div className="font-medium bg-black/5 dark:bg-black/20 p-3 rounded-lg border border-black/5 dark:border-white/5 text-foreground">
                     {result.action}
                   </div>
                 </div>
