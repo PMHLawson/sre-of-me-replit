@@ -14,7 +14,7 @@ export interface Session {
 interface AppState {
   sessions: Session[];
   addSession: (session: Omit<Session, 'id'>) => void;
-  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; };
+  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; previousWeekMinutes: number; };
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
   toggleTheme: () => void;
@@ -66,36 +66,48 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
   return sessions;
 };
 
-// Helper function to calculate domain status
-const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  
-  const domainSessions = sessions.filter(s => s.domain === domain);
-  const recentSessions = domainSessions.filter(s => new Date(s.timestamp) >= sevenDaysAgo);
-  const olderSessions = domainSessions.filter(s => {
-    const date = new Date(s.timestamp);
-    return date >= thirtyDaysAgo && date < sevenDaysAgo;
-  });
-  
-  // Simple scoring: minutes per week. Target: ~120 mins/week (score 100)
-  const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
-  const olderMinutesAvg = olderSessions.reduce((sum, s) => sum + s.durationMinutes, 0) / (23 / 7); // Avg per week in the older period
-  
-  const targetMinutes = 120;
-  const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
-  
-  let trend: 'up' | 'down' | 'flat' = 'flat';
-  if (recentMinutes > olderMinutesAvg * 1.2) trend = 'up';
-  else if (recentMinutes < olderMinutesAvg * 0.8) trend = 'down';
-  
-  let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
-  if (score < 40) status = 'critical';
-  else if (score < 70) status = 'degraded';
-  
-  return { score, trend, status, recentMinutes, targetMinutes };
-};
+  // Helper function to calculate domain status
+  const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
+    const now = new Date();
+    // Normalize to midnight for consistent comparisons
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    // We want the last 7 complete days including today
+    const sevenDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
+    // The previous 7 days before that for comparison
+    const fourteenDaysAgo = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000);
+    
+    const domainSessions = sessions.filter(s => s.domain === domain);
+    
+    const recentSessions = domainSessions.filter(s => {
+      const date = new Date(s.timestamp);
+      return date >= sevenDaysAgo;
+    });
+    
+    const previousWeekSessions = domainSessions.filter(s => {
+      const date = new Date(s.timestamp);
+      return date >= fourteenDaysAgo && date < sevenDaysAgo;
+    });
+    
+    // Target is 120 mins/week (~17 mins/day)
+    const targetMinutes = 120;
+    
+    const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+    const previousWeekMinutes = previousWeekSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+    
+    const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
+    
+    let trend: 'up' | 'down' | 'flat' = 'flat';
+    // Compare exact 7-day windows against each other
+    if (recentMinutes > previousWeekMinutes + 15) trend = 'up';
+    else if (recentMinutes < previousWeekMinutes - 15) trend = 'down';
+    
+    let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
+    if (score < 40) status = 'critical';
+    else if (score < 70) status = 'degraded';
+    
+    return { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes };
+  };
 
 export const useAppStore = create<AppState>()(
   persist(

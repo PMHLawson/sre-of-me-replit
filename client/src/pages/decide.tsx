@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useLocation } from 'wouter';
-import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check, Info } from 'lucide-react';
 import { useAppStore } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 
@@ -21,9 +21,11 @@ export default function Decide() {
   const allStatuses = domains.map(d => ({ domain: d, ...getDomainStatus(d) }));
   const criticalDomains = allStatuses.filter(s => s.status === 'critical');
   const degradedDomains = allStatuses.filter(s => s.status === 'degraded');
+  const trendingDownDomains = allStatuses.filter(s => s.trend === 'down');
   
   const isSystemCritical = criticalDomains.length > 0;
   const isSystemDegraded = degradedDomains.length > 0;
+  const isSystemLosingMomentum = trendingDownDomains.length > 1; // 2+ domains dropping
   
   const formatDomainsList = (doms: typeof allStatuses) => 
     doms.map(d => d.domain.replace('-', ' ')).join(', ');
@@ -37,7 +39,7 @@ export default function Decide() {
         recommendation: 'Accept',
         action: 'Immediate Execution Required',
         state: 'Override',
-        reason: `Priority 1 overrides all current system protections. Accept the demand, but note that this will further delay recovery of ${weakestDomain ? weakestDomain.replace('-',' ') : 'the system'} which is currently at ${weakestStatus?.score || 0}% health.`,
+        reason: `Priority 1 demands override all system protections. Accept the demand immediately. Note that this will consume capacity and further delay recovery of vulnerable domains like ${weakestDomain ? weakestDomain.replace('-',' ') : 'your weakest areas'}.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -49,7 +51,7 @@ export default function Decide() {
           recommendation: 'Decline / Defer',
           action: `Protect schedule. Recover ${weakestDomain ? weakestDomain.replace('-', ' ') : 'critical domains'}.`,
           state: 'Active Load Shedding',
-          reason: `System is in a protective state. ${criticalDomains.length} domains (including ${weakestDomain ? weakestDomain.replace('-', ' ') : 'critical areas'}) are in critical condition. P2 demands introduce an unacceptable risk of systemic failure right now.`,
+          reason: `System is in a protective state. Core maintenance has failed in ${formatDomainsList(criticalDomains)}. A P2 demand introduces unacceptable risk of systemic failure. You must shed this load to prioritize recovery.`,
           color: 'text-status-degraded',
           bg: 'bg-status-degraded/10'
         };
@@ -59,16 +61,26 @@ export default function Decide() {
           recommendation: 'Accept with Constraints',
           action: 'Strictly time-box the execution.',
           state: 'Degraded Capacity',
-          reason: `System is degraded in ${formatDomainsList(degradedDomains)}. P2 can be absorbed, but strict time-boxing is required to ensure recovery tasks aren't cannibalized.`,
+          reason: `System is currently strained due to slippage in ${formatDomainsList(degradedDomains)}. You can absorb this P2, but you must strictly time-box it to ensure your scheduled recovery tasks aren't cannibalized today.`,
           color: 'text-status-degraded',
           bg: 'bg-status-degraded/10'
+        };
+      }
+      if (isSystemLosingMomentum) {
+        return {
+          recommendation: 'Accept but Monitor',
+          action: 'Execute, but watch energy levels.',
+          state: 'Slowing Momentum',
+          reason: `System is technically healthy, but momentum is dropping in ${formatDomainsList(trendingDownDomains)}. You can accept this P2, but be aware that systemic fatigue is building. Avoid making this a recurring commitment.`,
+          color: 'text-status-healthy',
+          bg: 'bg-status-healthy/10'
         };
       }
       return {
         recommendation: 'Accept',
         action: 'Execute normally.',
         state: 'Absorbable Capacity',
-        reason: 'System health is strong across all domains. Sufficient resilience exists to absorb P2 demands without destabilizing core routines.',
+        reason: 'System health is strong and stable across all domains. Sufficient baseline resilience exists to comfortably absorb P2 demands without destabilizing your core routines.',
         color: 'text-status-healthy',
         bg: 'bg-status-healthy/10'
       };
@@ -80,9 +92,20 @@ export default function Decide() {
         recommendation: 'Decline',
         action: 'Reject immediately without guilt.',
         state: 'Capacity Exhausted',
-        reason: `System is currently running a deficit (weakest: ${weakestDomain ? weakestDomain.replace('-', ' ') : 'system'}). All P3 (optional) demands must be shed to protect baseline recovery.`,
+        reason: `System is currently running a deficit (primary vulnerability: ${weakestDomain ? weakestDomain.replace('-', ' ') : 'baseline maintenance'}). All P3 (optional) demands must be instantly shed to protect baseline recovery and prevent burnout.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
+      };
+    }
+    
+    if (isSystemLosingMomentum) {
+       return {
+        recommendation: 'Decline / Defer',
+        action: 'Reject to protect momentum.',
+        state: 'Preserving Energy',
+        reason: `While the system is technically healthy, downward trends in ${formatDomainsList(trendingDownDomains)} indicate dropping energy. P3 tasks should be deferred until momentum stabilizes across the board.`,
+        color: 'text-status-degraded',
+        bg: 'bg-status-degraded/10'
       };
     }
     
@@ -90,7 +113,7 @@ export default function Decide() {
       recommendation: 'Evaluate',
       action: 'Verify alignment with core goals.',
       state: 'Surplus Capacity',
-      reason: 'System is healthy and can absorb this. However, as a P3, only accept if it genuinely provides high value or joy, otherwise preserve the surplus capacity.',
+      reason: 'System is robust and running a surplus. You have the capacity to absorb this. However, because it is a P3, only accept it if it genuinely provides high value, joy, or strategic leverage.',
       color: 'text-blue-500',
       bg: 'bg-blue-500/10'
     };
@@ -99,7 +122,7 @@ export default function Decide() {
   const result = evaluate();
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300">
+    <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300 pb-24">
       <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl border-b border-border/40 z-10">
         <div className="flex items-center gap-4">
           <button 
@@ -116,22 +139,30 @@ export default function Decide() {
         <ThemeToggle />
       </header>
 
-      <main className="px-4 py-8 space-y-10">
+      <main className="px-4 py-6 space-y-8">
+        
+        {/* Context Hint */}
+        <div className="bg-muted/50 rounded-2xl p-4 border border-border/50 flex gap-3 text-sm text-muted-foreground">
+          <Info className="w-5 h-5 shrink-0 text-foreground/50" />
+          <p className="leading-relaxed">
+            Select the priority level of the incoming demand. The engine will evaluate it against your <strong className="text-foreground">current system state, deficits, and trends</strong> to generate a reliable response recommendation.
+          </p>
+        </div>
+
         <section>
-          <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-4 pl-1">Classify Demand</h2>
           <div className="space-y-3">
             {[
-              { id: 'P1', label: 'Priority 1', desc: 'Critical, unmovable, severe consequence' },
-              { id: 'P2', label: 'Priority 2', desc: 'Important, time-sensitive' },
-              { id: 'P3', label: 'Priority 3', desc: 'Optional, deferrable, favors' }
+              { id: 'P1', label: 'Priority 1', desc: 'Critical, unmovable, severe consequence if dropped' },
+              { id: 'P2', label: 'Priority 2', desc: 'Important, time-sensitive, core work' },
+              { id: 'P3', label: 'Priority 3', desc: 'Optional, deferrable, favors, "nice to have"' }
             ].map(p => (
               <button
                 key={p.id}
                 onClick={() => setPriority(p.id as Priority)}
                 className={`w-full p-5 rounded-3xl border text-left transition-all flex items-center justify-between shadow-sm active:scale-[0.98] ${
                   priority === p.id 
-                    ? 'border-primary bg-primary/5 text-foreground ring-2 ring-primary/20' 
-                    : 'border-border/60 bg-card text-muted-foreground hover:bg-accent/30'
+                    ? 'border-primary bg-primary/5 text-foreground ring-1 ring-primary/30' 
+                    : 'border-border/50 bg-card text-muted-foreground hover:bg-accent/30'
                 }`}
                 data-testid={`button-priority-${p.id}`}
               >
@@ -156,19 +187,16 @@ export default function Decide() {
                   </div>
                 </div>
                 {result.recommendation === 'Accept' && <ShieldCheck className="w-10 h-10 opacity-90" />}
+                {result.recommendation.includes('Accept but') && <ShieldCheck className="w-10 h-10 opacity-90" />}
                 {result.recommendation.includes('Decline') && <AlertTriangle className="w-10 h-10 opacity-90" />}
                 {result.recommendation === 'Evaluate' && <HelpCircle className="w-10 h-10 opacity-90" />}
               </div>
               
               <div className="space-y-5">
                 <div>
-                  <div className="text-xs font-bold uppercase tracking-widest opacity-70 mb-1.5">System State</div>
-                  <div className="font-semibold text-lg text-foreground">{result.state}</div>
-                </div>
-                
-                <div>
-                  <div className="text-xs font-bold uppercase tracking-widest opacity-70 mb-1.5">Rationale</div>
-                  <div className="text-base leading-relaxed text-foreground/90">{result.reason}</div>
+                  <div className="text-xs font-bold uppercase tracking-widest opacity-70 mb-1.5">System State Justification</div>
+                  <div className="font-semibold text-lg text-foreground mb-1">{result.state}</div>
+                  <div className="text-base leading-relaxed text-foreground/80">{result.reason}</div>
                 </div>
                 
                 <div className="pt-2">

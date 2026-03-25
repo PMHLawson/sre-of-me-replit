@@ -119,11 +119,16 @@ export default function DomainDetail() {
             </div>
             
             <div className="text-right">
-              <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Trend</div>
-              <div className="flex items-center justify-end gap-1.5 font-bold text-xl">
-                {trend === 'up' && <><span className="text-status-healthy">↗</span> Up</>}
-                {trend === 'down' && <><span className="text-status-critical">↘</span> Down</>}
-                {trend === 'flat' && <><span className="text-blue-500">→</span> Flat</>}
+              <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Vs. Last Week</div>
+              <div className="flex flex-col items-end">
+                <div className="flex items-center justify-end gap-1.5 font-bold text-xl">
+                  {trend === 'up' && <><span className="text-status-healthy">↗</span> Up</>}
+                  {trend === 'down' && <><span className="text-status-critical">↘</span> Down</>}
+                  {trend === 'flat' && <><span className="text-blue-500">→</span> Flat</>}
+                </div>
+                <div className="text-xs font-medium text-muted-foreground mt-1">
+                  ({status.recentMinutes}m vs {status.previousWeekMinutes}m)
+                </div>
               </div>
             </div>
           </div>
@@ -131,9 +136,9 @@ export default function DomainDetail() {
           <div className="pt-4 border-t border-border/40">
             <p className="text-sm text-muted-foreground leading-relaxed">
               <strong className="text-foreground">Why this score?</strong> You have logged <strong className="text-foreground">{recentMinutes} minutes</strong> in the past 7 days against a baseline target of <strong className="text-foreground">{targetMinutes} minutes</strong>. 
-              {trend === 'up' ? ' This represents an improvement over your historical average.' : 
-               trend === 'down' ? ' This represents a decline compared to your historical average.' : 
-               ' Your engagement is holding steady compared to your historical average.'}
+              {trend === 'up' ? ` This represents an improvement over the ${status.previousWeekMinutes} minutes logged in the week prior.` : 
+               trend === 'down' ? ` This represents a decline compared to the ${status.previousWeekMinutes} minutes logged in the week prior.` : 
+               ` Your engagement is holding steady compared to the ${status.previousWeekMinutes} minutes logged in the week prior.`}
             </p>
           </div>
         </section>
