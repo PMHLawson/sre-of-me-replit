@@ -66,22 +66,24 @@ export default function SystemHealth() {
     
     const insights = [
       {
-        title: "Current Vulnerability",
+        title: "Current Vulnerability & Load",
         desc: weakestDomain.status !== 'healthy' 
-          ? `${formatDomainName(weakestDomain.domain)} is currently ${weakestDomain.status}. This is the primary limiting factor for your overall system capacity.`
-          : `While healthy overall, ${formatDomainName(weakestDomain.domain)} is your relative weak point. Maintain current efforts to prevent slippage.`
+          ? `${formatDomainName(weakestDomain.domain)} is currently ${weakestDomain.status} (${weakestDomain.recentMinutes}m). This is your system's bottleneck. Focus available energy here.`
+          : `System is healthy. ${formatDomainName(weakestDomain.domain)} is your relative weak point but remains above baseline. Maintain current efforts.`
       },
       {
-        title: "Momentum",
+        title: "Momentum & Trajectory",
         desc: trendingDownCount === 0 
-          ? "You have zero domains trending downward compared to last week. Excellent consistency." 
+          ? "All domains are trending flat or positive compared to the previous 7 days. You are successfully building surplus capacity." 
           : trendingDownCount > 2 
-            ? `Warning: ${trendingDownCount} domains are trending down compared to last week. This indicates widespread system fatigue.` 
-            : `${trendingUpCount} domains are trending up, while ${trendingDownCount} are slowing down. Mixed momentum.`
+            ? `Warning: ${trendingDownCount} domains are trending down vs the previous 7 days. Widespread system fatigue reduces your ability to absorb new demands.` 
+            : `${trendingUpCount} domains are trending up, while ${trendingDownCount} are slowing down. Protect domains with downward trajectories.`
       },
       {
-        title: "Strongest Asset",
-        desc: `${formatDomainName(topDomain.domain)} is anchoring the system at ${topDomain.score} health. It provides surplus resilience.`
+        title: "Decision Impact",
+        desc: sysStatus === 'Healthy' 
+          ? "You have the capacity to accept optional (P3) tasks, but preserve enough energy to maintain your current positive momentum."
+          : "You must decline optional demands (P3) and strictly time-box core demands (P2) until your baseline is recovered."
       }
     ];
     
@@ -195,10 +197,10 @@ export default function SystemHealth() {
                     <div className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-widest font-bold ${getStatusColor(d.status)}`}>
                       {d.status}
                     </div>
-                    <div className="flex items-center gap-1 text-xs font-bold text-muted-foreground" title={`${d.recentMinutes}m this week vs ${d.previousWeekMinutes}m last week`}>
-                      {d.trend === 'up' && <span className="text-status-healthy flex items-center"><TrendingUp className="w-3 h-3 mr-1"/> Up</span>}
-                      {d.trend === 'down' && <span className="text-status-critical flex items-center"><TrendingDown className="w-3 h-3 mr-1"/> Down</span>}
-                      {d.trend === 'flat' && <span className="text-foreground/50 flex items-center"><Minus className="w-3 h-3 mr-1"/> Flat</span>}
+                    <div className="flex items-center gap-1 text-[11px] font-bold text-muted-foreground" title={`${d.recentMinutes}m this week vs ${d.previousWeekMinutes}m last week`}>
+                      {d.trend === 'up' && <span className="text-status-healthy flex items-center"><TrendingUp className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
+                      {d.trend === 'down' && <span className="text-status-critical flex items-center"><TrendingDown className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
+                      {d.trend === 'flat' && <span className="text-foreground/50 flex items-center"><Minus className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
                     </div>
                   </div>
                 </div>

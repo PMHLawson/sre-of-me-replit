@@ -99,8 +99,8 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
     
     let trend: 'up' | 'down' | 'flat' = 'flat';
     // Compare exact 7-day windows against each other
-    if (recentMinutes > previousWeekMinutes + 15) trend = 'up';
-    else if (recentMinutes < previousWeekMinutes - 15) trend = 'down';
+    if (recentMinutes > previousWeekMinutes) trend = 'up';
+    else if (recentMinutes < previousWeekMinutes) trend = 'down';
     
     let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
     if (score < 40) status = 'critical';

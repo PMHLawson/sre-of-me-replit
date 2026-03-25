@@ -39,7 +39,7 @@ export default function Decide() {
         recommendation: 'Accept',
         action: 'Immediate Execution Required',
         state: 'Override',
-        reason: `Priority 1 demands override all system protections. Accept the demand immediately. Note that this will consume capacity and further delay recovery of vulnerable domains like ${weakestDomain ? weakestDomain.replace('-',' ') : 'your weakest areas'}.`,
+        reason: `Priority 1 demands override all system protections. Accept immediately. Note that this consumes capacity and may exacerbate downward trends or delay recovery of vulnerabilities like ${weakestDomain ? weakestDomain.replace('-',' ') : 'your weakest areas'}.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -51,7 +51,7 @@ export default function Decide() {
           recommendation: 'Decline / Defer',
           action: `Protect schedule. Recover ${weakestDomain ? weakestDomain.replace('-', ' ') : 'critical domains'}.`,
           state: 'Active Load Shedding',
-          reason: `System is in a protective state. Core maintenance has failed in ${formatDomainsList(criticalDomains)}. A P2 demand introduces unacceptable risk of systemic failure. You must shed this load to prioritize recovery.`,
+          reason: `System is in a protective state. Current 7-day volume has critically failed in ${formatDomainsList(criticalDomains)}. A P2 demand introduces unacceptable risk. You must shed this load to prioritize baseline recovery.`,
           color: 'text-status-degraded',
           bg: 'bg-status-degraded/10'
         };
@@ -71,7 +71,7 @@ export default function Decide() {
           recommendation: 'Accept but Monitor',
           action: 'Execute, but watch energy levels.',
           state: 'Slowing Momentum',
-          reason: `System is technically healthy, but momentum is dropping in ${formatDomainsList(trendingDownDomains)}. You can accept this P2, but be aware that systemic fatigue is building. Avoid making this a recurring commitment.`,
+          reason: `System is technically healthy, but recent 7-day trends are down in ${formatDomainsList(trendingDownDomains)}. You can accept this P2, but systemic fatigue is building. Avoid making this a recurring commitment.`,
           color: 'text-status-healthy',
           bg: 'bg-status-healthy/10'
         };
@@ -103,7 +103,7 @@ export default function Decide() {
         recommendation: 'Decline / Defer',
         action: 'Reject to protect momentum.',
         state: 'Preserving Energy',
-        reason: `While the system is technically healthy, downward trends in ${formatDomainsList(trendingDownDomains)} indicate dropping energy. P3 tasks should be deferred until momentum stabilizes across the board.`,
+        reason: `While the system is technically healthy, 7-day downward trends in ${formatDomainsList(trendingDownDomains)} indicate dropping energy. P3 tasks should be deferred until your momentum stabilizes.`,
         color: 'text-status-degraded',
         bg: 'bg-status-degraded/10'
       };
