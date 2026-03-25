@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check } from 'lucide-react';
 import { useAppStore } from '@/store';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 type Priority = 'P1' | 'P2' | 'P3' | null;
 
@@ -12,8 +13,8 @@ export default function Decide() {
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   
-  const weakest = getWeakestDomain();
-  const weakestStatus = getDomainStatus(weakest);
+  const { domain: weakestDomain } = getWeakestDomain();
+  const weakestStatus = getDomainStatus(weakestDomain);
   
   // Aggregate data for reasoning engine
   const domains: ('martial-arts' | 'meditation' | 'fitness' | 'music')[] = ['martial-arts', 'meditation', 'fitness', 'music'];
@@ -36,7 +37,7 @@ export default function Decide() {
         recommendation: 'Accept',
         action: 'Immediate Execution Required',
         state: 'Override',
-        reason: `Priority 1 overrides all current system protections. Accept the demand, but note that this will further delay recovery of ${weakest.replace('-',' ')} which is currently at ${weakestStatus.score}% health.`,
+        reason: `Priority 1 overrides all current system protections. Accept the demand, but note that this will further delay recovery of ${weakestDomain ? weakestDomain.replace('-',' ') : 'the system'} which is currently at ${weakestStatus?.score || 0}% health.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -46,9 +47,9 @@ export default function Decide() {
       if (isSystemCritical) {
         return {
           recommendation: 'Decline / Defer',
-          action: `Protect schedule. Recover ${weakest.replace('-', ' ')}.`,
+          action: `Protect schedule. Recover ${weakestDomain ? weakestDomain.replace('-', ' ') : 'critical domains'}.`,
           state: 'Active Load Shedding',
-          reason: `System is in a protective state. ${criticalDomains.length} domains (including ${weakest.replace('-', ' ')}) are in critical condition. P2 demands introduce an unacceptable risk of systemic failure right now.`,
+          reason: `System is in a protective state. ${criticalDomains.length} domains (including ${weakestDomain ? weakestDomain.replace('-', ' ') : 'critical areas'}) are in critical condition. P2 demands introduce an unacceptable risk of systemic failure right now.`,
           color: 'text-status-degraded',
           bg: 'bg-status-degraded/10'
         };
@@ -79,7 +80,7 @@ export default function Decide() {
         recommendation: 'Decline',
         action: 'Reject immediately without guilt.',
         state: 'Capacity Exhausted',
-        reason: `System is currently running a deficit (weakest: ${weakest.replace('-', ' ')}). All P3 (optional) demands must be shed to protect baseline recovery.`,
+        reason: `System is currently running a deficit (weakest: ${weakestDomain ? weakestDomain.replace('-', ' ') : 'system'}). All P3 (optional) demands must be shed to protect baseline recovery.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
       };
@@ -99,17 +100,20 @@ export default function Decide() {
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300">
-      <header className="px-4 py-5 flex items-center gap-4 sticky top-0 bg-background/90 backdrop-blur-xl border-b border-border/40 z-10">
-        <button 
-          onClick={() => setLocation('/')}
-          className="p-2 -ml-2 rounded-full active:scale-95 hover:bg-accent/50 text-muted-foreground transition-all"
-        >
-          <ArrowLeft className="w-6 h-6" />
-        </button>
-        <div>
-          <h1 className="text-xl font-bold tracking-tight">Decide</h1>
-          <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-0.5">INCIDENT RESPONSE</p>
+      <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl border-b border-border/40 z-10">
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => setLocation('/')}
+            className="p-2 -ml-2 rounded-full active:scale-95 hover:bg-accent/50 text-muted-foreground transition-all"
+          >
+            <ArrowLeft className="w-6 h-6" />
+          </button>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight">Decide</h1>
+            <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-0.5">INCIDENT RESPONSE</p>
+          </div>
         </div>
+        <ThemeToggle />
       </header>
 
       <main className="px-4 py-8 space-y-10">

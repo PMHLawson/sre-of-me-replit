@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { 
   Activity, 
@@ -9,11 +9,10 @@ import {
   History, 
   GitPullRequestDraft,
   ChevronRight,
-  Sun,
-  Moon
 } from 'lucide-react';
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 const DomainIcon = ({ domain, className }: { domain: Domain, className?: string }) => {
   switch (domain) {
@@ -107,22 +106,8 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
 
 export default function Dashboard() {
   const [_, setLocation] = useLocation();
-  const theme = useAppStore(state => state.theme);
-  const toggleTheme = useAppStore(state => state.toggleTheme);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
-
-  // Initialize theme class on mount
-  useEffect(() => {
-    const root = window.document.documentElement;
-    if (theme === 'light') {
-      root.classList.remove('dark');
-      root.classList.add('light');
-    } else {
-      root.classList.remove('light');
-      root.classList.add('dark');
-    }
-  }, [theme]);
 
   // Calculate overall composite health score
   const systemHealth = useMemo(() => {
@@ -172,13 +157,7 @@ export default function Dashboard() {
             <p className="text-sm font-medium text-muted-foreground mt-1 tracking-wide">SYSTEM OBSERVABILITY</p>
           </div>
           <div className="flex items-center gap-3">
-            <button 
-              onClick={toggleTheme}
-              className="p-2.5 rounded-full bg-card shadow-sm border border-border/50 hover:bg-accent/50 text-foreground transition-all active:scale-95"
-              aria-label="Toggle Theme"
-            >
-              {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-            </button>
+            <ThemeToggle />
             <button 
               onClick={() => setLocation('/decide')}
               className="h-10 px-5 rounded-full bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 active:scale-95 transition-transform shadow-md shadow-primary/20"
@@ -191,12 +170,19 @@ export default function Dashboard() {
         </div>
         
         {/* Composite Health Overview */}
-        <div className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden">
+        <div 
+          className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-accent/30 transition-all active:scale-[0.98]"
+          onClick={() => setLocation('/system-health')}
+          data-testid="card-system-health"
+        >
           <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/5 rounded-full blur-3xl"></div>
           <div className="flex flex-col relative z-10">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">System Health</div>
+                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2 flex items-center gap-2">
+                  System Health
+                  <ChevronRight className="w-3 h-3" />
+                </div>
                 <div className="flex items-center gap-3">
                   <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
                     {systemHealth.score}

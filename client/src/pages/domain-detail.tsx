@@ -3,6 +3,7 @@ import { format, subDays, parseISO, isSameDay } from 'date-fns';
 import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music } from 'lucide-react';
 import { useAppStore, Domain } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, ReferenceLine, Cell } from 'recharts';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 const DomainIcon = ({ domain, className }: { domain: Domain, className?: string }) => {
   switch (domain) {
@@ -98,6 +99,7 @@ export default function DomainDetail() {
             <h1 className="text-xl font-bold tracking-tight">{domainName}</h1>
           </div>
         </div>
+        <ThemeToggle />
       </header>
 
       <main className="px-4 py-6 space-y-8">
