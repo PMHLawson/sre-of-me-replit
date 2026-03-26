@@ -13,7 +13,9 @@ export interface Session {
 
 interface AppState {
   sessions: Session[];
-  addSession: (session: Omit<Session, 'id'>) => void;
+  sessionsLoaded: boolean;
+  fetchSessions: () => Promise<void>;
+  addSession: (session: Omit<Session, 'id'>) => Promise<void>;
   getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; previousWeekMinutes: number; };
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
@@ -22,23 +24,22 @@ interface AppState {
   setDemoState: (state: 'default' | 'overperforming' | 'degraded' | 'mixed') => void;
 }
 
-// Generate some initial mock data
+// Generate mock sessions for scenario validation (UI demo states only)
 const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded' | 'mixed' = 'default'): Session[] => {
   const sessions: Session[] = [];
   const now = new Date();
   const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
-  
-  // Generate 42 days of history to allow for solid trend comparisons
+
   for (let i = 0; i < 42; i++) {
     domains.forEach(domain => {
-      let probability = 0.3; // Default 70% chance of skipping a day
+      let probability = 0.3;
       let baseDuration = 30;
-      
+
       if (scenario === 'overperforming') {
-        probability = 0.8; // 80% chance of hitting it
+        probability = 0.8;
         baseDuration = 45;
       } else if (scenario === 'degraded') {
-        probability = 0.15; // 15% chance
+        probability = 0.15;
         baseDuration = 15;
       } else if (scenario === 'mixed') {
         if (domain === 'fitness' || domain === 'music') {
@@ -54,9 +55,9 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
         const date = new Date(now);
         date.setDate(date.getDate() - i);
         date.setHours(Math.floor(Math.random() * 14) + 6);
-        
+
         sessions.push({
-          id: `mock-${i}-${domain}`,
+          id: `mock-${i}-${domain}-${Math.random()}`,
           domain,
           durationMinutes: Math.floor(Math.random() * 30) + baseDuration,
           timestamp: date.toISOString(),
@@ -67,87 +68,117 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
   return sessions;
 };
 
-  // Helper function to calculate domain status
-  const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
-    const now = new Date();
-    // Normalize to midnight for consistent comparisons
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    
-    // We want the last 7 complete days including today
-    const sevenDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
-    // The previous 7 days before that for comparison
-    const fourteenDaysAgo = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000);
-    
-    const domainSessions = sessions.filter(s => s.domain === domain);
-    
-    const recentSessions = domainSessions.filter(s => {
-      const date = new Date(s.timestamp);
-      return date >= sevenDaysAgo;
-    });
-    
-    const previousWeekSessions = domainSessions.filter(s => {
-      const date = new Date(s.timestamp);
-      return date >= fourteenDaysAgo && date < sevenDaysAgo;
-    });
-    
-    // Target is 120 mins/week (~17 mins/day)
-    const targetMinutes = 120;
-    
-    const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
-    const previousWeekMinutes = previousWeekSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
-    
-    const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
-    
-    let trend: 'up' | 'down' | 'flat' = 'flat';
-    // Compare exact 7-day windows against each other
-    if (recentMinutes > previousWeekMinutes) trend = 'up';
-    else if (recentMinutes < previousWeekMinutes) trend = 'down';
-    
-    let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
-    if (score < 40) status = 'critical';
-    else if (score < 70) status = 'degraded';
-    
-    return { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes };
-  };
+// Pure computation — works on any session array
+const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const sevenDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const fourteenDaysAgo = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000);
+
+  const domainSessions = sessions.filter(s => s.domain === domain);
+
+  const recentSessions = domainSessions.filter(s => new Date(s.timestamp) >= sevenDaysAgo);
+  const previousWeekSessions = domainSessions.filter(s => {
+    const d = new Date(s.timestamp);
+    return d >= fourteenDaysAgo && d < sevenDaysAgo;
+  });
+
+  const targetMinutes = 120;
+  const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+  const previousWeekMinutes = previousWeekSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+
+  const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
+
+  let trend: 'up' | 'down' | 'flat' = 'flat';
+  if (recentMinutes > previousWeekMinutes) trend = 'up';
+  else if (recentMinutes < previousWeekMinutes) trend = 'down';
+
+  let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
+  if (score < 40) status = 'critical';
+  else if (score < 70) status = 'degraded';
+
+  return { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes };
+};
 
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
-      sessions: generateMockSessions('default'),
+      sessions: [],
+      sessionsLoaded: false,
       theme: 'dark',
       demoState: 'default',
-      setDemoState: (demoState) => set({ 
-        demoState, 
-        sessions: generateMockSessions(demoState) 
-      }),
+
+      fetchSessions: async () => {
+        try {
+          const res = await fetch('/api/sessions');
+          if (!res.ok) throw new Error('Failed to fetch sessions');
+          const data: Session[] = await res.json();
+          set({ sessions: data, sessionsLoaded: true });
+        } catch (err) {
+          console.error('fetchSessions error:', err);
+          set({ sessionsLoaded: true });
+        }
+      },
+
+      setDemoState: (demoState) => {
+        if (demoState === 'default') {
+          // Revert to real database sessions
+          get().fetchSessions().then(() => {
+            set({ demoState });
+          });
+        } else {
+          set({ demoState, sessions: generateMockSessions(demoState), sessionsLoaded: true });
+        }
+      },
+
       toggleTheme: () => {
         set((state) => {
           const newTheme = state.theme === 'dark' ? 'light' : 'dark';
-          // Update the DOM class for tailwind
           const root = window.document.documentElement;
           root.classList.remove('light', 'dark');
           root.classList.add(newTheme);
           return { theme: newTheme };
         });
       },
-      addSession: (session) => 
-        set((state) => ({
-          sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
-        })),
-      
-      getDomainStatus: (domain: Domain) => {
-        const { sessions } = get();
-        return calculateDomainStatus(sessions, domain);
+
+      addSession: async (session) => {
+        const { demoState } = get();
+        if (demoState !== 'default') {
+          // In demo mode, add locally only
+          set((state) => ({
+            sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
+          }));
+          return;
+        }
+        try {
+          const res = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(session),
+          });
+          if (!res.ok) throw new Error('Failed to save session');
+          const saved: Session = await res.json();
+          set((state) => ({ sessions: [saved, ...state.sessions] }));
+        } catch (err) {
+          console.error('addSession error:', err);
+          // Optimistic local fallback
+          set((state) => ({
+            sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
+          }));
+        }
       },
-      
+
+      getDomainStatus: (domain: Domain) => {
+        return calculateDomainStatus(get().sessions, domain);
+      },
+
       getWeakestDomain: () => {
         const { sessions } = get();
         const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
-        
         let weakest: Domain = 'fitness';
         let lowestScore = 101;
         let isDegradedOrCritical = false;
-        
+
         domains.forEach(d => {
           const { score, status } = calculateDomainStatus(sessions, d);
           if (score < lowestScore) {
@@ -158,14 +189,13 @@ export const useAppStore = create<AppState>()(
             isDegradedOrCritical = true;
           }
         });
-        
-        // Return boolean to indicate if the weakest domain actually needs urgent attention
+
         return { domain: weakest, isDegradedOrCritical };
-      }
+      },
     }),
     {
       name: 'sre-of-me-storage',
-      // In a real app we'd use robust storage, for mockup we use localStorage via zustand persist
+      partialize: (state) => ({ theme: state.theme }),
     }
   )
 );

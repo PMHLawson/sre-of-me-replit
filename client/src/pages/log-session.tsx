@@ -12,11 +12,13 @@ export default function LogSession() {
   const [domain, setDomain] = useState<Domain>(initialDomain);
   const [duration, setDuration] = useState(30);
   const [notes, setNotes] = useState('');
-  
+  const [saving, setSaving] = useState(false);
+
   const addSession = useAppStore(state => state.addSession);
-  
-  const handleSave = () => {
-    addSession({
+
+  const handleSave = async () => {
+    setSaving(true);
+    await addSession({
       domain,
       durationMinutes: duration,
       timestamp: new Date().toISOString(),
@@ -122,11 +124,12 @@ export default function LogSession() {
       <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background to-transparent pb-8 pt-12 pointer-events-none">
         <button
           onClick={handleSave}
-          className="w-full h-14 rounded-2xl bg-primary text-primary-foreground font-semibold text-lg flex items-center justify-center gap-2 active:scale-[0.98] transition-transform shadow-lg shadow-primary/20 pointer-events-auto"
+          disabled={saving}
+          className="w-full h-14 rounded-2xl bg-primary text-primary-foreground font-semibold text-lg flex items-center justify-center gap-2 active:scale-[0.98] transition-transform shadow-lg shadow-primary/20 pointer-events-auto disabled:opacity-60 disabled:cursor-not-allowed"
           data-testid="button-save-session"
         >
           <Check className="w-5 h-5" />
-          Save Session
+          {saving ? 'Saving…' : 'Save Session'}
         </button>
       </div>
     </div>

@@ -30,6 +30,8 @@ function Router() {
 
 function App() {
   const theme = useAppStore(state => state.theme);
+  const fetchSessions = useAppStore(state => state.fetchSessions);
+  const demoState = useAppStore(state => state.demoState);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -41,6 +43,13 @@ function App() {
       root.classList.add('dark');
     }
   }, [theme]);
+
+  // Load real sessions from the server on startup (only when not in a demo state)
+  useEffect(() => {
+    if (demoState === 'default') {
+      fetchSessions();
+    }
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
