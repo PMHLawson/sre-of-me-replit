@@ -109,41 +109,48 @@ export default function Dashboard() {
   const sessions = useAppStore(state => state.sessions);
   const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
 
-  // Calculate overall composite health score
+  // Calculate overall composite health score using Notion escalation states
   const systemHealth = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
     let totalScore = 0;
     let criticalCount = 0;
     let degradedCount = 0;
-    
+    let trendingDownCount = 0;
+
     domains.forEach(d => {
-      const { score, status } = getDomainStatus(d);
+      const { score, status, trend } = getDomainStatus(d);
       totalScore += score;
       if (status === 'critical') criticalCount++;
       if (status === 'degraded') degradedCount++;
+      if (trend === 'down') trendingDownCount++;
     });
-    
+
     const average = Math.round(totalScore / 4);
-    
-    let sysStatus = 'Healthy';
+
+    let sysStatus = 'NOMINAL';
     let sysColor = 'text-status-healthy';
     let sysBg = 'bg-status-healthy/10';
-    let rationale = 'All domains are currently tracking well against targets. Surplus capacity is available.';
-    
+    let rationale = 'All domains meeting SLO targets. Full flex capacity — eligible to accept P2 and evaluate P3 demands.';
+
     if (criticalCount > 0) {
-      sysStatus = 'Critical Deficit';
+      sysStatus = 'BREACH';
       sysColor = 'text-status-critical';
       sysBg = 'bg-status-critical/10';
-      rationale = `${criticalCount} domain(s) have fallen critically behind baseline. Shed optional load to focus on recovery.`;
+      rationale = `${criticalCount} domain(s) critically below SLO. Cultivation elevated to P1 priority. Decline all P2/P3 until system recovers.`;
     } else if (degradedCount > 0) {
-      sysStatus = 'Degraded';
+      sysStatus = 'WARNING';
       sysColor = 'text-status-degraded';
       sysBg = 'bg-status-degraded/10';
-      rationale = `${degradedCount} domain(s) are tracking behind baseline. Time-box demands to prevent further decay.`;
+      rationale = `${degradedCount} domain(s) below SLO green threshold. Decline P3. Time-box any P2. Schedule makeup within 3 days.`;
+    } else if (trendingDownCount > 1) {
+      sysStatus = 'ADVISORY';
+      sysColor = 'text-blue-400';
+      sysBg = 'bg-blue-400/10';
+      rationale = 'All domains above SLO floor, but momentum declining across multiple areas. Note and monitor — avoid new recurring commitments.';
     }
-    
+
     return { score: average, status: sysStatus, color: sysColor, bg: sysBg, rationale };
-  }, [sessions]); // Re-calculate when sessions change
+  }, [sessions]);
 
   const demoState = useAppStore(state => state.demoState);
   const setDemoState = useAppStore(state => state.setDemoState);

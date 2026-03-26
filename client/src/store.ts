@@ -11,12 +11,27 @@ export interface Session {
   notes?: string;
 }
 
+export interface DomainPolicy {
+  targetMinutes: number;
+  sessionFloor: number;
+  cadence: string;
+  sessionsTarget: number;
+  dailyProRate: number;
+}
+
+export const DOMAIN_POLICY: Record<Domain, DomainPolicy> = {
+  'martial-arts': { targetMinutes: 105, sessionFloor: 15, cadence: 'Daily',  sessionsTarget: 5, dailyProRate: 15 },
+  'meditation':   { targetMinutes: 70,  sessionFloor: 10, cadence: 'Daily',  sessionsTarget: 5, dailyProRate: 10 },
+  'fitness':      { targetMinutes: 90,  sessionFloor: 15, cadence: '6×/week',sessionsTarget: 5, dailyProRate: 13 },
+  'music':        { targetMinutes: 45,  sessionFloor: 15, cadence: '3×/week',sessionsTarget: 3, dailyProRate: 6  },
+};
+
 interface AppState {
   sessions: Session[];
   sessionsLoaded: boolean;
   fetchSessions: () => Promise<void>;
   addSession: (session: Omit<Session, 'id'>) => Promise<void>;
-  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; previousWeekMinutes: number; };
+  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; previousWeekMinutes: number; sessionFloor: number; cadence: string; };
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
   toggleTheme: () => void;
@@ -24,7 +39,6 @@ interface AppState {
   setDemoState: (state: 'default' | 'overperforming' | 'degraded' | 'mixed') => void;
 }
 
-// Generate mock sessions for scenario validation (UI demo states only)
 const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded' | 'mixed' = 'default'): Session[] => {
   const sessions: Session[] = [];
   const now = new Date();
@@ -68,8 +82,8 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
   return sessions;
 };
 
-// Pure computation — works on any session array
 const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
+  const policy = DOMAIN_POLICY[domain];
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
@@ -83,7 +97,7 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
     return d >= fourteenDaysAgo && d < sevenDaysAgo;
   });
 
-  const targetMinutes = 120;
+  const targetMinutes = policy.targetMinutes;
   const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   const previousWeekMinutes = previousWeekSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
 
@@ -97,7 +111,16 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
   if (score < 40) status = 'critical';
   else if (score < 70) status = 'degraded';
 
-  return { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes };
+  return {
+    score,
+    trend,
+    status,
+    recentMinutes,
+    targetMinutes,
+    previousWeekMinutes,
+    sessionFloor: policy.sessionFloor,
+    cadence: policy.cadence,
+  };
 };
 
 export const useAppStore = create<AppState>()(
@@ -122,7 +145,6 @@ export const useAppStore = create<AppState>()(
 
       setDemoState: (demoState) => {
         if (demoState === 'default') {
-          // Revert to real database sessions
           get().fetchSessions().then(() => {
             set({ demoState });
           });
@@ -144,7 +166,6 @@ export const useAppStore = create<AppState>()(
       addSession: async (session) => {
         const { demoState } = get();
         if (demoState !== 'default') {
-          // In demo mode, add locally only
           set((state) => ({
             sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
           }));
@@ -161,7 +182,6 @@ export const useAppStore = create<AppState>()(
           set((state) => ({ sessions: [saved, ...state.sessions] }));
         } catch (err) {
           console.error('addSession error:', err);
-          // Optimistic local fallback
           set((state) => ({
             sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
           }));
