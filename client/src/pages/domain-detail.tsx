@@ -29,7 +29,7 @@ export default function DomainDetail() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   
   const domainSessions = sessions.filter(s => s.domain === domain);
-  const { score, status, trend, recentMinutes, targetMinutes } = getDomainStatus(domain);
+  const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes } = getDomainStatus(domain);
   
   // Generate last 7 days data for chart
   const chartData = Array.from({ length: 7 }).map((_, i) => {
@@ -134,10 +134,10 @@ export default function DomainDetail() {
                   {trend === 'flat' && <><span className="text-blue-500">→</span> Flat</>}
                 </div>
                 <div className="text-xs font-medium text-muted-foreground mt-1">
-                  ({recentMinutes}m vs {status.previousWeekMinutes}m)
+                  ({recentMinutes}m vs {previousWeekMinutes}m)
                 </div>
-                <div className={`text-[11px] font-bold mt-1 px-2 py-0.5 rounded-md ${recentMinutes > status.previousWeekMinutes ? 'bg-status-healthy/10 text-status-healthy' : recentMinutes < status.previousWeekMinutes ? 'bg-status-critical/10 text-status-critical' : 'bg-blue-500/10 text-blue-500'}`}>
-                  {recentMinutes - status.previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - status.previousWeekMinutes}m Delta
+                <div className={`text-[11px] font-bold mt-1 px-2 py-0.5 rounded-md ${recentMinutes > previousWeekMinutes ? 'bg-status-healthy/10 text-status-healthy' : recentMinutes < previousWeekMinutes ? 'bg-status-critical/10 text-status-critical' : 'bg-blue-500/10 text-blue-500'}`}>
+                  {recentMinutes - previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - previousWeekMinutes}m Delta
                 </div>
               </div>
             </div>
@@ -145,7 +145,7 @@ export default function DomainDetail() {
           
           <div className="pt-4 border-t border-border/40">
             <p className="text-sm text-muted-foreground leading-relaxed">
-              <strong className="text-foreground">Trend Analysis:</strong> You logged <strong className="text-foreground">{recentMinutes}m</strong> in the last 7 days compared to <strong className="text-foreground">{status.previousWeekMinutes}m</strong> in the previous 7 days (a delta of {recentMinutes - status.previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - status.previousWeekMinutes}m). The target is <strong className="text-foreground">{targetMinutes}m/week</strong>.
+              <strong className="text-foreground">Trend Analysis:</strong> You logged <strong className="text-foreground">{recentMinutes}m</strong> in the last 7 days compared to <strong className="text-foreground">{previousWeekMinutes}m</strong> in the previous 7 days (a delta of {recentMinutes - previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - previousWeekMinutes}m). The target is <strong className="text-foreground">{targetMinutes}m/week</strong>.
             </p>
           </div>
         </section>

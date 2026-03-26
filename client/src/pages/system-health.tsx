@@ -201,9 +201,9 @@ export default function SystemHealth() {
                       {d.status}
                     </div>
                     <div className="flex items-center gap-1 text-[11px] font-bold text-muted-foreground" title={`${d.recentMinutes}m this week vs ${d.previousWeekMinutes}m last week`}>
-                      {d.trend === 'up' && <span className="text-status-healthy flex items-center"><TrendingUp className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
-                      {d.trend === 'down' && <span className="text-status-critical flex items-center"><TrendingDown className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
-                      {d.trend === 'flat' && <span className="text-foreground/50 flex items-center"><Minus className="w-3 h-3 mr-1"/> {d.recentMinutes}m (vs {d.previousWeekMinutes}m)</span>}
+                      {d.trend === 'up' && <span className="text-status-healthy flex items-center"><TrendingUp className="w-3 h-3 mr-1"/> {d.recentMinutes}m vs {d.previousWeekMinutes}m (+{d.recentMinutes - d.previousWeekMinutes}m)</span>}
+                      {d.trend === 'down' && <span className="text-status-critical flex items-center"><TrendingDown className="w-3 h-3 mr-1"/> {d.recentMinutes}m vs {d.previousWeekMinutes}m ({d.recentMinutes - d.previousWeekMinutes}m)</span>}
+                      {d.trend === 'flat' && <span className="text-foreground/50 flex items-center"><Minus className="w-3 h-3 mr-1"/> {d.recentMinutes}m vs {d.previousWeekMinutes}m (0m)</span>}
                     </div>
                   </div>
                 </div>
