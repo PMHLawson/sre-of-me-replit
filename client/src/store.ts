@@ -194,7 +194,7 @@ export const useAppStore = create<AppState>()(
       },
     }),
     {
-      name: 'sre-of-me-storage',
+      name: 'sre-of-me-v2',
       partialize: (state) => ({ theme: state.theme }),
     }
   )

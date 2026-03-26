@@ -107,6 +107,7 @@ export default function Dashboard() {
   const [_, setLocation] = useLocation();
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
+  const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
 
   // Calculate overall composite health score
   const systemHealth = useMemo(() => {
@@ -183,19 +184,29 @@ export default function Dashboard() {
                   <ChevronRight className="w-3 h-3" />
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
-                    {systemHealth.score}
-                  </span>
+                  {!sessionsLoaded ? (
+                    <span className="text-5xl font-extrabold tracking-tighter text-muted-foreground/30">—</span>
+                  ) : (
+                    <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
+                      {systemHealth.score}
+                    </span>
+                  )}
                 </div>
               </div>
-              <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
-                {systemHealth.status}
-              </div>
+              {!sessionsLoaded ? (
+                <div className="px-4 py-2 rounded-2xl text-sm font-bold tracking-wide bg-muted text-muted-foreground/50">
+                  Loading…
+                </div>
+              ) : (
+                <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
+                  {systemHealth.status}
+                </div>
+              )}
             </div>
             
             <div className="pt-4 border-t border-border/40">
               <p className="text-sm text-foreground/80 leading-relaxed font-medium">
-                {systemHealth.rationale}
+                {!sessionsLoaded ? 'Syncing session data…' : systemHealth.rationale}
               </p>
             </div>
           </div>
