@@ -87,7 +87,14 @@ export default function DomainDetail() {
       <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl z-10 border-b border-border/40">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => setLocation('/')}
+            onClick={() => {
+              const params = new URLSearchParams(window.location.search);
+              if (params.get('from') === 'system-health') {
+                setLocation('/system-health');
+              } else {
+                setLocation('/');
+              }
+            }}
             className="p-2 -ml-2 rounded-full active:scale-95 hover:bg-accent/50 text-muted-foreground transition-all"
           >
             <ArrowLeft className="w-6 h-6" />

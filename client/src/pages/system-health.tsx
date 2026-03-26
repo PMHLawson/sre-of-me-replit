@@ -120,7 +120,10 @@ export default function SystemHealth() {
       <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl border-b border-border/40 z-10">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => setLocation('/')}
+            onClick={() => {
+              // Always go back to dashboard from System Health
+              setLocation('/');
+            }}
             className="p-2 -ml-2 rounded-full active:scale-95 hover:bg-accent/50 text-muted-foreground transition-all"
           >
             <ArrowLeft className="w-6 h-6" />
@@ -179,7 +182,7 @@ export default function SystemHealth() {
                   d.status === 'degraded' ? 'border-status-degraded/30' :
                   'border-border/50'
                 }`}
-                onClick={() => setLocation(`/domain/${d.domain}`)}
+                onClick={() => setLocation(`/domain/${d.domain}?from=system-health`)}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-3">

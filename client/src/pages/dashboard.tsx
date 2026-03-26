@@ -34,7 +34,7 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   const domainStatus = getDomainStatus(domain);
   const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
   
-  const { score, trend, status, recentMinutes, targetMinutes } = domainStatus;
+  const { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes } = domainStatus;
   
   // Only apply aggressive visual signaling if the domain is ACTUALLY in trouble
   // Just being the "lowest score" among 4 perfectly healthy domains shouldn't trigger red alerts.
@@ -86,10 +86,10 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
                 <span className="opacity-40 text-[10px]">•</span>
                 <span>{recentMinutes}m / {targetMinutes}m</span>
                 <span className="opacity-40 text-[10px]">•</span>
-                <span>
-                  {trend === 'up' && <span className="text-status-healthy font-bold" title="Trending up vs history">↗</span>}
-                  {trend === 'down' && <span className="text-status-critical font-bold" title="Trending down vs history">↘</span>}
-                  {trend === 'flat' && <span className="text-foreground/50 font-bold" title="Holding steady">→</span>}
+                <span className="font-bold flex items-center">
+                  {trend === 'up' && <span className="text-status-healthy flex items-center gap-0.5" title="Trending up vs history">↗ {recentMinutes - previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - previousWeekMinutes}m</span>}
+                  {trend === 'down' && <span className="text-status-critical flex items-center gap-0.5" title="Trending down vs history">↘ {recentMinutes - previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - previousWeekMinutes}m</span>}
+                  {trend === 'flat' && <span className="text-foreground/50 flex items-center gap-0.5" title="Holding steady">→ {recentMinutes - previousWeekMinutes > 0 ? '+' : ''}{recentMinutes - previousWeekMinutes}m</span>}
                 </span>
               </div>
             </div>

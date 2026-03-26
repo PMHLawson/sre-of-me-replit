@@ -28,7 +28,8 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
   const now = new Date();
   const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
   
-  for (let i = 0; i < 30; i++) {
+  // Generate 42 days of history to allow for solid trend comparisons
+  for (let i = 0; i < 42; i++) {
     domains.forEach(domain => {
       let probability = 0.3; // Default 70% chance of skipping a day
       let baseDuration = 30;

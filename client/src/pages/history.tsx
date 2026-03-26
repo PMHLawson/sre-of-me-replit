@@ -1,3 +1,4 @@
+import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { format, parseISO } from 'date-fns';
 import { ArrowLeft } from 'lucide-react';
@@ -7,16 +8,24 @@ import { ThemeToggle } from '@/components/theme-toggle';
 export default function History() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
+  const [visibleDays, setVisibleDays] = useState(14); // show 14 days by default
 
-  // Group sessions by date
-  const groupedSessions = sessions.reduce((acc, session) => {
-    const date = format(parseISO(session.timestamp), 'MMM d, yyyy');
-    if (!acc[date]) {
-      acc[date] = [];
-    }
-    acc[date].push(session);
-    return acc;
-  }, {} as Record<string, typeof sessions>);
+  // Group sessions by date and ensure they are sorted
+  const groupedSessions = useMemo(() => {
+    const sorted = [...sessions].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    
+    return sorted.reduce((acc, session) => {
+      const date = format(parseISO(session.timestamp), 'MMM d, yyyy');
+      if (!acc[date]) {
+        acc[date] = [];
+      }
+      acc[date].push(session);
+      return acc;
+    }, {} as Record<string, typeof sessions>);
+  }, [sessions]);
+
+  const dateKeys = Object.keys(groupedSessions);
+  const visibleDateKeys = dateKeys.slice(0, visibleDays);
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300">
@@ -34,13 +43,13 @@ export default function History() {
       </header>
 
       <main className="px-4 py-6 space-y-8 pb-24">
-        {Object.entries(groupedSessions).map(([date, daySessions]) => (
+        {visibleDateKeys.map((date) => (
           <section key={date} className="space-y-3">
             <h2 className="text-sm font-bold text-muted-foreground sticky top-[72px] bg-background/95 backdrop-blur-sm py-2 font-mono tracking-wide z-0">
               {date}
             </h2>
             <div className="space-y-2">
-              {daySessions.map(session => (
+              {groupedSessions[date].map(session => (
                 <div 
                   key={session.id} 
                   className="bg-card border border-border/50 rounded-2xl p-4 flex items-center justify-between shadow-sm"
@@ -68,6 +77,15 @@ export default function History() {
             </div>
           </section>
         ))}
+        
+        {visibleDays < dateKeys.length && (
+          <button 
+            onClick={() => setVisibleDays(prev => prev + 14)}
+            className="w-full py-4 text-sm font-bold text-primary bg-primary/10 rounded-2xl active:scale-[0.98] transition-all border border-primary/20 hover:bg-primary/20"
+          >
+            Load Older Sessions (Audit Trends)
+          </button>
+        )}
         
         {sessions.length === 0 && (
           <div className="text-center py-12 text-muted-foreground font-medium">

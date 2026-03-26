@@ -152,25 +152,42 @@ export default function Decide() {
         <section>
           <div className="space-y-3">
             {[
-              { id: 'P1', label: 'Priority 1', desc: 'Critical, unmovable, severe consequence if dropped' },
-              { id: 'P2', label: 'Priority 2', desc: 'Important, time-sensitive, core work' },
-              { id: 'P3', label: 'Priority 3', desc: 'Optional, deferrable, favors, "nice to have"' }
+              { 
+                id: 'P1', 
+                label: 'Priority 1 (Critical)', 
+                shortDesc: 'Unmovable, severe consequence if dropped.',
+                fullDesc: 'These are absolute non-negotiables. Dropping a P1 causes immediate systemic damage or breaks a fundamental commitment. P1 demands bypass all normal capacity limits, meaning you must accept them even if your system is already degraded or critical. Reserve this strictly for emergencies and unmovable deadlines.'
+              },
+              { 
+                id: 'P2', 
+                label: 'Priority 2 (Important)', 
+                shortDesc: 'Time-sensitive, core work, structural maintenance.',
+                fullDesc: 'This is the core of your daily operations. P2 tasks are important and time-sensitive, but they do not warrant burning down your health to achieve. If your system is Degraded or Critical, the engine will recommend shedding or time-boxing P2 demands to protect your baseline recovery.'
+              },
+              { 
+                id: 'P3', 
+                label: 'Priority 3 (Optional)', 
+                shortDesc: 'Deferrable, favors, "nice to have", speculative.',
+                fullDesc: 'These are optional tasks, favors, or speculative projects that provide value but aren\'t strictly required. They are the first things to be shed when your system is strained. The engine will only recommend accepting a P3 if your system is completely Healthy and generating surplus capacity.'
+              }
             ].map(p => (
               <button
                 key={p.id}
                 onClick={() => setPriority(p.id as Priority)}
-                className={`w-full p-5 rounded-3xl border text-left transition-all flex items-center justify-between shadow-sm active:scale-[0.98] ${
+                className={`w-full p-5 rounded-3xl border text-left transition-all flex items-start justify-between shadow-sm active:scale-[0.98] ${
                   priority === p.id 
                     ? 'border-primary bg-primary/5 text-foreground ring-1 ring-primary/30' 
                     : 'border-border/50 bg-card text-muted-foreground hover:bg-accent/30'
                 }`}
                 data-testid={`button-priority-${p.id}`}
               >
-                <div>
-                  <div className={`font-bold text-lg ${priority === p.id ? 'text-foreground' : 'text-foreground/80'}`}>{p.id}</div>
-                  <div className="text-sm mt-1">{p.desc}</div>
+                <div className="pr-4">
+                  <div className={`font-bold text-lg ${priority === p.id ? 'text-foreground' : 'text-foreground/80'}`}>{p.label}</div>
+                  <div className={`text-sm mt-1.5 leading-relaxed ${priority === p.id ? 'text-foreground/90' : 'text-muted-foreground'}`}>
+                    {priority === p.id ? p.fullDesc : p.shortDesc}
+                  </div>
                 </div>
-                {priority === p.id && <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center"><Check className="w-5 h-5 text-primary" /></div>}
+                {priority === p.id && <div className="w-6 h-6 shrink-0 rounded-full bg-primary/10 flex items-center justify-center mt-1"><Check className="w-4 h-4 text-primary" /></div>}
               </button>
             ))}
           </div>
