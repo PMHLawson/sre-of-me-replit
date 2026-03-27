@@ -3,7 +3,7 @@ import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
 import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 // Documented palette (ADR-014 / 40.30.OCMP.915) — hardcoded hex required for Recharts SVG
@@ -26,6 +26,103 @@ const BAR_SLOT_NARROW = 44;  // 7d
 const BAR_SLOT_MED    = 30;  // 14d
 const BAR_SLOT_WIDE   = 24;  // 30d / 42d
 const CHART_HEIGHT    = 180;
+
+// Shared chart content — defined outside main component to avoid recreation on each render
+type ChartBarsProps = {
+  data: { dayLabel: string; fullDate: string; minutes: number; isToday: boolean; tier: string }[];
+  accentHex: string;
+  needsScroll: boolean;
+  fixedWidth: number;
+  height: number;
+  viewDays: number;
+  policyDailyProRate: number;
+  policySessionFloor: number;
+  getBarOpacity: (tier: string) => number;
+};
+
+const TooltipContent = ({
+  active, payload, accentHex, sessionFloor,
+}: { active?: boolean; payload?: any[]; accentHex: string; sessionFloor: number }) => {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div className="bg-popover border border-border/60 p-3 rounded-xl shadow-lg text-sm">
+      <div className="font-semibold text-foreground">{d.fullDate}</div>
+      <div className="mt-1 font-bold" style={{ color: accentHex }}>
+        {d.minutes > 0 ? `${d.minutes}m` : 'No session'}
+      </div>
+      {d.minutes > 0 && d.minutes < sessionFloor && (
+        <div className="text-[10px] text-status-degraded mt-0.5">Below {sessionFloor}m floor</div>
+      )}
+      <div className="text-[10px] text-muted-foreground mt-0.5 capitalize">
+        {d.tier === 'current' ? 'Current 7d' : d.tier === 'previous' ? 'Prev 7d' : 'Older'}
+      </div>
+    </div>
+  );
+};
+
+function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity }: ChartBarsProps) {
+  const internals = (
+    <>
+      <XAxis
+        dataKey="dayLabel"
+        axisLine={false}
+        tickLine={false}
+        tick={{ fontSize: 9, fill: '#A9BBC2', fontWeight: 500 }}
+        dy={8}
+        interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
+      />
+      <YAxis
+        axisLine={false}
+        tickLine={false}
+        tick={{ fontSize: 10, fill: '#A9BBC2', fontWeight: 500 }}
+        width={32}
+      />
+      <Tooltip
+        cursor={{ fill: 'rgba(169,187,194,0.08)' }}
+        content={(props: any) => (
+          <TooltipContent {...props} accentHex={accentHex} sessionFloor={policySessionFloor} />
+        )}
+      />
+      <ReferenceLine
+        y={policyDailyProRate}
+        stroke={accentHex}
+        strokeOpacity={0.35}
+        strokeDasharray="3 3"
+        label={{ value: `${policyDailyProRate}m/d`, position: 'insideTopLeft', fontSize: 9, fill: accentHex, fillOpacity: 0.6, dy: -2 }}
+      />
+      <Bar dataKey="minutes" radius={[4, 4, 0, 0]} maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}>
+        {data.map((entry, idx) => (
+          <Cell
+            key={`cell-${idx}`}
+            fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
+            fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.18}
+            stroke={entry.isToday ? accentHex : 'none'}
+            strokeWidth={entry.isToday ? 1.5 : 0}
+          />
+        ))}
+      </Bar>
+    </>
+  );
+
+  if (needsScroll) {
+    return (
+      <div style={{ width: fixedWidth }}>
+        <BarChart width={fixedWidth} height={height} data={data} margin={{ top: 8, right: 12, left: -20, bottom: 0 }} barCategoryGap="18%">
+          {internals}
+        </BarChart>
+      </div>
+    );
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data} margin={{ top: 8, right: 12, left: -20, bottom: 0 }} barCategoryGap="18%">
+        {internals}
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
 
 const DomainIcon = ({ domain, className }: { domain: Domain; className?: string }) => {
   switch (domain) {
@@ -73,16 +170,19 @@ export default function DomainDetail() {
 
   const chartData = allChartData.slice(ALL_DAYS - viewDays);
 
-  // Bar slot width by range
-  const barSlot = viewDays <= 7 ? BAR_SLOT_NARROW : viewDays <= 14 ? BAR_SLOT_MED : BAR_SLOT_WIDE;
-  const chartWidth = viewDays * barSlot + 48;
+  // Responsive vs. fixed-scroll strategy
+  // ≤14d: fills full container width via ResponsiveContainer (no scroll needed)
+  // >14d: fixed pixel width so bars stay readable at scale, overflow-x scrolls to today
+  const needsScroll = viewDays > 14;
+  const barSlot = viewDays <= 14 ? BAR_SLOT_MED : BAR_SLOT_WIDE;
+  const fixedChartWidth = viewDays * barSlot + 48;
 
-  // Auto-scroll to right (today) whenever viewDays changes
+  // Auto-scroll to right (today) only for scrollable ranges
   useEffect(() => {
-    if (scrollRef.current) {
+    if (needsScroll && scrollRef.current) {
       scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
     }
-  }, [viewDays]);
+  }, [viewDays, needsScroll]);
 
   const getBarOpacity = (tier: string) => {
     if (tier === 'current')  return 1.0;
@@ -215,75 +315,23 @@ export default function DomainDetail() {
             </div>
           </div>
 
-          {/* Scrollable chart */}
+          {/* Chart — responsive for ≤14d, fixed-scroll for >14d */}
           <div
             ref={scrollRef}
-            className="overflow-x-auto pb-4 px-3"
-            style={{ WebkitOverflowScrolling: 'touch' }}
+            className={`pb-4 px-3 ${needsScroll ? 'overflow-x-auto' : ''}`}
+            style={needsScroll ? { WebkitOverflowScrolling: 'touch' } : {}}
           >
-            <div style={{ width: chartWidth }}>
-              <BarChart
-                width={chartWidth}
-                height={CHART_HEIGHT}
-                data={chartData}
-                margin={{ top: 8, right: 12, left: -20, bottom: 0 }}
-                barCategoryGap="20%"
-              >
-                <XAxis
-                  dataKey="dayLabel"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 9, fill: '#A9BBC2', fontWeight: 500 }}
-                  dy={8}
-                  interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
-                />
-                <YAxis
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 10, fill: '#A9BBC2', fontWeight: 500 }}
-                  width={32}
-                />
-                <Tooltip
-                  cursor={{ fill: 'rgba(169,187,194,0.08)' }}
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null;
-                    const d = payload[0].payload;
-                    return (
-                      <div className="bg-popover border border-border/60 p-3 rounded-xl shadow-lg text-sm">
-                        <div className="font-semibold text-foreground">{d.fullDate}</div>
-                        <div className="mt-1 font-bold" style={{ color: accentHex }}>
-                          {d.minutes > 0 ? `${d.minutes}m` : 'No session'}
-                        </div>
-                        {d.minutes > 0 && d.minutes < policy.sessionFloor && (
-                          <div className="text-[10px] text-status-degraded mt-0.5">Below {policy.sessionFloor}m floor</div>
-                        )}
-                        <div className="text-[10px] text-muted-foreground mt-0.5 capitalize">
-                          {d.tier === 'current' ? 'Current 7d' : d.tier === 'previous' ? 'Prev 7d' : 'Older'}
-                        </div>
-                      </div>
-                    );
-                  }}
-                />
-                <ReferenceLine
-                  y={policy.dailyProRate}
-                  stroke={accentHex}
-                  strokeOpacity={0.35}
-                  strokeDasharray="3 3"
-                  label={{ value: `${policy.dailyProRate}m/d`, position: 'insideTopLeft', fontSize: 9, fill: accentHex, fillOpacity: 0.6, dy: -2 }}
-                />
-                <Bar dataKey="minutes" radius={[4, 4, 0, 0]} maxBarSize={viewDays <= 7 ? 36 : 18}>
-                  {chartData.map((entry, idx) => (
-                    <Cell
-                      key={`cell-${idx}`}
-                      fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
-                      fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.2}
-                      stroke={entry.isToday ? accentHex : 'none'}
-                      strokeWidth={entry.isToday ? 1.5 : 0}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </div>
+            <ChartBars
+              data={chartData}
+              accentHex={accentHex}
+              needsScroll={needsScroll}
+              fixedWidth={fixedChartWidth}
+              height={CHART_HEIGHT}
+              viewDays={viewDays}
+              policyDailyProRate={policy.dailyProRate}
+              policySessionFloor={policy.sessionFloor}
+              getBarOpacity={getBarOpacity}
+            />
           </div>
 
           {/* Current/Prev comparison footer */}
