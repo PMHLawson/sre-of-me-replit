@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation } from 'wouter';
 import { 
   Activity, 
@@ -9,10 +9,13 @@ import {
   History, 
   GitPullRequestDraft,
   ChevronRight,
+  LogOut,
+  User,
 } from 'lucide-react';
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { useAuth } from '@/hooks/use-auth';
 
 // Documented domain accent palette (ADR-014 / 40.30.OCMP.915) — hardcoded for Tailwind/inline use
 const DOMAIN_ACCENT: Record<Domain, string> = {
@@ -22,12 +25,12 @@ const DOMAIN_ACCENT: Record<Domain, string> = {
   'music':        '#7A6FD6',
 };
 
-const DomainIcon = ({ domain, className }: { domain: Domain, className?: string }) => {
+const DomainIcon = ({ domain, className, style }: { domain: Domain, className?: string, style?: React.CSSProperties }) => {
   switch (domain) {
-    case 'martial-arts': return <Activity className={className} />;
-    case 'meditation': return <BrainCircuit className={className} />;
-    case 'fitness': return <Dumbbell className={className} />;
-    case 'music': return <Music className={className} />;
+    case 'martial-arts': return <Activity className={className} style={style} />;
+    case 'meditation': return <BrainCircuit className={className} style={style} />;
+    case 'fitness': return <Dumbbell className={className} style={style} />;
+    case 'music': return <Music className={className} style={style} />;
   }
 };
 
@@ -116,6 +119,20 @@ export default function Dashboard() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
   const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
+  const { user, logout } = useAuth();
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [userMenuOpen]);
 
   // Calculate overall composite health score using Notion escalation states
   const systemHealth = useMemo(() => {
@@ -181,6 +198,43 @@ export default function Dashboard() {
               <GitPullRequestDraft className="w-4 h-4" />
               Decide
             </button>
+            {/* User avatar + dropdown */}
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setUserMenuOpen(v => !v)}
+                className="w-10 h-10 rounded-full overflow-hidden border-2 border-border/60 hover:border-primary/60 transition-colors flex items-center justify-center bg-muted"
+                data-testid="button-user-menu"
+                aria-label="User menu"
+              >
+                {user?.profileImageUrl ? (
+                  <img src={user.profileImageUrl} alt="Profile" className="w-full h-full object-cover" />
+                ) : (
+                  <User className="w-5 h-5 text-muted-foreground" />
+                )}
+              </button>
+              {userMenuOpen && (
+                <div className="absolute right-0 top-12 w-56 bg-card border border-border/60 rounded-2xl shadow-xl z-50 overflow-hidden">
+                  <div className="px-4 py-3 border-b border-border/40">
+                    <p className="text-sm font-semibold text-foreground truncate" data-testid="text-user-name">
+                      {user?.firstName ? `${user.firstName}${user.lastName ? ' ' + user.lastName : ''}` : 'Account'}
+                    </p>
+                    {user?.email && (
+                      <p className="text-xs text-muted-foreground truncate mt-0.5" data-testid="text-user-email">
+                        {user.email}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => logout()}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-sm text-foreground hover:bg-muted/60 transition-colors"
+                    data-testid="button-logout"
+                  >
+                    <LogOut className="w-4 h-4 text-muted-foreground" />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
         

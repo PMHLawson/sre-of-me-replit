@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useEffect } from "react";
 import { useAppStore } from "@/store";
+import { useAuth } from "@/hooks/use-auth";
 
 import Dashboard from "@/pages/dashboard";
 import LogSession from "@/pages/log-session";
@@ -13,6 +14,7 @@ import History from "@/pages/history";
 import DomainDetail from "@/pages/domain-detail";
 import SystemHealth from "@/pages/system-health";
 import NotFound from "@/pages/not-found";
+import Landing from "@/pages/landing";
 
 function Router() {
   return (
@@ -28,10 +30,12 @@ function Router() {
   );
 }
 
-function App() {
+// AuthGate lives inside QueryClientProvider so it can use useAuth
+function AuthGate() {
   const theme = useAppStore(state => state.theme);
   const fetchSessions = useAppStore(state => state.fetchSessions);
   const demoState = useAppStore(state => state.demoState);
+  const { user, isLoading } = useAuth();
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -44,18 +48,51 @@ function App() {
     }
   }, [theme]);
 
-  // Load real sessions from the server on startup (only when not in a demo state)
+  // Only fetch real sessions when authenticated and not in a demo state
   useEffect(() => {
-    if (demoState === 'default') {
+    if (user && demoState === 'default') {
       fetchSessions();
     }
-  }, []);
+  }, [user]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Landing />;
+  }
+
+  return (
+    <>
+      <Toaster />
+      <Router />
+    </>
+  );
+}
+
+function App() {
+  const theme = useAppStore(state => state.theme);
+
+  useEffect(() => {
+    const root = window.document.documentElement;
+    if (theme === 'light') {
+      root.classList.remove('dark');
+      root.classList.add('light');
+    } else {
+      root.classList.remove('light');
+      root.classList.add('dark');
+    }
+  }, [theme]);
 
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <Toaster />
-        <Router />
+        <AuthGate />
       </TooltipProvider>
     </QueryClientProvider>
   );

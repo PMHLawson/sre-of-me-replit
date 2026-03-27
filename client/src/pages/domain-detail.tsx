@@ -124,12 +124,12 @@ function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays,
   );
 }
 
-const DomainIcon = ({ domain, className }: { domain: Domain; className?: string }) => {
+const DomainIcon = ({ domain, className, style }: { domain: Domain; className?: string; style?: React.CSSProperties }) => {
   switch (domain) {
-    case 'martial-arts': return <Activity className={className} />;
-    case 'meditation':   return <BrainCircuit className={className} />;
-    case 'fitness':      return <Dumbbell className={className} />;
-    case 'music':        return <Music className={className} />;
+    case 'martial-arts': return <Activity className={className} style={style} />;
+    case 'meditation':   return <BrainCircuit className={className} style={style} />;
+    case 'fitness':      return <Dumbbell className={className} style={style} />;
+    case 'music':        return <Music className={className} style={style} />;
   }
 };
 

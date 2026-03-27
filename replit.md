@@ -4,29 +4,43 @@ A mobile-first installable PWA for tracking and protecting four cultivation doma
 
 ## Architecture
 
-**Full-stack Express + React + PostgreSQL**
+**Full-stack Express + React + PostgreSQL, multi-user via Replit OIDC**
 
 - **Frontend**: React (Vite), Wouter routing, Zustand for client state, TailwindCSS v4, Recharts
 - **Backend**: Express.js (Node/TypeScript), Drizzle ORM
-- **Database**: PostgreSQL (Replit-hosted), sessions persisted server-side
+- **Database**: PostgreSQL (Replit-hosted), cultivation sessions persisted server-side, user-scoped
+- **Auth**: Replit OIDC via `openid-client` + Passport.js. HTTP sessions stored in `http_sessions` table (connect-pg-simple). User records in `users` table. Routes: `/api/login`, `/api/callback`, `/api/logout`, `/api/auth/user`
 - **PWA**: manifest.json + service worker for Android installability
+
+## Auth Architecture
+
+- **Server**: `setupAuth(app)` called before all routes in `server/index.ts`. Auth module lives in `server/replit_integrations/auth/`
+- **Middleware**: `isAuthenticated` guards all `/api/sessions` routes. User claims available at `req.user.claims.sub` (stable userId)
+- **Client**: `useAuth()` hook queries `/api/auth/user` via react-query. `client/src/App.tsx` shows `<Landing>` for unauthenticated users, app for authenticated users
+- **Sessions**: cultivation sessions table has `userId` column (text, nullable for legacy rows). All queries scoped to the authenticated user
+- **Table name note**: Replit Auth's HTTP session store uses `http_sessions` (not `sessions`) to avoid collision with the cultivation sessions table
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `client/src/store.ts` | Zustand store — holds sessions, fetches from API, computes domain status. Exports `DOMAIN_POLICY` with per-domain SLO targets |
-| `client/src/App.tsx` | Root app — applies theme, triggers `fetchSessions` on mount |
-| `client/src/pages/dashboard.tsx` | Main dashboard — composite health score with NOMINAL/ADVISORY/WARNING/BREACH labels, domain cards with explicit trend deltas |
-| `client/src/pages/domain-detail.tsx` | Domain drill-down — 42-day scrollable chart (auto-scrolled to today), per-domain SLO targets and session floor, current/previous 7d comparison with delta badge |
-| `client/src/pages/system-health.tsx` | Deep diagnostic — NOMINAL/ADVISORY/WARNING/BREACH escalation state, escalation protocol reference grid, domain state board |
-| `client/src/pages/decide.tsx` | Priority-based decision engine — Notion-policy-aligned P1/P2/P3 qualifying criteria, current system escalation state banner, policy-based recommendations |
+| `client/src/App.tsx` | Root app — applies theme, auth-gates the app (shows Landing if not logged in, fetches sessions if authenticated) |
+| `client/src/hooks/use-auth.ts` | Auth hook — queries `/api/auth/user`, exposes `user`, `isLoading`, `isAuthenticated`, `logout` |
+| `client/src/lib/auth-utils.ts` | Auth utilities — `isUnauthorizedError`, `redirectToLogin` helpers |
+| `client/src/pages/landing.tsx` | Landing page — shown to unauthenticated users; sign-in CTA → `/api/login` |
+| `client/src/pages/dashboard.tsx` | Main dashboard — composite health score, domain cards, user avatar + logout menu in header |
+| `client/src/pages/domain-detail.tsx` | Domain drill-down — 42-day scrollable chart, SLO targets, trend delta badge |
+| `client/src/pages/system-health.tsx` | Deep diagnostic — NOMINAL/ADVISORY/WARNING/BREACH escalation state, escalation protocol grid |
+| `client/src/pages/decide.tsx` | Priority-based decision engine — P1/P2/P3 criteria, policy-based recommendations |
 | `client/src/pages/history.tsx` | Session log with 14-day default and "Load Older Sessions" paginator |
 | `client/src/pages/log-session.tsx` | Session logging — domain, duration, notes; POSTs to `/api/sessions` |
-| `server/routes.ts` | API: `GET /api/sessions`, `POST /api/sessions` |
-| `server/storage.ts` | DatabaseStorage — Drizzle CRUD over sessions and users |
+| `server/replit_integrations/auth/` | Replit Auth module: `replitAuth.ts` (OIDC, passport), `storage.ts` (user upsert), `routes.ts` (`/api/auth/user`) |
+| `server/routes.ts` | API: `GET /api/sessions`, `POST /api/sessions` — both protected by `isAuthenticated`, scoped to userId |
+| `server/storage.ts` | DatabaseStorage — `getSessions(userId)`, `getSessionsSince(userId, since)`, `createSession({...data, userId})` |
 | `server/db.ts` | Drizzle + pg Pool connection |
-| `shared/schema.ts` | Drizzle schema for `sessions` and `users`; Zod insert schemas |
+| `shared/schema.ts` | Drizzle schema — re-exports auth models, defines cultivation `sessions` table with `userId` column |
+| `shared/models/auth.ts` | Auth models — `users` table, `httpSessions` table (http_sessions in DB) |
 
 ## Per-Domain SLO Policy (from Notion: 40.30.OCMP.010)
 
