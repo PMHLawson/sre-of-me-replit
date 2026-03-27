@@ -14,6 +14,14 @@ import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
 
+// Documented domain accent palette (ADR-014 / 40.30.OCMP.915) — hardcoded for Tailwind/inline use
+const DOMAIN_ACCENT: Record<Domain, string> = {
+  'martial-arts': '#C8743A',
+  'meditation':   '#6B8EC4',
+  'fitness':      '#5FAE6E',
+  'music':        '#7A6FD6',
+};
+
 const DomainIcon = ({ domain, className }: { domain: Domain, className?: string }) => {
   switch (domain) {
     case 'martial-arts': return <Activity className={className} />;
@@ -75,8 +83,8 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
 
       <CardContent className="p-4 pl-6 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <div className="p-3 rounded-lg bg-muted text-foreground">
-            <DomainIcon domain={domain} className="w-5 h-5 opacity-70" />
+          <div className="p-3 rounded-xl" style={{ backgroundColor: `${DOMAIN_ACCENT[domain]}18` }}>
+            <DomainIcon domain={domain} className="w-5 h-5" style={{ color: DOMAIN_ACCENT[domain] } as React.CSSProperties} />
           </div>
           <div>
             <h3 className="font-semibold text-base tracking-tight text-foreground">{title}</h3>
@@ -144,8 +152,8 @@ export default function Dashboard() {
       rationale = `${degradedCount} domain(s) below SLO green threshold. Decline P3. Time-box any P2. Schedule makeup within 3 days.`;
     } else if (trendingDownCount > 1) {
       sysStatus = 'ADVISORY';
-      sysColor = 'text-blue-400';
-      sysBg = 'bg-blue-400/10';
+      sysColor = 'text-status-advisory';
+      sysBg = 'bg-status-advisory/10';
       rationale = 'All domains above SLO floor, but momentum declining across multiple areas. Note and monitor — avoid new recurring commitments.';
     }
 

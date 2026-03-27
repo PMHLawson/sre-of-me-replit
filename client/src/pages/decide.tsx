@@ -121,8 +121,8 @@ export default function Decide() {
       action: 'Only accept if it provides genuine high value or strategic leverage.',
       state: `NOMINAL — Surplus Capacity`,
       reason: 'System is fully NOMINAL with stable positive momentum. You have surplus capacity. Per policy: Evaluate P3 in a NOMINAL state — accept only if it provides real value, joy, or strategic alignment. Do not accept out of obligation or social pressure.',
-      color: 'text-blue-500',
-      bg: 'bg-blue-500/10'
+      color: 'text-primary',
+      bg: 'bg-primary/10'
     };
   };
 
@@ -152,7 +152,7 @@ export default function Decide() {
         <div className={`rounded-2xl p-4 border flex items-center justify-between ${
           systemState === 'BREACH' ? 'bg-status-critical/10 border-status-critical/20 text-status-critical' :
           systemState === 'WARNING' ? 'bg-status-degraded/10 border-status-degraded/20 text-status-degraded' :
-          systemState === 'ADVISORY' ? 'bg-blue-500/10 border-blue-500/20 text-blue-500' :
+          systemState === 'ADVISORY' ? 'bg-status-advisory/10 border-status-advisory/20 text-status-advisory' :
           'bg-status-healthy/10 border-status-healthy/20 text-status-healthy'
         }`}>
           <div>

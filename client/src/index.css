@@ -11,7 +11,7 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  
+
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
   --color-card: hsl(var(--card));
@@ -27,91 +27,87 @@
   --color-accent: hsl(var(--accent));
   --color-accent-foreground: hsl(var(--accent-foreground));
   --color-border: hsl(var(--border));
-  
-  --color-martial-arts: hsl(var(--martial-arts));
-  --color-meditation: hsl(var(--meditation));
-  --color-fitness: hsl(var(--fitness));
-  --color-music: hsl(var(--music));
-  
+
   --color-status-healthy: hsl(var(--status-healthy));
+  --color-status-advisory: hsl(var(--status-advisory));
   --color-status-degraded: hsl(var(--status-degraded));
   --color-status-critical: hsl(var(--status-critical));
+  --color-status-deviation: hsl(var(--status-deviation));
+  --color-status-neutral: hsl(var(--status-neutral));
 }
 
-/* LIGHT MODE - Neutral-first, aligned with Utility Fork spec */
+/* ─── LIGHT MODE — Tinted neutral surfaces (ADR-014 / 40.30.OCMP.915) ─────── */
 :root {
-  --background: 0 0% 98%; /* True neutral off-white */
-  --foreground: 0 0% 10%; /* Deep neutral slate */
-  
-  --card: 0 0% 100%;
-  --card-foreground: 0 0% 15%;
-  
-  --popover: 0 0% 100%;
-  --popover-foreground: 0 0% 15%;
-  
-  --primary: 180 100% 25%; /* Deep Teal for primary interactions */
-  --primary-foreground: 0 0% 100%;
-  
-  --secondary: 0 0% 95%;
-  --secondary-foreground: 0 0% 25%;
-  
-  --muted: 0 0% 95%;
-  --muted-foreground: 0 0% 45%;
-  
-  --accent: 180 20% 95%; /* Subtle teal tint for accents */
-  --accent-foreground: 0 0% 15%;
-  
-  --border: 0 0% 90%;
-  
-  --radius: 0.5rem; /* Crisper, utility-focused corners */
+  /* Surfaces — blue-sage tinted, not flat gray */
+  --background:          166 14% 96%;   /* #F5F8F7 — light sage tint */
+  --foreground:          198 45% 16%;   /* #16313A — deep navy text */
 
-  /* Domain Colors - Unified muted palette */
-  --martial-arts: 0 0% 45%; 
-  --meditation: 0 0% 45%; 
-  --fitness: 0 0% 45%; 
-  --music: 0 0% 45%; 
+  --card:                0 0% 100%;     /* #FFFFFF — clean white card */
+  --card-foreground:     198 45% 16%;
 
-  /* Status Colors - Explicit semantics */
-  --status-healthy: 142 71% 35%; /* Restrained green */
-  --status-degraded: 35 90% 45%; /* Restrained amber */
-  --status-critical: 0 75% 50%; /* Restrained red */
+  --popover:             0 0% 100%;
+  --popover-foreground:  198 45% 16%;
+
+  /* Brand — teal (brand.primary) */
+  --primary:             186 54% 40%;   /* #2F8F9D */
+  --primary-foreground:  0 0% 100%;
+
+  --secondary:           165 18% 94%;   /* #EEF3F2 surface-alt */
+  --secondary-foreground: 198 45% 16%;
+
+  --muted:               165 18% 94%;   /* #EEF3F2 */
+  --muted-foreground:    196 16% 38%;   /* #526A72 */
+
+  --accent:              186 25% 92%;   /* subtle teal tint */
+  --accent-foreground:   198 45% 16%;
+
+  --border:              169 15% 86%;   /* #D6E0DE */
+
+  --radius: 0.5rem;
+
+  /* Operational state (ADR-014 palette) */
+  --status-healthy:      133 32% 53%;   /* #5FAE6E — nominal/green */
+  --status-advisory:      43 62% 57%;   /* #D8B14A — advisory/yellow */
+  --status-degraded:      29 55% 51%;   /* #C9823A — warning/orange */
+  --status-critical:     351 46% 57%;   /* #C75B6A — breach/rose */
+  --status-deviation:    210 20% 45%;   /* #5B728A — planned deviation */
+  --status-neutral:      194 10% 70%;   /* #AAB8BC — no data */
 }
 
-/* DARK MODE - Neutral-first, aligned with Utility Fork spec */
+/* ─── DARK MODE — Deep navy-charcoal surfaces (ADR-014 / 40.30.OCMP.915) ──── */
 .dark {
-  --background: 0 0% 7%; /* Deep neutral black */
-  --foreground: 0 0% 93%; /* Crisp off-white */
-  
-  --card: 0 0% 10%; /* Subtle elevation */
-  --card-foreground: 0 0% 93%;
-  
-  --popover: 0 0% 10%;
-  --popover-foreground: 0 0% 93%;
-  
-  --primary: 180 80% 40%; /* Vibrant Teal for primary interactions */
-  --primary-foreground: 0 0% 10%;
-  
-  --secondary: 0 0% 15%;
-  --secondary-foreground: 0 0% 93%;
-  
-  --muted: 0 0% 15%;
-  --muted-foreground: 0 0% 65%;
-  
-  --accent: 180 20% 15%; /* Subtle teal tint for accents */
-  --accent-foreground: 0 0% 93%;
-  
-  --border: 0 0% 18%; /* Crisp borders */
+  /* Surfaces — deep navy, not pure black */
+  --background:          214 36% 9%;    /* #0F1720 — deep navy bg */
+  --foreground:          194 29% 93%;   /* #E8F0F2 — crisp off-white */
 
-  /* Domain Colors - Unified muted palette */
-  --martial-arts: 0 0% 65%; 
-  --meditation: 0 0% 65%; 
-  --fitness: 0 0% 65%; 
-  --music: 0 0% 65%; 
+  --card:                210 34% 13%;   /* #15212B — elevated surface */
+  --card-foreground:     194 29% 93%;
 
-  /* Status Colors - Explicit semantics */
-  --status-healthy: 142 60% 50%; 
-  --status-degraded: 35 90% 55%; 
-  --status-critical: 0 80% 60%; 
+  --popover:             210 34% 13%;
+  --popover-foreground:  194 29% 93%;
+
+  /* Brand — same teal, slightly boosted for dark */
+  --primary:             186 52% 45%;   /* ~#37A0AE */
+  --primary-foreground:  214 36% 9%;
+
+  --secondary:           205 33% 16%;   /* #1B2B36 surface-alt */
+  --secondary-foreground: 194 29% 93%;
+
+  --muted:               205 33% 16%;   /* #1B2B36 */
+  --muted-foreground:    195 15% 71%;   /* #A9BBC2 */
+
+  --accent:              205 28% 19%;   /* subtle navy tint */
+  --accent-foreground:   194 29% 93%;
+
+  --border:              204 27% 23%;   /* #2A3C49 */
+
+  /* Operational state — same hues, same values work in dark */
+  --status-healthy:      133 38% 52%;   /* #5FAE6E — slightly boosted */
+  --status-advisory:      43 68% 58%;   /* #D8B14A — slightly boosted */
+  --status-degraded:      29 62% 54%;   /* #C9823A — slightly boosted */
+  --status-critical:     351 52% 60%;   /* #C75B6A — slightly boosted */
+  --status-deviation:    210 22% 52%;   /* #5B728A — slightly boosted */
+  --status-neutral:      194 12% 62%;   /* #AAB8BC — slightly dimmed */
 }
 
 @layer base {

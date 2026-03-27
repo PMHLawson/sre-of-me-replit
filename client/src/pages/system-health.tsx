@@ -26,7 +26,7 @@ function escalationColor(state: EscalationState) {
   switch (state) {
     case 'BREACH':  return { text: 'text-status-critical',  bg: 'bg-status-critical/10',  border: 'border-status-critical/20' };
     case 'WARNING': return { text: 'text-status-degraded',  bg: 'bg-status-degraded/10',  border: 'border-status-degraded/20' };
-    case 'ADVISORY':return { text: 'text-blue-400',         bg: 'bg-blue-400/10',          border: 'border-blue-400/20' };
+    case 'ADVISORY':return { text: 'text-status-advisory',   bg: 'bg-status-advisory/10',   border: 'border-status-advisory/20' };
     case 'NOMINAL': return { text: 'text-status-healthy',   bg: 'bg-status-healthy/10',   border: 'border-status-healthy/20' };
   }
 }
@@ -177,7 +177,7 @@ export default function SystemHealth() {
           <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest pl-2">Escalation Protocol</h2>
           <div className="grid grid-cols-2 gap-2">
             {([['NOMINAL','All SLOs met. Full flex capacity.','text-status-healthy bg-status-healthy/10'],
-               ['ADVISORY','Trends declining. Note & monitor.','text-blue-400 bg-blue-400/10'],
+               ['ADVISORY','Trends declining. Note & monitor.','text-status-advisory bg-status-advisory/10'],
                ['WARNING','SLO slippage. Decline P3. Time-box P2.','text-status-degraded bg-status-degraded/10'],
                ['BREACH','Critical. Cultivation = P1.','text-status-critical bg-status-critical/10']] as const
             ).map(([state, desc, cls]) => (
