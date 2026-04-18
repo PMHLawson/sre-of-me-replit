@@ -12,33 +12,64 @@ export default function Decide() {
 
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
-  // Re-render when API-backed policy state arrives or refreshes.
+  // Re-render when API-backed policy/escalation state arrives or refreshes.
   useAppStore(state => state.policyState);
+  const escalationState = useAppStore(state => state.escalationState);
 
   const { domain: weakestDomain } = getWeakestDomain();
   const weakestStatus = getDomainStatus(weakestDomain);
 
   const domains: ('martial-arts' | 'meditation' | 'fitness' | 'music')[] = ['martial-arts', 'meditation', 'fitness', 'music'];
   const allStatuses = domains.map(d => ({ domain: d, ...getDomainStatus(d) }));
-  const criticalDomains = allStatuses.filter(s => s.status === 'critical');
-  const degradedDomains = allStatuses.filter(s => s.status === 'degraded');
-  const trendingDownDomains = allStatuses.filter(s => s.trend === 'down');
 
-  const isSystemBreach = criticalDomains.length > 0;
-  const isSystemWarning = degradedDomains.length > 0;
-  const isSystemAdvisory = trendingDownDomains.length > 1;
+  // Per-tier domain lists: when API escalation state is available we cite tier membership
+  // directly so the rationale text matches the System Health and Dashboard surfaces.
+  // When it's not (demo modes / pre-fetch), fall back to the existing score-band heuristic.
+  const apiBreachDomains = escalationState
+    ? allStatuses.filter(s => {
+        const t = escalationState.perDomain[s.domain]?.tier;
+        return t === 'BREACH' || t === 'PAGE';
+      })
+    : [];
+  const apiWarningDomains = escalationState
+    ? allStatuses.filter(s => escalationState.perDomain[s.domain]?.tier === 'WARNING')
+    : [];
+  const apiAdvisoryDomains = escalationState
+    ? allStatuses.filter(s => escalationState.perDomain[s.domain]?.tier === 'ADVISORY')
+    : [];
+
+  const localCritical = allStatuses.filter(s => s.status === 'critical');
+  const localDegraded = allStatuses.filter(s => s.status === 'degraded');
+  const localTrendingDown = allStatuses.filter(s => s.trend === 'down');
+
+  // Derive system escalation state from the API tier when available; otherwise use the
+  // pre-existing local heuristic so demo modes and the loading window still produce a verdict.
+  const tierToSystemState = (tier: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE'): 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' =>
+    tier === 'PAGE' ? 'BREACH' : tier;
+
+  const systemState: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' = escalationState
+    ? tierToSystemState(escalationState.highestTier)
+    : (localCritical.length > 0
+        ? 'BREACH'
+        : localDegraded.length > 0
+          ? 'WARNING'
+          : localTrendingDown.length > 1
+            ? 'ADVISORY'
+            : 'NOMINAL');
+
+  const isSystemBreach = systemState === 'BREACH';
+  const isSystemWarning = systemState === 'WARNING';
+  const isSystemAdvisory = systemState === 'ADVISORY';
+
+  // Citation lists used in rationale text, kept aligned with whichever source decided systemState.
+  const criticalDomains = escalationState ? apiBreachDomains : localCritical;
+  const degradedDomains = escalationState ? apiWarningDomains : localDegraded;
+  const trendingDownDomains = escalationState ? apiAdvisoryDomains : localTrendingDown;
 
   const formatDomainsList = (doms: typeof allStatuses) =>
-    doms.map(d => d.domain.replace('-', ' ')).join(', ');
-
-  // Derive system escalation state per Notion policy
-  const getSystemState = () => {
-    if (isSystemBreach) return 'BREACH';
-    if (isSystemWarning) return 'WARNING';
-    if (isSystemAdvisory) return 'ADVISORY';
-    return 'NOMINAL';
-  };
-  const systemState = getSystemState();
+    (doms.length > 0
+      ? doms.map(d => d.domain.replace('-', ' ')).join(', ')
+      : 'one or more domains');
 
   const evaluate = () => {
     if (!priority) return null;
