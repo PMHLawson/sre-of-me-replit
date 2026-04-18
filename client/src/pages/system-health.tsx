@@ -15,7 +15,16 @@ const DomainIcon = ({ domain, className }: { domain: Domain, className?: string 
 
 type EscalationState = 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH';
 
-function getEscalationState(criticalCount: number, degradedCount: number, trendingDownCount: number): EscalationState {
+// Maps the server-computed escalation tier (from /api/escalation-state, derived from the
+// stitched-window policy engine) onto the four banner states this page already renders.
+// PAGE collapses into BREACH for display — both demand the same operator response.
+function tierToState(tier: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE'): EscalationState {
+  if (tier === 'PAGE') return 'BREACH';
+  return tier;
+}
+
+// Local fallback used only when escalationState is null (demo modes or pre-fetch).
+function localFallbackState(criticalCount: number, degradedCount: number, trendingDownCount: number): EscalationState {
   if (criticalCount > 0) return 'BREACH';
   if (degradedCount > 0) return 'WARNING';
   if (trendingDownCount > 1) return 'ADVISORY';
@@ -34,11 +43,11 @@ function escalationColor(state: EscalationState) {
 function escalationRationale(state: EscalationState, critDomains: string[], degDomains: string[], downDomains: string[]): string {
   switch (state) {
     case 'BREACH':
-      return `System is in BREACH. SLO compliance has dropped critically below the session floor threshold in ${critDomains.join(', ')}. Per policy: cultivation is elevated to P1 priority. Decline all P2 and P3 demands. Schedule immediate makeup within 3 days and monitor until recovery to WARNING.`;
+      return `System is in BREACH. SLO compliance has dropped critically below the session floor threshold in ${critDomains.join(', ') || 'one or more domains'}. Per policy: cultivation is elevated to P1 priority. Decline all P2 and P3 demands. Schedule immediate makeup within 3 days and monitor until recovery to WARNING.`;
     case 'WARNING':
-      return `System is in WARNING. Routine slippage detected across ${degDomains.join(', ')} — SLO compliance is below the green threshold for this 7-day window. Per policy: decline P3 demands, strictly time-box any P2 accepted. Schedule makeup sessions within 3 days to prevent escalation to BREACH.`;
+      return `System is in WARNING. Routine slippage detected across ${degDomains.join(', ') || 'one or more domains'} — SLO compliance is below the green threshold for this 7-day window. Per policy: decline P3 demands, strictly time-box any P2 accepted. Schedule makeup sessions within 3 days to prevent escalation to BREACH.`;
     case 'ADVISORY':
-      return `System is ADVISORY. All domains are above SLO floor, but ${downDomains.join(', ')} are trending downward versus the previous 7-day window. Per policy: note and monitor — no action change required. Avoid adding new recurring commitments until trend stabilizes.`;
+      return `System is ADVISORY. All domains are above SLO floor, but ${downDomains.join(', ') || 'one or more domains'} are trending downward or have been inactive across the 7-day window. Per policy: note and monitor — no action change required. Avoid adding new recurring commitments until trend stabilizes.`;
     case 'NOMINAL':
       return 'System is NOMINAL. All domains are meeting or exceeding SLO targets and momentum is stable or improving. Full flex capacity: eligible to accept P2 demands and evaluate P3 demands for strategic alignment.';
   }
@@ -48,8 +57,9 @@ export default function SystemHealth() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
-  // Re-render and recompute the memo when API-backed policy state arrives.
+  // Re-render and recompute the memo when API-backed policy/escalation state arrives.
   const policyState = useAppStore(state => state.policyState);
+  const escalationState = useAppStore(state => state.escalationState);
 
   const { escalation, domainsInfo, insights, compositeScore } = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
@@ -70,12 +80,28 @@ export default function SystemHealth() {
     });
 
     const compositeScore = Math.round(totalScore / 4);
-    const state = getEscalationState(criticalCount, degradedCount, trendingDownCount);
+
+    // Prefer server-computed escalation tier when available; fall back to the local heuristic
+    // for demo modes / pre-fetch. PAGE collapses into BREACH for this banner.
+    const state: EscalationState = escalationState
+      ? tierToState(escalationState.highestTier)
+      : localFallbackState(criticalCount, degradedCount, trendingDownCount);
     const colors = escalationColor(state);
 
-    const critDomains = domainsInfo.filter(d => d.status === 'critical').map(d => formatDomainName(d.domain));
-    const degDomains = domainsInfo.filter(d => d.status === 'degraded').map(d => formatDomainName(d.domain));
-    const downDomains = domainsInfo.filter(d => d.trend === 'down').map(d => formatDomainName(d.domain));
+    // Drill-down lists: when escalation comes from the API we cite tier membership directly,
+    // so Dashboard and System Health agree on which domains drove the headline state.
+    const tierName = (d: Domain): 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE' | null =>
+      escalationState?.perDomain[d]?.tier ?? null;
+
+    const critDomains = escalationState
+      ? domainsInfo.filter(d => tierName(d.domain) === 'BREACH' || tierName(d.domain) === 'PAGE').map(d => formatDomainName(d.domain))
+      : domainsInfo.filter(d => d.status === 'critical').map(d => formatDomainName(d.domain));
+    const degDomains = escalationState
+      ? domainsInfo.filter(d => tierName(d.domain) === 'WARNING').map(d => formatDomainName(d.domain))
+      : domainsInfo.filter(d => d.status === 'degraded').map(d => formatDomainName(d.domain));
+    const downDomains = escalationState
+      ? domainsInfo.filter(d => tierName(d.domain) === 'ADVISORY').map(d => formatDomainName(d.domain))
+      : domainsInfo.filter(d => d.trend === 'down').map(d => formatDomainName(d.domain));
 
     const rationale = escalationRationale(state, critDomains, degDomains, downDomains);
 
@@ -116,7 +142,7 @@ export default function SystemHealth() {
       insights,
       compositeScore
     };
-  }, [sessions, getDomainStatus, policyState]);
+  }, [sessions, getDomainStatus, policyState, escalationState]);
 
   function formatDomainName(domain: string) {
     return domain.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
