@@ -132,7 +132,7 @@ const trendOf = (recent: number, previous: number): 'up' | 'down' | 'flat' => {
   return 'flat';
 };
 
-const calculateDomainStatus = (sessions: Session[], domain: Domain): DomainStatus => {
+export const calculateDomainStatus = (sessions: Session[], domain: Domain): DomainStatus => {
   const policy = DOMAIN_POLICY[domain];
   const { recentMinutes, previousWeekMinutes } = computeWindowMinutes(sessions, domain);
 
@@ -154,7 +154,7 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain): DomainStatu
   };
 };
 
-const apiBackedDomainStatus = (
+export const apiBackedDomainStatus = (
   policyState: PolicyStateResponse,
   sessions: Session[],
   domain: Domain
