@@ -149,6 +149,8 @@ export default function DomainDetail() {
 
   const sessions = useAppStore(s => s.sessions);
   const getDomainStatus = useAppStore(s => s.getDomainStatus);
+  // Re-render when API-backed policy state arrives or refreshes.
+  useAppStore(s => s.policyState);
   const domainSessions = sessions.filter(s => s.domain === domain);
   const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes } = getDomainStatus(domain);
 

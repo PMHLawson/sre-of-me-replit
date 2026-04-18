@@ -12,6 +12,8 @@ export default function Decide() {
 
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
+  // Re-render when API-backed policy state arrives or refreshes.
+  useAppStore(state => state.policyState);
 
   const { domain: weakestDomain } = getWeakestDomain();
   const weakestStatus = getDomainStatus(weakestDomain);

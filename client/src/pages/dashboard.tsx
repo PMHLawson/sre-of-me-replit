@@ -41,6 +41,9 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   // Use stable references
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
+  // Subscribe to policyState so the component re-renders when API-backed
+  // policy data arrives or refreshes; getDomainStatus reads it under the hood.
+  useAppStore(state => state.policyState);
   
   const domainStatus = getDomainStatus(domain);
   const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
@@ -119,6 +122,8 @@ export default function Dashboard() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
   const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
+  // Re-render when API-backed policy state arrives or refreshes.
+  const policyState = useAppStore(state => state.policyState);
   const { user, logout } = useAuth();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -175,7 +180,7 @@ export default function Dashboard() {
     }
 
     return { score: average, status: sysStatus, color: sysColor, bg: sysBg, rationale };
-  }, [sessions]);
+  }, [sessions, policyState]);
 
   const demoState = useAppStore(state => state.demoState);
   const setDemoState = useAppStore(state => state.setDemoState);

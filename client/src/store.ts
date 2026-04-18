@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import type { PolicyStateResponse, ComplianceColor } from '@shared/schema';
 
 export type Domain = 'martial-arts' | 'meditation' | 'fitness' | 'music';
 
@@ -26,12 +27,26 @@ export const DOMAIN_POLICY: Record<Domain, DomainPolicy> = {
   'music':        { targetMinutes: 45,  sessionFloor: 15, cadence: '3×/week',sessionsTarget: 3, dailyProRate: 6  },
 };
 
+export interface DomainStatus {
+  score: number;
+  trend: 'up' | 'down' | 'flat';
+  status: 'healthy' | 'degraded' | 'critical';
+  recentMinutes: number;
+  targetMinutes: number;
+  previousWeekMinutes: number;
+  sessionFloor: number;
+  cadence: string;
+}
+
 interface AppState {
   sessions: Session[];
   sessionsLoaded: boolean;
+  policyState: PolicyStateResponse | null;
+  policyStateLoaded: boolean;
   fetchSessions: () => Promise<void>;
+  fetchPolicyState: () => Promise<void>;
   addSession: (session: Omit<Session, 'id'>) => Promise<void>;
-  getDomainStatus: (domain: Domain) => { score: number; trend: 'up' | 'down' | 'flat'; status: 'healthy' | 'degraded' | 'critical'; recentMinutes: number; targetMinutes: number; previousWeekMinutes: number; sessionFloor: number; cadence: string; };
+  getDomainStatus: (domain: Domain) => DomainStatus;
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
   toggleTheme: () => void;
@@ -82,30 +97,43 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
   return sessions;
 };
 
-const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
-  const policy = DOMAIN_POLICY[domain];
+const colorToStatus = (color: ComplianceColor): 'healthy' | 'degraded' | 'critical' => {
+  if (color === 'green') return 'healthy';
+  if (color === 'yellow') return 'degraded';
+  return 'critical';
+};
+
+const computeWindowMinutes = (sessions: Session[], domain: Domain) => {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
   const fourteenDaysAgo = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000);
 
   const domainSessions = sessions.filter(s => s.domain === domain);
+  const recentMinutes = domainSessions
+    .filter(s => new Date(s.timestamp) >= sevenDaysAgo)
+    .reduce((sum, s) => sum + s.durationMinutes, 0);
+  const previousWeekMinutes = domainSessions
+    .filter(s => {
+      const d = new Date(s.timestamp);
+      return d >= fourteenDaysAgo && d < sevenDaysAgo;
+    })
+    .reduce((sum, s) => sum + s.durationMinutes, 0);
 
-  const recentSessions = domainSessions.filter(s => new Date(s.timestamp) >= sevenDaysAgo);
-  const previousWeekSessions = domainSessions.filter(s => {
-    const d = new Date(s.timestamp);
-    return d >= fourteenDaysAgo && d < sevenDaysAgo;
-  });
+  return { recentMinutes, previousWeekMinutes };
+};
 
-  const targetMinutes = policy.targetMinutes;
-  const recentMinutes = recentSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
-  const previousWeekMinutes = previousWeekSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+const trendOf = (recent: number, previous: number): 'up' | 'down' | 'flat' => {
+  if (recent > previous) return 'up';
+  if (recent < previous) return 'down';
+  return 'flat';
+};
 
-  const score = Math.min(100, Math.round((recentMinutes / targetMinutes) * 100));
+const calculateDomainStatus = (sessions: Session[], domain: Domain): DomainStatus => {
+  const policy = DOMAIN_POLICY[domain];
+  const { recentMinutes, previousWeekMinutes } = computeWindowMinutes(sessions, domain);
 
-  let trend: 'up' | 'down' | 'flat' = 'flat';
-  if (recentMinutes > previousWeekMinutes) trend = 'up';
-  else if (recentMinutes < previousWeekMinutes) trend = 'down';
+  const score = Math.min(100, Math.round((recentMinutes / policy.targetMinutes) * 100));
 
   let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
   if (score < 40) status = 'critical';
@@ -113,13 +141,40 @@ const calculateDomainStatus = (sessions: Session[], domain: Domain) => {
 
   return {
     score,
-    trend,
+    trend: trendOf(recentMinutes, previousWeekMinutes),
     status,
     recentMinutes,
-    targetMinutes,
+    targetMinutes: policy.targetMinutes,
     previousWeekMinutes,
     sessionFloor: policy.sessionFloor,
     cadence: policy.cadence,
+  };
+};
+
+const apiBackedDomainStatus = (
+  policyState: PolicyStateResponse,
+  sessions: Session[],
+  domain: Domain
+): DomainStatus => {
+  const svc = policyState.services[domain];
+  if (!svc) {
+    // Defensive fallback if API omits a domain
+    return calculateDomainStatus(sessions, domain);
+  }
+  // Use API actual_minutes as the displayed "current 7d" total, and pair it with
+  // the locally computed previous-window total for trend. This keeps the trend
+  // arrow consistent with the displayed (recentMinutes - previousWeekMinutes) delta.
+  const { previousWeekMinutes } = computeWindowMinutes(sessions, domain);
+  const recentMinutes = svc.actual_minutes;
+  return {
+    score: Math.round(svc.service_score),
+    trend: trendOf(recentMinutes, previousWeekMinutes),
+    status: colorToStatus(svc.compliance_color),
+    recentMinutes,
+    targetMinutes: svc.policy.targetMinutes,
+    previousWeekMinutes,
+    sessionFloor: svc.policy.sessionFloor,
+    cadence: svc.policy.cadence,
   };
 };
 
@@ -128,6 +183,8 @@ export const useAppStore = create<AppState>()(
     (set, get) => ({
       sessions: [],
       sessionsLoaded: false,
+      policyState: null,
+      policyStateLoaded: false,
       theme: 'dark',
       demoState: 'default',
 
@@ -143,13 +200,31 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      fetchPolicyState: async () => {
+        try {
+          const res = await fetch('/api/policy-state');
+          if (!res.ok) throw new Error('Failed to fetch policy state');
+          const data: PolicyStateResponse = await res.json();
+          set({ policyState: data, policyStateLoaded: true });
+        } catch (err) {
+          console.error('fetchPolicyState error:', err);
+          set({ policyStateLoaded: true });
+        }
+      },
+
       setDemoState: (demoState) => {
         if (demoState === 'default') {
-          get().fetchSessions().then(() => {
+          Promise.all([get().fetchSessions(), get().fetchPolicyState()]).then(() => {
             set({ demoState });
           });
         } else {
-          set({ demoState, sessions: generateMockSessions(demoState), sessionsLoaded: true });
+          set({
+            demoState,
+            sessions: generateMockSessions(demoState),
+            sessionsLoaded: true,
+            policyState: null,
+            policyStateLoaded: true,
+          });
         }
       },
 
@@ -180,6 +255,8 @@ export const useAppStore = create<AppState>()(
           if (!res.ok) throw new Error('Failed to save session');
           const saved: Session = await res.json();
           set((state) => ({ sessions: [saved, ...state.sessions] }));
+          // Refresh API-backed policy state so server-computed scores reflect the new session.
+          get().fetchPolicyState();
         } catch (err) {
           console.error('addSession error:', err);
           set((state) => ({
@@ -189,23 +266,31 @@ export const useAppStore = create<AppState>()(
       },
 
       getDomainStatus: (domain: Domain) => {
-        return calculateDomainStatus(get().sessions, domain);
+        const { sessions, policyState, demoState } = get();
+        if (demoState === 'default' && policyState) {
+          return apiBackedDomainStatus(policyState, sessions, domain);
+        }
+        return calculateDomainStatus(sessions, domain);
       },
 
       getWeakestDomain: () => {
-        const { sessions } = get();
+        const { sessions, policyState, demoState } = get();
         const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
         let weakest: Domain = 'fitness';
         let lowestScore = 101;
         let isDegradedOrCritical = false;
 
+        const useApi = demoState === 'default' && policyState;
+
         domains.forEach(d => {
-          const { score, status } = calculateDomainStatus(sessions, d);
-          if (score < lowestScore) {
-            lowestScore = score;
+          const ds = useApi
+            ? apiBackedDomainStatus(policyState!, sessions, d)
+            : calculateDomainStatus(sessions, d);
+          if (ds.score < lowestScore) {
+            lowestScore = ds.score;
             weakest = d;
           }
-          if (status === 'critical' || status === 'degraded') {
+          if (ds.status === 'critical' || ds.status === 'degraded') {
             isDegradedOrCritical = true;
           }
         });

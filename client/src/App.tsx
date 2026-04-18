@@ -34,6 +34,7 @@ function Router() {
 function AuthGate() {
   const theme = useAppStore(state => state.theme);
   const fetchSessions = useAppStore(state => state.fetchSessions);
+  const fetchPolicyState = useAppStore(state => state.fetchPolicyState);
   const demoState = useAppStore(state => state.demoState);
   const { user, isLoading } = useAuth();
 
@@ -52,6 +53,7 @@ function AuthGate() {
   useEffect(() => {
     if (user && demoState === 'default') {
       fetchSessions();
+      fetchPolicyState();
     }
   }, [user]);
 

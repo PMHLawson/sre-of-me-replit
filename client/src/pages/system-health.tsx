@@ -48,6 +48,8 @@ export default function SystemHealth() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
+  // Re-render and recompute the memo when API-backed policy state arrives.
+  const policyState = useAppStore(state => state.policyState);
 
   const { escalation, domainsInfo, insights, compositeScore } = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
@@ -114,7 +116,7 @@ export default function SystemHealth() {
       insights,
       compositeScore
     };
-  }, [sessions, getDomainStatus]);
+  }, [sessions, getDomainStatus, policyState]);
 
   function formatDomainName(domain: string) {
     return domain.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
