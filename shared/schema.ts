@@ -30,3 +30,41 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true 
 
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
+
+// ----- Policy state response (GET /api/policy-state) -----
+
+export const complianceColorEnum = ["green", "yellow", "red"] as const;
+export type ComplianceColor = typeof complianceColorEnum[number];
+
+export const domainPolicySpecSchema = z.object({
+  targetMinutes: z.number(),
+  sessionFloor: z.number(),
+  sessionsTarget: z.number(),
+  cadence: z.string(),
+  dailyProRate: z.number(),
+});
+
+export const serviceStateSchema = z.object({
+  domain: z.enum(domainEnum),
+  logical_day: z.string(),
+  actual_qualifying_days: z.number(),
+  actual_minutes: z.number(),
+  session_score: z.number(),
+  duration_score: z.number(),
+  service_score: z.number(),
+  service_weight: z.number(),
+  compliance_color: z.enum(complianceColorEnum),
+  policy: domainPolicySpecSchema,
+  window_days: z.array(z.string()),
+});
+
+export const policyStateResponseSchema = z.object({
+  logical_day: z.string(),
+  window_days: z.array(z.string()),
+  services: z.record(z.enum(domainEnum), serviceStateSchema),
+  composite_score: z.number(),
+  composite_color: z.enum(complianceColorEnum),
+});
+
+export type ServiceState = z.infer<typeof serviceStateSchema>;
+export type PolicyStateResponse = z.infer<typeof policyStateResponseSchema>;

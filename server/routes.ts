@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertSessionSchema } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
+import { computeCompositeState } from "./lib/policy-engine";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -17,6 +18,19 @@ export async function registerRoutes(
       res.json(sessions.map(s => ({ ...s, timestamp: s.timestamp.toISOString() })));
     } catch {
       res.status(500).json({ message: "Failed to fetch sessions" });
+    }
+  });
+
+  // GET /api/policy-state — return per-service + composite policy state for the authenticated user
+  // Source of truth for Dashboard, Decide, Domain Detail, History, and System Health.
+  app.get("/api/policy-state", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const sessions = await storage.getSessions(userId);
+      const state = computeCompositeState(sessions);
+      res.json(state);
+    } catch {
+      res.status(500).json({ message: "Failed to compute policy state" });
     }
   });
 
