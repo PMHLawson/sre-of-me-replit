@@ -5,7 +5,7 @@ import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music } from 
 import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { EscalationCard } from '@/components/escalation-surface';
+import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
 
 // Documented palette (ADR-014 / 40.30.OCMP.915) — hardcoded hex required for Recharts SVG
 const DOMAIN_COLOR: Record<Domain, string> = {
@@ -237,6 +237,15 @@ export default function DomainDetail() {
         {/* Escalation Surface — derived from /api/escalation-state */}
         {domainEscalation && (
           <EscalationCard esc={domainEscalation} domainLabel={domainName} />
+        )}
+
+        {/* Per-day tier history strip — last N days at a glance */}
+        {escalationState?.history && escalationState.history.length > 0 && (
+          <EscalationTimeline
+            history={escalationState.history}
+            domain={domain}
+            domainLabel={domainName}
+          />
         )}
 
         {/* Status + Trend Comparison */}

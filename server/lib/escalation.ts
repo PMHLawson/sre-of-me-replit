@@ -58,6 +58,20 @@ export interface DomainEscalation {
   errorBudget: ErrorBudget;
 }
 
+export interface EscalationHistoryDayDomain {
+  tier: EscalationTier;
+  percentRemaining: number;
+}
+
+export interface EscalationHistoryEntry {
+  /** Logical day key for this history slot. */
+  logical_day: string;
+  /** Per-domain tier + remaining error budget on this day. */
+  perDomain: Record<Domain, EscalationHistoryDayDomain>;
+  /** Highest-severity tier across all domains for this day. */
+  highestTier: EscalationTier;
+}
+
 export interface EscalationStateResponse {
   /** Logical day key the computation is anchored on. */
   logical_day: string;
@@ -65,7 +79,12 @@ export interface EscalationStateResponse {
   perDomain: Record<Domain, DomainEscalation>;
   /** Highest-severity tier across all domains. */
   highestTier: EscalationTier;
+  /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
+  history: EscalationHistoryEntry[];
 }
+
+/** Default number of days included in escalation history responses. */
+export const DEFAULT_ESCALATION_HISTORY_DAYS = 14;
 
 function formatDomainName(d: Domain): string {
   return d.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
@@ -203,7 +222,8 @@ export function computeDomainEscalation<T extends Session>(
 /** Compute escalation state for every known domain. */
 export function computeEscalationState<T extends Session>(
   allSessions: T[],
-  opts: PolicyEngineOptions = {}
+  opts: PolicyEngineOptions = {},
+  historyDays: number = DEFAULT_ESCALATION_HISTORY_DAYS
 ): EscalationStateResponse {
   const now = opts.now ?? new Date();
   const todayKey = logicalDay(now, opts);
@@ -215,5 +235,44 @@ export function computeEscalationState<T extends Session>(
     perDomain[d] = esc;
     if (TIER_RANK[esc.tier] > TIER_RANK[highestTier]) highestTier = esc.tier;
   }
-  return { logical_day: todayKey, perDomain, highestTier };
+  const history = computeEscalationHistory(allSessions, opts, historyDays);
+  return { logical_day: todayKey, perDomain, highestTier, history };
+}
+
+/**
+ * Compute per-day escalation tier history for the trailing `days` logical days
+ * (oldest → newest). Each day's entry reflects how `computeEscalationState` would
+ * have classified that day, by sliding the `now` override across the range.
+ */
+export function computeEscalationHistory<T extends Session>(
+  allSessions: T[],
+  opts: PolicyEngineOptions = {},
+  days: number = DEFAULT_ESCALATION_HISTORY_DAYS
+): EscalationHistoryEntry[] {
+  if (days <= 0) return [];
+  const now = opts.now ?? new Date();
+  const todayKey = logicalDay(now, opts);
+  const [ty, tm, td] = todayKey.split("-").map((n) => parseInt(n, 10));
+  const anchorUtc = Date.UTC(ty, tm - 1, td);
+
+  const out: EscalationHistoryEntry[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    // Noon UTC on the target calendar day — safely after `dayStartHour` in supported timezones,
+    // so the logical day for the slid `now` matches the intended calendar day.
+    const slidingNow = new Date(anchorUtc - i * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
+    const slidOpts: PolicyEngineOptions = { ...opts, now: slidingNow };
+    const dayKey = logicalDay(slidingNow, slidOpts);
+    const perDomainDay = {} as Record<Domain, EscalationHistoryDayDomain>;
+    let highest: EscalationTier = "NOMINAL";
+    for (const d of domainEnum) {
+      const esc = computeDomainEscalation(d, allSessions, slidOpts);
+      perDomainDay[d] = {
+        tier: esc.tier,
+        percentRemaining: esc.errorBudget.percentRemaining,
+      };
+      if (TIER_RANK[esc.tier] > TIER_RANK[highest]) highest = esc.tier;
+    }
+    out.push({ logical_day: dayKey, perDomain: perDomainDay, highestTier: highest });
+  }
+  return out;
 }

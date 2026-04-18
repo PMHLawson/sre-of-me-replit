@@ -91,12 +91,27 @@ export const domainEscalationSchema = z.object({
   errorBudget: errorBudgetSchema,
 });
 
+export const escalationHistoryDayDomainSchema = z.object({
+  tier: z.enum(escalationTierEnum),
+  percentRemaining: z.number(),
+});
+
+export const escalationHistoryEntrySchema = z.object({
+  logical_day: z.string(),
+  perDomain: z.record(z.enum(domainEnum), escalationHistoryDayDomainSchema),
+  highestTier: z.enum(escalationTierEnum),
+});
+
 export const escalationStateResponseSchema = z.object({
   logical_day: z.string(),
   perDomain: z.record(z.enum(domainEnum), domainEscalationSchema),
   highestTier: z.enum(escalationTierEnum),
+  /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
+  history: z.array(escalationHistoryEntrySchema),
 });
 
 export type ErrorBudget = z.infer<typeof errorBudgetSchema>;
 export type DomainEscalation = z.infer<typeof domainEscalationSchema>;
+export type EscalationHistoryDayDomain = z.infer<typeof escalationHistoryDayDomainSchema>;
+export type EscalationHistoryEntry = z.infer<typeof escalationHistoryEntrySchema>;
 export type EscalationStateResponse = z.infer<typeof escalationStateResponseSchema>;
