@@ -90,6 +90,19 @@ The "Data" selector in the dashboard generates mock sessions client-side for aud
 |--------|------|-------------|
 | GET | `/api/sessions` | All sessions, ordered by timestamp desc |
 | POST | `/api/sessions` | Create a new session (validates via Zod) |
+| GET | `/api/policy-state` | Per-service + composite policy fidelity (computed in `server/lib/policy-engine.ts`) |
+| GET | `/api/escalation-state` | Per-domain escalation tier, error-budget, burn-rate, recommended action (computed in `server/lib/escalation.ts`) |
+
+## Escalation Stitch Model (server/lib/escalation.ts)
+
+Derived from the same session stream that feeds policy-state. Per-domain output:
+
+- **Tier**: `NOMINAL` → `ADVISORY` → `WARNING` → `BREACH` → `PAGE`. Classification combines compliance color with `consecutiveLowDays` (trailing days in the window with no qualifying session). Red + 3 trailing low days → PAGE; yellow + 2 → WARNING; green + 3 → ADVISORY.
+- **Error budget**: allowed deficit = 60% of `targetMinutes` (red bucket starts at <40% attainment). Tracks `consumedMinutes`, `remainingMinutes`, `percentRemaining`.
+- **Burn rate**: `actualMinutesPerDay / dailyProRate` over the completed window. <1 = under target.
+- **Recommended action**: one concrete operator next-step per tier, surfaced in dashboard strip + domain-detail card.
+
+Client surface lives in `client/src/components/escalation-surface.tsx` (`EscalationCard`, `EscalationStrip`). Store slice: `escalationState`, `fetchEscalationState`. Hydrated alongside policy-state in `App.tsx` and refreshed after each `addSession`.
 
 ## Development
 

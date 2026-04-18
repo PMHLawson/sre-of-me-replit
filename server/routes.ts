@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { insertSessionSchema } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { computeCompositeState } from "./lib/policy-engine";
+import { computeEscalationState } from "./lib/escalation";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -31,6 +32,19 @@ export async function registerRoutes(
       res.json(state);
     } catch {
       res.status(500).json({ message: "Failed to compute policy state" });
+    }
+  });
+
+  // GET /api/escalation-state — per-domain escalation tier, error-budget, burn-rate, recommended action.
+  // Derived from the same session stream that feeds /api/policy-state.
+  app.get("/api/escalation-state", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const sessions = await storage.getSessions(userId);
+      const state = computeEscalationState(sessions);
+      res.json(state);
+    } catch {
+      res.status(500).json({ message: "Failed to compute escalation state" });
     }
   });
 

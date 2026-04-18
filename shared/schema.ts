@@ -68,3 +68,35 @@ export const policyStateResponseSchema = z.object({
 
 export type ServiceState = z.infer<typeof serviceStateSchema>;
 export type PolicyStateResponse = z.infer<typeof policyStateResponseSchema>;
+
+// ----- Escalation state response (GET /api/escalation-state) -----
+
+export const escalationTierEnum = ["NOMINAL", "ADVISORY", "WARNING", "BREACH", "PAGE"] as const;
+export type EscalationTier = typeof escalationTierEnum[number];
+
+export const errorBudgetSchema = z.object({
+  consumedMinutes: z.number(),
+  allowedMinutes: z.number(),
+  remainingMinutes: z.number(),
+  percentRemaining: z.number(),
+});
+
+export const domainEscalationSchema = z.object({
+  domain: z.enum(domainEnum),
+  tier: z.enum(escalationTierEnum),
+  rationale: z.string(),
+  recommendedAction: z.string(),
+  consecutiveLowDays: z.number(),
+  burnRate: z.number(),
+  errorBudget: errorBudgetSchema,
+});
+
+export const escalationStateResponseSchema = z.object({
+  logical_day: z.string(),
+  perDomain: z.record(z.enum(domainEnum), domainEscalationSchema),
+  highestTier: z.enum(escalationTierEnum),
+});
+
+export type ErrorBudget = z.infer<typeof errorBudgetSchema>;
+export type DomainEscalation = z.infer<typeof domainEscalationSchema>;
+export type EscalationStateResponse = z.infer<typeof escalationStateResponseSchema>;

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { PolicyStateResponse, ComplianceColor } from '@shared/schema';
+import type { PolicyStateResponse, ComplianceColor, EscalationStateResponse } from '@shared/schema';
 
 export type Domain = 'martial-arts' | 'meditation' | 'fitness' | 'music';
 
@@ -43,8 +43,11 @@ interface AppState {
   sessionsLoaded: boolean;
   policyState: PolicyStateResponse | null;
   policyStateLoaded: boolean;
+  escalationState: EscalationStateResponse | null;
+  escalationStateLoaded: boolean;
   fetchSessions: () => Promise<void>;
   fetchPolicyState: () => Promise<void>;
+  fetchEscalationState: () => Promise<void>;
   addSession: (session: Omit<Session, 'id'>) => Promise<void>;
   getDomainStatus: (domain: Domain) => DomainStatus;
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
@@ -185,6 +188,8 @@ export const useAppStore = create<AppState>()(
       sessionsLoaded: false,
       policyState: null,
       policyStateLoaded: false,
+      escalationState: null,
+      escalationStateLoaded: false,
       theme: 'dark',
       demoState: 'default',
 
@@ -212,9 +217,25 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      fetchEscalationState: async () => {
+        try {
+          const res = await fetch('/api/escalation-state');
+          if (!res.ok) throw new Error('Failed to fetch escalation state');
+          const data: EscalationStateResponse = await res.json();
+          set({ escalationState: data, escalationStateLoaded: true });
+        } catch (err) {
+          console.error('fetchEscalationState error:', err);
+          set({ escalationStateLoaded: true });
+        }
+      },
+
       setDemoState: (demoState) => {
         if (demoState === 'default') {
-          Promise.all([get().fetchSessions(), get().fetchPolicyState()]).then(() => {
+          Promise.all([
+            get().fetchSessions(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]).then(() => {
             set({ demoState });
           });
         } else {
@@ -224,6 +245,8 @@ export const useAppStore = create<AppState>()(
             sessionsLoaded: true,
             policyState: null,
             policyStateLoaded: true,
+            escalationState: null,
+            escalationStateLoaded: true,
           });
         }
       },
@@ -255,8 +278,9 @@ export const useAppStore = create<AppState>()(
           if (!res.ok) throw new Error('Failed to save session');
           const saved: Session = await res.json();
           set((state) => ({ sessions: [saved, ...state.sessions] }));
-          // Refresh API-backed policy state so server-computed scores reflect the new session.
+          // Refresh API-backed policy + escalation state so server-computed surfaces reflect the new session.
           get().fetchPolicyState();
+          get().fetchEscalationState();
         } catch (err) {
           console.error('addSession error:', err);
           set((state) => ({

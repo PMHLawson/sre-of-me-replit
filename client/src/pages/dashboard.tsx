@@ -15,6 +15,7 @@ import {
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { EscalationStrip } from '@/components/escalation-surface';
 import { useAuth } from '@/hooks/use-auth';
 
 // Documented domain accent palette (ADR-014 / 40.30.OCMP.915) — hardcoded for Tailwind/inline use
@@ -124,6 +125,7 @@ export default function Dashboard() {
   const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
   // Re-render when API-backed policy state arrives or refreshes.
   const policyState = useAppStore(state => state.policyState);
+  const escalationState = useAppStore(state => state.escalationState);
   const { user, logout } = useAuth();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -288,6 +290,21 @@ export default function Dashboard() {
       </header>
 
       <main className="px-4 space-y-4">
+        {escalationState && (
+          <section className="space-y-3">
+            <div className="flex items-center justify-between px-2">
+              <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Escalation</h2>
+              <span className="text-[10px] font-bold tracking-widest text-muted-foreground" data-testid="text-highest-tier">
+                Highest: {escalationState.highestTier}
+              </span>
+            </div>
+            <EscalationStrip
+              perDomain={escalationState.perDomain}
+              onSelect={(d) => setLocation(`/domain/${d}`)}
+            />
+          </section>
+        )}
+
         <div className="px-2 mb-2 flex items-center justify-between">
           <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Domains</h2>
           

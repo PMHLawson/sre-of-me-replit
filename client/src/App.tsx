@@ -35,6 +35,7 @@ function AuthGate() {
   const theme = useAppStore(state => state.theme);
   const fetchSessions = useAppStore(state => state.fetchSessions);
   const fetchPolicyState = useAppStore(state => state.fetchPolicyState);
+  const fetchEscalationState = useAppStore(state => state.fetchEscalationState);
   const demoState = useAppStore(state => state.demoState);
   const { user, isLoading } = useAuth();
 
@@ -54,6 +55,7 @@ function AuthGate() {
     if (user && demoState === 'default') {
       fetchSessions();
       fetchPolicyState();
+      fetchEscalationState();
     }
   }, [user]);
 
