@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';
 import { ArrowLeft } from 'lucide-react';
-import { useAppStore, Domain } from '@/store';
+import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
@@ -120,32 +120,49 @@ export default function History() {
                   <h2 className="text-xs font-bold text-muted-foreground font-mono pl-1 mt-3">
                     {dateLabel}
                   </h2>
-                  {week.sessionsByDate[dateLabel].map(session => (
-                    <div
-                      key={session.id}
-                      className="bg-card border border-border/50 rounded-2xl p-4 flex items-center justify-between shadow-sm"
-                      data-testid={`session-item-${session.id}`}
-                    >
-                      <div>
-                        <div className="font-semibold capitalize text-base tracking-tight text-foreground">
-                          {session.domain.replace('-', ' ')}
-                        </div>
-                        {session.notes && (
-                          <div className="text-sm text-muted-foreground mt-1 line-clamp-1">
-                            {session.notes}
+                  {week.sessionsByDate[dateLabel].map(session => {
+                    const floor = DOMAIN_POLICY[session.domain as Domain].sessionFloor;
+                    const belowFloor = session.durationMinutes < floor;
+                    return (
+                      <div
+                        key={session.id}
+                        className={`bg-card border rounded-2xl p-4 flex items-center justify-between shadow-sm transition-opacity ${
+                          belowFloor ? 'border-status-degraded/30 opacity-75' : 'border-border/50'
+                        }`}
+                        data-testid={`session-item-${session.id}`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <div className="font-semibold capitalize text-base tracking-tight text-foreground">
+                              {session.domain.replace('-', ' ')}
+                            </div>
+                            {belowFloor && (
+                              <span
+                                className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-degraded/10 text-status-degraded border border-status-degraded/20"
+                                title={`Below ${floor}m floor — counts toward minutes but not qualifying days`}
+                                data-testid={`badge-below-floor-${session.id}`}
+                              >
+                                Below floor
+                              </span>
+                            )}
                           </div>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <div className="font-mono font-bold text-primary">
-                          {session.durationMinutes}m
+                          {session.notes && (
+                            <div className="text-sm text-muted-foreground mt-1 line-clamp-1">
+                              {session.notes}
+                            </div>
+                          )}
                         </div>
-                        <div className="text-xs font-medium text-muted-foreground mt-0.5">
-                          {format(parseISO(session.timestamp), 'h:mm a')}
+                        <div className="text-right">
+                          <div className={`font-mono font-bold ${belowFloor ? 'text-status-degraded' : 'text-primary'}`}>
+                            {session.durationMinutes}m
+                          </div>
+                          <div className="text-xs font-medium text-muted-foreground mt-0.5">
+                            {format(parseISO(session.timestamp), 'h:mm a')}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))
             }

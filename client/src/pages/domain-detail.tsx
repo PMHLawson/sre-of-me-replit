@@ -361,34 +361,50 @@ export default function DomainDetail() {
         <section>
           <h2 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3 px-1">Recent Sessions</h2>
           <div className="space-y-2.5">
-            {recentSessions.length > 0 ? recentSessions.map(session => (
-              <div
-                key={session.id}
-                className="bg-card border border-border/50 rounded-2xl p-4 flex items-center justify-between shadow-sm"
-                data-testid={`session-row-${session.id}`}
-              >
-                <div className="flex gap-3 items-start">
-                  <div className="mt-0.5 text-muted-foreground/50">
-                    <Clock className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-sm text-foreground">
-                      {format(parseISO(session.timestamp), 'MMM d, yyyy · h:mm a')}
+            {recentSessions.length > 0 ? recentSessions.map(session => {
+              const belowFloor = session.durationMinutes < policy.sessionFloor;
+              return (
+                <div
+                  key={session.id}
+                  className={`bg-card border rounded-2xl p-4 flex items-center justify-between shadow-sm transition-opacity ${
+                    belowFloor ? 'border-status-degraded/30 opacity-75' : 'border-border/50'
+                  }`}
+                  data-testid={`session-row-${session.id}`}
+                >
+                  <div className="flex gap-3 items-start">
+                    <div className="mt-0.5 text-muted-foreground/50">
+                      <Clock className="w-4 h-4" />
                     </div>
-                    {session.notes && (
-                      <div className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2">{session.notes}</div>
-                    )}
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <div className="font-semibold text-sm text-foreground">
+                          {format(parseISO(session.timestamp), 'MMM d, yyyy · h:mm a')}
+                        </div>
+                        {belowFloor && (
+                          <span
+                            className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-degraded/10 text-status-degraded border border-status-degraded/20"
+                            title={`Below ${policy.sessionFloor}m floor — counts toward minutes but not qualifying days`}
+                            data-testid={`badge-below-floor-${session.id}`}
+                          >
+                            Below floor
+                          </span>
+                        )}
+                      </div>
+                      {session.notes && (
+                        <div className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2">{session.notes}</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className={`font-mono text-xs font-bold px-2.5 py-1.5 rounded-lg ml-3 shrink-0 ${
+                    belowFloor
+                      ? 'bg-status-degraded/10 text-status-degraded'
+                      : 'bg-primary/10 text-primary'
+                  }`}>
+                    {session.durationMinutes}m
                   </div>
                 </div>
-                <div className={`font-mono text-xs font-bold px-2.5 py-1.5 rounded-lg ml-3 shrink-0 ${
-                  session.durationMinutes >= policy.sessionFloor
-                    ? 'bg-primary/10 text-primary'
-                    : 'bg-status-degraded/10 text-status-degraded'
-                }`}>
-                  {session.durationMinutes}m
-                </div>
-              </div>
-            )) : (
+              );
+            }) : (
               <div className="text-center py-10 text-muted-foreground bg-card border border-border/50 rounded-3xl shadow-sm">
                 No sessions found.
               </div>
