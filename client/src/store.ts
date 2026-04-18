@@ -181,6 +181,9 @@ export const apiBackedDomainStatus = (
   };
 };
 
+let policyStateRequestCounter = 0;
+let policyStateAbortController: AbortController | null = null;
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -206,12 +209,21 @@ export const useAppStore = create<AppState>()(
       },
 
       fetchPolicyState: async () => {
+        const requestId = ++policyStateRequestCounter;
+        if (policyStateAbortController) {
+          policyStateAbortController.abort();
+        }
+        const controller = new AbortController();
+        policyStateAbortController = controller;
         try {
-          const res = await fetch('/api/policy-state');
+          const res = await fetch('/api/policy-state', { signal: controller.signal });
           if (!res.ok) throw new Error('Failed to fetch policy state');
           const data: PolicyStateResponse = await res.json();
+          if (requestId !== policyStateRequestCounter) return;
           set({ policyState: data, policyStateLoaded: true });
         } catch (err) {
+          if ((err as { name?: string })?.name === 'AbortError') return;
+          if (requestId !== policyStateRequestCounter) return;
           console.error('fetchPolicyState error:', err);
           set({ policyStateLoaded: true });
         }
