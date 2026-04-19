@@ -140,7 +140,10 @@ export function CalendarHeatMap({ sessions, days, testIdPrefix = 'heatmap' }: Ca
                   return <div key={cell.key} aria-hidden="true" />;
                 }
                 const tier = tierFor(cell.minutes);
-                const showAsEmpty = !cell.inRange;
+                // Empty days (out-of-range filler OR in-range with 0 minutes)
+                // render in muted color per the spec: "0 min = muted". Only
+                // days with at least one minute logged use the primary color.
+                const showAsEmpty = !cell.inRange || cell.minutes === 0;
                 const title = `${format(cell.date, 'MMM d, yyyy')} · ${cell.minutes}m`;
                 return (
                   <div
@@ -148,7 +151,7 @@ export function CalendarHeatMap({ sessions, days, testIdPrefix = 'heatmap' }: Ca
                     className={`rounded-[3px] ${cell.isToday ? 'ring-1 ring-primary ring-offset-0' : ''}`}
                     style={{
                       backgroundColor: showAsEmpty ? 'hsl(var(--muted))' : 'hsl(var(--primary))',
-                      opacity: showAsEmpty ? 0.15 : tier.opacity,
+                      opacity: showAsEmpty ? (cell.inRange ? 0.35 : 0.15) : tier.opacity,
                     }}
                     title={title}
                     aria-label={title}

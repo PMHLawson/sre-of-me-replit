@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useMemo } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
 import { ArrowLeft, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, isDeviationActiveAt, type Session } from '@/store';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session, type Deviation } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, ReferenceArea, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
@@ -301,16 +301,32 @@ export default function DomainDetail() {
   // data false positives during ramp-up.
   const showOverachievement = overachievementTier !== 'NONE';
 
+  // Returns true when a deviation overlaps the calendar day `[dayStart, dayEnd)`
+  // for `domain`. We use day-overlap rather than a point-in-time "active at
+  // midnight" check so a deviation that begins midday still marks that day.
+  const deviationOverlapsDay = (d: Deviation, dom: Domain, dayStart: Date): boolean => {
+    if (d.domain !== dom) return false;
+    if (d.deletedAt) return false;
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayStart.getDate() + 1);
+    const start = new Date(d.startAt).getTime();
+    const endRaw = d.endedAt ?? d.endAt ?? null;
+    const end = endRaw ? new Date(endRaw).getTime() : Number.POSITIVE_INFINITY;
+    return start < dayEnd.getTime() && end > dayStart.getTime();
+  };
+
   // Build full 42-day dataset once; slice to viewDays for display.
   // Each day cell carries `hasAnomaly` (any session that day was flagged as
   // a 2-sigma anomaly) and `hasDeviation` (a deviation covers this domain
   // on that day) so the chart can render overlays without recomputing.
   const allChartData = useMemo<ChartDatum[]>(() => Array.from({ length: ALL_DAYS }).map((_, i) => {
     const date = subDays(new Date(), ALL_DAYS - 1 - i);
+    const dayStart = new Date(date);
+    dayStart.setHours(0, 0, 0, 0);
     const sameDaySessions = domainSessions.filter(s => isSameDay(parseISO(s.timestamp), date));
     const minutes = sameDaySessions.reduce((sum, s) => sum + s.durationMinutes, 0);
     const hasAnomaly = sameDaySessions.some(s => s.isAnomaly);
-    const hasDeviation = deviations.some(d => isDeviationActiveAt(d, domain, date));
+    const hasDeviation = deviations.some(d => deviationOverlapsDay(d, domain, dayStart));
     const tier = i >= ALL_DAYS - 7 ? 'current' : i >= ALL_DAYS - 14 ? 'previous' : 'older';
     return {
       dateKey: format(date, 'yyyy-MM-dd'),
