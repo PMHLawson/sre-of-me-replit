@@ -1,5 +1,15 @@
-import type { Session, Domain } from "@shared/schema";
+import type { Session, Domain, Deviation } from "@shared/schema";
 import { domainEnum } from "@shared/schema";
+
+/**
+ * Subset of a Deviation needed by the engine. Accepting a structural type
+ * keeps the engine pure (no DB dependency) while still letting routes pass
+ * full DB rows directly.
+ */
+export type ActiveDeviation = Pick<
+  Deviation,
+  "domain" | "startAt" | "endAt" | "endedAt" | "excludeFromComposite"
+>;
 
 /**
  * Policy engine — `.910`-aligned computations.
@@ -57,6 +67,39 @@ export interface PolicyEngineOptions {
   excludeToday?: boolean;
   /** IANA timezone in which the day-start-hour boundary is evaluated. Default `America/New_York`. */
   timezone?: string;
+  /**
+   * Active deviations for the requesting user. Domains whose deviation has
+   * `excludeFromComposite=true` are excluded from the composite weighted
+   * average (recovery-clock semantics: the service is held steady, not
+   * pulled down by under-target activity during the deviation window).
+   */
+  deviations?: ActiveDeviation[];
+}
+
+/** True if the deviation is currently active at `now`. */
+function isDeviationActiveNow(d: ActiveDeviation, now: Date): boolean {
+  if (d.endedAt) return false;
+  if (d.startAt > now) return false;
+  if (d.endAt && d.endAt < now) return false;
+  return true;
+}
+
+/** Build a per-domain map of "is currently deviated" + "excluded from composite". */
+function buildDeviationMap(
+  deviations: ActiveDeviation[] | undefined,
+  now: Date,
+): Record<Domain, { active: boolean; excludeFromComposite: boolean }> {
+  const map = {} as Record<Domain, { active: boolean; excludeFromComposite: boolean }>;
+  for (const d of domainEnum) map[d] = { active: false, excludeFromComposite: false };
+  if (!deviations) return map;
+  for (const dv of deviations) {
+    if (!isDeviationActiveNow(dv, now)) continue;
+    const dom = dv.domain as Domain;
+    if (!(dom in map)) continue;
+    map[dom].active = true;
+    if (dv.excludeFromComposite) map[dom].excludeFromComposite = true;
+  }
+  return map;
 }
 
 /** Extract the calendar parts of a Date in a given IANA timezone. */
@@ -260,6 +303,10 @@ export interface ServiceState {
   policy: DomainPolicySpec;
   /** Logical-day keys spanned by this computation (oldest → newest). */
   window_days: string[];
+  /** True if an active deviation covers this domain at the time of compute. */
+  is_deviated?: boolean;
+  /** True if the active deviation excludes this domain from the composite. */
+  excluded_from_composite?: boolean;
 }
 
 /** Compute full per-service state for a single domain. */
@@ -282,6 +329,9 @@ export function computeServiceState<T extends Session>(
   const dScore = durationScore(minutes, policy.targetMinutes);
   const svcScore = serviceScore(sScore, dScore);
 
+  const devMap = buildDeviationMap(opts.deviations, now);
+  const dev = devMap[domain];
+
   return {
     domain,
     logical_day: todayKey,
@@ -294,6 +344,8 @@ export function computeServiceState<T extends Session>(
     compliance_color: complianceColor(svcScore),
     policy,
     window_days: window,
+    is_deviated: dev.active,
+    excluded_from_composite: dev.excludeFromComposite,
   };
 }
 
@@ -308,6 +360,31 @@ export interface CompositeState {
   composite_score: number;
   /** Composite compliance color. */
   composite_color: ComplianceColor;
+  /** Domains excluded from the composite due to an active deviation. */
+  excluded_domains?: Domain[];
+}
+
+/**
+ * Composite score across services using `serviceWeight` per domain, but
+ * excluding any domains in `excluded`. Excluded domains' weights are
+ * dropped (denominator renormalised), so composite reflects only the
+ * services the user is currently committed to.
+ */
+function compositeScoreExcluding(
+  perServiceScores: Partial<Record<Domain, number>>,
+  excluded: Set<Domain>,
+): number {
+  let total = 0;
+  let weightSum = 0;
+  for (const d of domainEnum) {
+    if (excluded.has(d)) continue;
+    const w = serviceWeight(d);
+    const s = perServiceScores[d] ?? 0;
+    total += s * w;
+    weightSum += w;
+  }
+  if (weightSum === 0) return 100; // every service deviated → nothing to drag the score
+  return Math.round(total / weightSum);
 }
 
 /** Compute composite state across all known domains. */
@@ -318,20 +395,24 @@ export function computeCompositeState<T extends Session>(
   const now = opts.now ?? new Date();
   const window = completedWindowDays(opts);
   const todayKey = logicalDay(now, opts);
+  const devMap = buildDeviationMap(opts.deviations, now);
 
   const services = {} as Record<Domain, ServiceState>;
   const scores: Partial<Record<Domain, number>> = {};
+  const excluded = new Set<Domain>();
   for (const d of domainEnum) {
     const state = computeServiceState(d, allSessions, opts);
     services[d] = state;
     scores[d] = state.service_score;
+    if (devMap[d].excludeFromComposite) excluded.add(d);
   }
-  const comp = compositeScore(scores);
+  const comp = compositeScoreExcluding(scores, excluded);
   return {
     logical_day: todayKey,
     window_days: window,
     services,
     composite_score: comp,
     composite_color: complianceColor(comp),
+    excluded_domains: Array.from(excluded),
   };
 }

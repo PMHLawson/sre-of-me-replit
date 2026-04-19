@@ -27,8 +27,11 @@ export async function registerRoutes(
   app.get("/api/policy-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const sessions = await storage.getSessions(userId);
-      const state = computeCompositeState(sessions);
+      const [sessions, activeDeviations] = await Promise.all([
+        storage.getSessions(userId),
+        storage.getActiveDeviations(userId),
+      ]);
+      const state = computeCompositeState(sessions, { deviations: activeDeviations });
       res.json(state);
     } catch {
       res.status(500).json({ message: "Failed to compute policy state" });

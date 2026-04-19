@@ -56,6 +56,10 @@ export const serviceStateSchema = z.object({
   compliance_color: z.enum(complianceColorEnum),
   policy: domainPolicySpecSchema,
   window_days: z.array(z.string()),
+  /** True if an active deviation covers this domain at compute time. */
+  is_deviated: z.boolean().optional(),
+  /** True if the active deviation removes this domain from the composite weight. */
+  excluded_from_composite: z.boolean().optional(),
 });
 
 export const policyStateResponseSchema = z.object({
@@ -64,6 +68,8 @@ export const policyStateResponseSchema = z.object({
   services: z.record(z.enum(domainEnum), serviceStateSchema),
   composite_score: z.number(),
   composite_color: z.enum(complianceColorEnum),
+  /** Domains excluded from the composite weighted average due to active deviation. */
+  excluded_domains: z.array(z.enum(domainEnum)).optional(),
 });
 
 export type ServiceState = z.infer<typeof serviceStateSchema>;
