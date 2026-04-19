@@ -114,12 +114,15 @@ export default function LogSession() {
       return;
     }
 
-    // Step 3: frequency advisory, keyed off the selected date.
+    // Step 3: frequency advisory, keyed off the selected date. In edit mode
+    // we exclude the row being edited so a same-day patch doesn't warn
+    // against itself.
     if (!decisions.frequencyAck) {
-      const selected = new Date(sessionDate);
+      const selected = resolveSessionTimestamp(sessionDate);
       const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
       const hasOnSelectedDay = sessions.some((s) => {
         if (s.deletedAt) return false;
+        if (s.id === editingSessionId) return false;
         if (s.domain !== domain) return false;
         const t = new Date(s.timestamp);
         const k = `${t.getFullYear()}-${t.getMonth()}-${t.getDate()}`;
