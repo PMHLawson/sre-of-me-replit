@@ -57,9 +57,17 @@ export default function LogSession() {
             setStage('anomaly');
             return;
           }
+        } else {
+          // Server returned a non-2xx — treat as fail-open (proceed without
+          // flagging) so a transient API problem doesn't block logging.
+          // The session is saved as non-anomalous; users can still review
+          // it later. Logged for observability.
+          console.warn('anomaly-check returned non-OK status; proceeding without anomaly flag');
         }
         anomalyDecision = { isAnomaly: false, note: null };
-      } catch {
+      } catch (err) {
+        // Network error — same fail-open policy. Logging > prompting wins.
+        console.warn('anomaly-check failed; proceeding without anomaly flag', err);
         anomalyDecision = { isAnomaly: false, note: null };
       }
     }

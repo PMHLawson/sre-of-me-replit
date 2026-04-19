@@ -12,7 +12,7 @@ import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
 import { computeCompositeState, isInRampUp } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
-import { detectAnomaly } from "./lib/anomaly";
+import { detectAnomaly, BASELINE_DAYS } from "./lib/anomaly";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -104,7 +104,12 @@ export async function registerRoutes(
     }
     try {
       const userId: string = req.user.claims.sub;
-      const sessions = await storage.getSessions(userId);
+      // Scope the fetch to the 42-day baseline window the detector cares
+      // about. detectAnomaly will still apply the same cutoff defensively,
+      // but pre-filtering at the DB layer keeps payloads small for users
+      // with long histories.
+      const cutoff = new Date(Date.now() - BASELINE_DAYS * 24 * 60 * 60 * 1000);
+      const sessions = await storage.getSessionsSince(userId, cutoff);
       const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, sessions);
       // JSON cannot serialize Infinity; coerce to a large finite sentinel.
       const zScore = Number.isFinite(result.zScore) ? result.zScore : 9999;
