@@ -9,9 +9,12 @@ import { storage } from "./storage";
 
 /**
  * Soft-deleted sessions older than this window are hard-deleted at startup.
- * Tuned to match the user-facing "Recently Deleted" recovery promise (B2.3).
+ * Aligned with .250 Security Design Document checklist item #10
+ * (42-day retention). The user-facing "Recently Deleted" copy in B2.3
+ * does not name a specific number, so widening the window from 30d to
+ * 42d only extends the recovery promise; nothing in the UI breaks.
  */
-const SESSION_RETENTION_DAYS = 30;
+const SESSION_RETENTION_DAYS = 42;
 const SESSION_RETENTION_MS = SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 const app = express();
@@ -105,26 +108,21 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+// .250 #13 Security-relevant logging without PII exposure. We log only
+// the request envelope (method, path, status, duration) for /api/*. The
+// previous implementation appended the JSON response body, which leaked
+// session notes, settings, deviation reasons, and user profile fields
+// into stdout. Error context for failures lives in the global error
+// handler (server-side console.error) where the raw error remains
+// available for debugging without surfacing user data in access logs.
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
 
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
-
-      log(logLine);
+      log(`${req.method} ${path} ${res.statusCode} in ${duration}ms`);
     }
   });
 
