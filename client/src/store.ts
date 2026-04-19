@@ -18,9 +18,9 @@ export interface Session {
   /** Non-null when soft-deleted; cleared on restore. */
   deletedAt?: string | null;
   /** True when the user confirmed a 2-sigma duration anomaly at save time. */
-  isAnomaly?: boolean;
+  isAnomaly: boolean;
   /** Required note when isAnomaly is true; null otherwise. */
-  anomalyNote?: string | null;
+  anomalyNote: string | null;
 }
 
 /**
@@ -158,6 +158,8 @@ const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded
           domain,
           durationMinutes: Math.floor(Math.random() * 30) + baseDuration,
           timestamp: date.toISOString(),
+          isAnomaly: false,
+          anomalyNote: null,
         });
       }
     });

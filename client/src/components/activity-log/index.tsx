@@ -158,11 +158,7 @@ function SessionRow({ entry, variant, onEdit, onDelete }: SessionRowProps) {
                     ? `Anomaly: ${session.anomalyNote}`
                     : 'Anomaly — duration outside the typical baseline'
                 }
-                data-testid={
-                  isHistory
-                    ? `badge-anomaly-history-${session.id}`
-                    : `badge-anomaly-domain-detail-${session.id}`
-                }
+                data-testid={`badge-anomaly-${session.id}`}
               >
                 Anomaly
               </span>
