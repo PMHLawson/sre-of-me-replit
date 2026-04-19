@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, Check, Clock, AlertTriangle, TrendingDown, Repeat } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
@@ -17,34 +17,31 @@ export default function LogSession() {
   const [notes, setNotes] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
 
-  // Anomaly modal state
+  // Anomaly modal state — populated only while the anomaly modal is showing.
   const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
   const [anomalyNote, setAnomalyNote] = useState('');
-  // Confirmed flags: once a stage is confirmed it is skipped on retry.
-  const [confirmedAnomaly, setConfirmedAnomaly] = useState<{
-    isAnomaly: boolean;
-    note: string | null;
-  } | null>(null);
-  const [confirmedBelowFloor, setConfirmedBelowFloor] = useState(false);
-  const [confirmedFrequency, setConfirmedFrequency] = useState(false);
 
   const addSession = useAppStore(state => state.addSession);
   const sessions = useAppStore(state => state.sessions);
 
-  // Reset confirmation chain whenever a Save-relevant input changes.
-  const resetConfirmations = () => {
-    setConfirmedAnomaly(null);
-    setConfirmedBelowFloor(false);
-    setConfirmedFrequency(false);
-    setAnomalyResult(null);
-    setAnomalyNote('');
-  };
+  /**
+   * Decisions accumulated as the user walks through each modal. Passed
+   * explicitly through `runSaveFlow` so we never read stale state from a
+   * captured closure (the previous setTimeout(handleSave, 0) re-entry was
+   * subject to that bug). Each modal confirm handler computes the new
+   * decision locally and re-invokes runSaveFlow with it.
+   */
+  interface SaveDecisions {
+    anomaly: { isAnomaly: boolean; note: string | null } | null;
+    belowFloorAck: boolean;
+    frequencyAck: boolean;
+  }
 
-  const handleSave = async () => {
+  const runSaveFlow = async (decisions: SaveDecisions) => {
     setStage('saving');
 
     // ── Step 1: anomaly check ────────────────────────────────────────────
-    let anomalyDecision = confirmedAnomaly;
+    let anomalyDecision = decisions.anomaly;
     if (!anomalyDecision) {
       try {
         const res = await fetch('/api/sessions/anomaly-check', {
@@ -56,28 +53,29 @@ export default function LogSession() {
           const result: AnomalyCheckResponse = await res.json();
           if (result.isAnomaly) {
             setAnomalyResult(result);
+            setAnomalyNote('');
             setStage('anomaly');
             return;
           }
         }
-        // Network/server failure or not anomalous → proceed.
         anomalyDecision = { isAnomaly: false, note: null };
-        setConfirmedAnomaly(anomalyDecision);
       } catch {
         anomalyDecision = { isAnomaly: false, note: null };
-        setConfirmedAnomaly(anomalyDecision);
       }
     }
 
     // ── Step 2: below-floor advisory ─────────────────────────────────────
     const floor = DOMAIN_POLICY[domain].sessionFloor;
-    if (duration < floor && !confirmedBelowFloor) {
+    if (duration < floor && !decisions.belowFloorAck) {
+      // Stash the anomaly decision on the modal so its confirm handler can
+      // forward it without re-running the network check.
+      pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
       setStage('below-floor');
       return;
     }
 
     // ── Step 3: frequency advisory (already logged this domain today) ────
-    if (!confirmedFrequency) {
+    if (!decisions.frequencyAck) {
       const today = new Date();
       const todayKey = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
       const hasToday = sessions.some((s) => {
@@ -88,6 +86,7 @@ export default function LogSession() {
         return k === todayKey;
       });
       if (hasToday) {
+        pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
         setStage('frequency');
         return;
       }
@@ -105,13 +104,34 @@ export default function LogSession() {
     setLocation('/');
   };
 
+  // Holds the in-flight decisions while a modal is open so confirm handlers
+  // can resume the pipeline without losing prior decisions or re-running the
+  // anomaly network check. Ref (not state) so updates are synchronous.
+  const pendingDecisionsRef = useRef<SaveDecisions>({
+    anomaly: null,
+    belowFloorAck: false,
+    frequencyAck: false,
+  });
+
+  const handleSave = () => {
+    pendingDecisionsRef.current = {
+      anomaly: null,
+      belowFloorAck: false,
+      frequencyAck: false,
+    };
+    void runSaveFlow(pendingDecisionsRef.current);
+  };
+
   const onAnomalyConfirm = () => {
     const trimmed = anomalyNote.trim();
     if (!trimmed) return;
-    setConfirmedAnomaly({ isAnomaly: true, note: trimmed });
-    setStage('idle');
-    // Re-enter save flow on next tick so state updates flush.
-    setTimeout(() => handleSave(), 0);
+    const next: SaveDecisions = {
+      ...pendingDecisionsRef.current,
+      anomaly: { isAnomaly: true, note: trimmed },
+    };
+    pendingDecisionsRef.current = next;
+    setAnomalyResult(null);
+    void runSaveFlow(next);
   };
 
   const onAnomalyCancel = () => {
@@ -121,9 +141,12 @@ export default function LogSession() {
   };
 
   const onBelowFloorConfirm = () => {
-    setConfirmedBelowFloor(true);
-    setStage('idle');
-    setTimeout(() => handleSave(), 0);
+    const next: SaveDecisions = {
+      ...pendingDecisionsRef.current,
+      belowFloorAck: true,
+    };
+    pendingDecisionsRef.current = next;
+    void runSaveFlow(next);
   };
 
   const onBelowFloorCancel = () => {
@@ -131,9 +154,12 @@ export default function LogSession() {
   };
 
   const onFrequencyConfirm = () => {
-    setConfirmedFrequency(true);
-    setStage('idle');
-    setTimeout(() => handleSave(), 0);
+    const next: SaveDecisions = {
+      ...pendingDecisionsRef.current,
+      frequencyAck: true,
+    };
+    pendingDecisionsRef.current = next;
+    void runSaveFlow(next);
   };
 
   const onFrequencyCancel = () => {
@@ -142,12 +168,10 @@ export default function LogSession() {
 
   const setDomainAndReset = (d: Domain) => {
     setDomain(d);
-    resetConfirmations();
   };
 
   const setDurationAndReset = (m: number) => {
     setDuration(m);
-    resetConfirmations();
   };
 
   const domains: { id: Domain; label: string }[] = [
