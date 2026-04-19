@@ -125,6 +125,15 @@ interface AppState {
   toggleTheme: () => void;
   demoState: 'default' | 'overperforming' | 'degraded' | 'mixed';
   setDemoState: (state: 'default' | 'overperforming' | 'degraded' | 'mixed') => void;
+  /**
+   * Transient client-only notification snooze. ISO timestamp until which
+   * in-app notification toasts/badges should be suppressed. Never persisted
+   * to the database — wiped on full reload (zustand persist whitelist
+   * excludes it). null = not snoozed.
+   */
+  snoozeUntil: string | null;
+  setSnoozeUntil: (until: string | null) => void;
+  isSnoozed: () => boolean;
 }
 
 const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded' | 'mixed' = 'default'): Session[] => {
@@ -522,6 +531,15 @@ export const useAppStore = create<AppState>()(
           console.error('deleteDeviation error:', err);
           return false;
         }
+      },
+
+      snoozeUntil: null,
+      setSnoozeUntil: (until) => set({ snoozeUntil: until }),
+      isSnoozed: () => {
+        const until = get().snoozeUntil;
+        if (!until) return false;
+        const t = Date.parse(until);
+        return Number.isFinite(t) && t > Date.now();
       },
 
       setDemoState: (demoState) => {

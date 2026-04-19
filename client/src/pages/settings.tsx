@@ -267,11 +267,10 @@ export default function SettingsPage() {
               </div>
             </section>
 
-            {/* Notifications (Phase 1 stored, no transport yet) */}
-            <section className="bg-card border border-border/60 rounded-2xl p-5 opacity-90">
+            {/* Notifications — settings-backed (transport in C4.3+) */}
+            <section className="bg-card border border-border/60 rounded-2xl p-5">
               <h2 className="text-sm font-bold tracking-wide text-foreground mb-3">
                 Notifications
-                <ComingSoonBadge />
               </h2>
 
               <div className="flex items-center justify-between py-2">
@@ -279,14 +278,13 @@ export default function SettingsPage() {
                   <label className="block text-sm font-medium text-foreground">
                     Enable notifications
                   </label>
-                  <p className="text-xs text-muted-foreground">Stored now; transport ships in a future release.</p>
+                  <p className="text-xs text-muted-foreground">Push when permitted; in-app badge fallback otherwise.</p>
                 </div>
                 <input
                   type="checkbox"
                   checked={settings.notificationsEnabled}
-                  disabled
                   onChange={(e) => setSettings((s) => ({ ...s, notificationsEnabled: e.target.checked }))}
-                  className="w-5 h-5 cursor-not-allowed"
+                  className="w-5 h-5 cursor-pointer accent-primary"
                   data-testid="toggle-notifications-enabled"
                 />
               </div>
@@ -297,15 +295,16 @@ export default function SettingsPage() {
                 </label>
                 <select
                   value={settings.notificationTier}
-                  disabled
+                  disabled={!settings.notificationsEnabled}
                   onChange={(e) => setSettings((s) => ({ ...s, notificationTier: e.target.value }))}
-                  className="w-full bg-background border border-border/60 rounded-lg px-3 py-2 text-sm cursor-not-allowed text-muted-foreground"
+                  className={`w-full bg-background border border-border/60 rounded-lg px-3 py-2 text-sm ${settings.notificationsEnabled ? 'text-foreground' : 'text-muted-foreground cursor-not-allowed'}`}
                   data-testid="select-notification-tier"
                 >
                   {NOTIFICATION_TIERS.map((t) => (
                     <option key={t} value={t}>{t}</option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-muted-foreground">Only events at or above this tier will alert you.</p>
               </div>
             </section>
 
