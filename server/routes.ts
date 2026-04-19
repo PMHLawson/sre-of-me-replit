@@ -75,19 +75,36 @@ export async function registerRoutes(
   app.get("/api/escalation-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
+      // Optional ?days= override for the trailing history window. Validated and
+      // capped at MAX_ESCALATION_HISTORY_DAYS to bound server work; falls back
+      // to DEFAULT_ESCALATION_HISTORY_DAYS when absent or invalid.
+      const MAX_ESCALATION_HISTORY_DAYS = 60;
+      const rawDays = req.query.days;
+      let historyDays: number | undefined;
+      if (typeof rawDays === "string" && rawDays.length > 0) {
+        const parsed = Number.parseInt(rawDays, 10);
+        if (!Number.isFinite(parsed) || parsed < 1) {
+          return res.status(400).json({ message: "Invalid days parameter" });
+        }
+        historyDays = Math.min(parsed, MAX_ESCALATION_HISTORY_DAYS);
+      }
       const [sessions, activeDeviations, user, settings] = await Promise.all([
         storage.getSessions(userId),
         storage.getActiveDeviations(userId),
         authStorage.getUser(userId),
         storage.getUserSettings(userId),
       ]);
-      const state = computeEscalationState(sessions, {
-        deviations: activeDeviations,
-        userCreatedAt: user?.createdAt ?? undefined,
-        dayStartHour: settings.dayStartHour,
-        timezone: settings.timezone,
-        windowDays: settings.windowDays,
-      });
+      const state = computeEscalationState(
+        sessions,
+        {
+          deviations: activeDeviations,
+          userCreatedAt: user?.createdAt ?? undefined,
+          dayStartHour: settings.dayStartHour,
+          timezone: settings.timezone,
+          windowDays: settings.windowDays,
+        },
+        historyDays,
+      );
       res.json(state);
     } catch {
       res.status(500).json({ message: "Failed to compute escalation state" });

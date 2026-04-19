@@ -158,11 +158,36 @@ export default function DomainDetail() {
   const updateSession = useAppStore(s => s.updateSession);
   const deleteSession = useAppStore(s => s.deleteSession);
   const getDomainStatus = useAppStore(s => s.getDomainStatus);
+  const fetchEscalationState = useAppStore(s => s.fetchEscalationState);
   const [editing, setEditing] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState<Session | null>(null);
   // Re-render when API-backed policy state arrives or refreshes.
   useAppStore(s => s.policyState);
   const escalationState = useAppStore(s => s.escalationState);
+
+  // History range for the per-day tier strip — re-fetches /api/escalation-state
+  // with ?days= so the timeline reflects the user's chosen lookback.
+  const HISTORY_RANGE_OPTIONS = [
+    { label: '7d',  days: 7 },
+    { label: '14d', days: 14 },
+    { label: '30d', days: 30 },
+  ];
+  const [historyDays, setHistoryDays] = useState(14);
+  useEffect(() => {
+    fetchEscalationState(historyDays);
+  }, [historyDays, fetchEscalationState]);
+  // Other store actions (addSession / updateSession / deleteSession /
+  // deviation mutations) call fetchEscalationState() with no days argument,
+  // which would silently revert the history strip back to the default 14-day
+  // window even when the user has 30d selected. Detect that drift via the
+  // returned history length and re-fetch with the user's chosen range so the
+  // toggle and the rendered timeline stay in agreement.
+  const escalationHistoryLength = escalationState?.history.length ?? 0;
+  useEffect(() => {
+    if (escalationHistoryLength > 0 && escalationHistoryLength !== historyDays) {
+      fetchEscalationState(historyDays);
+    }
+  }, [escalationHistoryLength, historyDays, fetchEscalationState]);
   const domainEscalation = escalationState?.perDomain[domain];
   const domainSessions = sessions.filter(s => s.domain === domain);
   const activeDeviation = findActiveDeviationAt(deviations, domain, new Date());
@@ -300,11 +325,34 @@ export default function DomainDetail() {
 
         {/* Per-day tier history strip — last N days at a glance */}
         {escalationState?.history && escalationState.history.length > 0 && (
-          <EscalationTimeline
-            history={escalationState.history}
-            domain={domain}
-            domainLabel={domainName}
-          />
+          <div className="space-y-2">
+            <div className="flex items-center justify-end">
+              <div
+                className="flex items-center gap-1 bg-muted/60 rounded-xl p-1"
+                data-testid="group-history-range"
+              >
+                {HISTORY_RANGE_OPTIONS.map(opt => (
+                  <button
+                    key={opt.days}
+                    onClick={() => setHistoryDays(opt.days)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                      historyDays === opt.days
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    data-testid={`button-history-range-${opt.label}`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <EscalationTimeline
+              history={escalationState.history}
+              domain={domain}
+              domainLabel={domainName}
+            />
+          </div>
         )}
 
         {/* Status + Trend Comparison */}

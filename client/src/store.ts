@@ -100,7 +100,7 @@ interface AppState {
   deviationsLoaded: boolean;
   fetchSessions: () => Promise<void>;
   fetchPolicyState: () => Promise<void>;
-  fetchEscalationState: () => Promise<void>;
+  fetchEscalationState: (days?: number) => Promise<void>;
   updateSession: (id: string, patch: SessionPatch, reason: string) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<boolean>;
   /** Soft-deleted sessions still within retention window. Lazy-loaded. */
@@ -393,9 +393,12 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      fetchEscalationState: async () => {
+      fetchEscalationState: async (days?: number) => {
         try {
-          const res = await fetch('/api/escalation-state');
+          const url = typeof days === 'number'
+            ? `/api/escalation-state?days=${days}`
+            : '/api/escalation-state';
+          const res = await fetch(url);
           if (!res.ok) throw new Error('Failed to fetch escalation state');
           const data: EscalationStateResponse = await res.json();
           set({ escalationState: data, escalationStateLoaded: true });
