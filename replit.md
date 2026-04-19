@@ -121,3 +121,35 @@ npm run db:push    # push Drizzle schema to PostgreSQL
 - Zustand persist key: `sre-of-me-v2` (only persists `theme`)
 - PWA manifest.json must not be broken (Android install tested)
 - Session duration badges in domain-detail: highlighted in `degraded` color if below session floor
+
+## Replit Task Board Intake Workflow (Owner-approved 2026/04/19 17:38 ET)
+
+Standing governance pattern for any candidate work I surface during SOMR execution. Source: Notion deliberation `346f041f-c870-816b-921e-d23ad69aada6`. Status: OWNER_APPROVED, EFFECTIVE: IMMEDIATELY.
+
+**Trigger and documentation**
+1. Replit encounters candidate work mid-execution.
+2. Replit finishes the **current sub-task**, then **stops** — does not proceed with the rest of the bundle.
+3. Replit posts detailed structured comments on the **active Jira story shell** with stable local identifiers (`RTB-XX-NN`).
+4. Replit flags the candidate work inside its **sub-task completion comment** with count and story-shell references (`⚠ CANDIDATE WORK SURFACED: <count>`). Completion-comment flag is the **guaranteed** trigger.
+5. Direct ChatGPT notification attempted if platform supports; not relied on.
+6. Replit does not resume work until ChatGPT responds with directions.
+
+**Triage and disposition**
+- ChatGPT initiates triage with Claude during normal four-eyes review.
+- **Nine mandatory fields per item:** source sub-task, summary, rationale (verbose), suggested disposition, scope assessment, blocking assessment, timestamp, proposed Jira destination, stable local identifier.
+- **Four dispositions only** (no APPROVE-Inline Fix):
+  - **APPROVE — Backlog** (location-neutral: current checkpoint, later checkpoint, OP-2, or defect ticket)
+  - **DEFER**
+  - **ALREADY REPRESENTED**
+  - **REJECT**
+- **Philip approval mandatory for:** new out-of-scope tickets, .910/policy changes, AI disagreement, blocking items, re-sequencing of approved work.
+- No implementation before disposition + Jira outcome (when Jira tracking is required).
+
+**Clean rule**
+- If it is already in scope, just do it.
+- If it must be surfaced through intake, it must be tracked in Jira.
+
+**Three guardrails**
+- **G1 — No silent conversion:** Jira comment must exist before any work is done.
+- **G2 (UPGRADED) — Four-eyes depth:** ChatGPT catches unauthorized work through story-level **changed-files review and targeted code inspection** against Jira scope, not commit-message checking.
+- **G3 — Audit trail:** Jira story-shell comments are the audit trail.
