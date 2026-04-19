@@ -3,6 +3,7 @@ import { useAppStore, Domain } from '@/store';
 import { ArrowLeft, Activity, BrainCircuit, Dumbbell, Music, ChevronRight, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { useMemo } from 'react';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { OverachievementBadge } from '@/components/overachievement-badge';
 
 const DomainIcon = ({ domain, className }: { domain: Domain, className?: string }) => {
   switch (domain) {
@@ -290,6 +291,14 @@ export default function SystemHealth() {
                     <div className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-widest font-bold border ${getDomainStatusColor(d.status)}`}>
                       {d.status}
                     </div>
+                    {!isRampUp && d.overachievementTier !== 'NONE' && (
+                      <OverachievementBadge
+                        tier={d.overachievementTier}
+                        rawScore={d.overachievementRaw}
+                        compact
+                        testIdSuffix={d.domain}
+                      />
+                    )}
                     <ChevronRight className="w-4 h-4 text-muted-foreground/40" />
                   </div>
                 </div>

@@ -16,6 +16,7 @@ import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationStrip, EscalationTimeline } from '@/components/escalation-surface';
+import { OverachievementBadge } from '@/components/overachievement-badge';
 import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useAuth } from '@/hooks/use-auth';
 
@@ -54,7 +55,11 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   const domainStatus = getDomainStatus(domain);
   const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
   
-  const { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes } = domainStatus;
+  const { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes, overachievementTier, overachievementRaw } = domainStatus;
+  // C2.2 — Overachievement badge is suppressed during ramp-up, mirroring the
+  // priority-recovery suppression: until the runway completes, no surface
+  // signals strong evaluations of user behavior.
+  const showOverachievement = !isRampUp && overachievementTier !== 'NONE';
   
   // Only apply aggressive visual signaling if the domain is ACTUALLY in trouble
   // Just being the "lowest score" among 4 perfectly healthy domains shouldn't trigger red alerts.
@@ -102,10 +107,18 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
           <div>
             <h3 className="font-semibold text-base tracking-tight text-foreground">{title}</h3>
             <div className="flex flex-col mt-0.5 gap-1">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground flex-wrap">
                 <span className="font-mono text-foreground/80">{score}/100</span>
                 <span className="opacity-40 text-[10px]">•</span>
                 <span>{recentMinutes}m / {targetMinutes}m goal</span>
+                {showOverachievement && (
+                  <OverachievementBadge
+                    tier={overachievementTier}
+                    rawScore={overachievementRaw}
+                    compact
+                    testIdSuffix={domain}
+                  />
+                )}
               </div>
               <div className="flex items-center text-[11px] font-bold">
                 {trend === 'up' && <span className="text-status-healthy flex items-center gap-1" title="Trending up vs history">↗ {recentMinutes}m vs {previousWeekMinutes}m (+{recentMinutes - previousWeekMinutes}m)</span>}

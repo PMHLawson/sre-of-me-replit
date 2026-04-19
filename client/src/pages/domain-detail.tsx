@@ -9,6 +9,7 @@ import { EscalationCard, EscalationTimeline } from '@/components/escalation-surf
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
 import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
 import { ActivityLog } from '@/components/activity-log';
+import { OverachievementBadge } from '@/components/overachievement-badge';
 import { buildActivityLog } from '@/lib/activity-log';
 
 // Documented palette (ADR-014 / 40.30.OCMP.915) — hardcoded hex required for Recharts SVG
@@ -165,7 +166,9 @@ export default function DomainDetail() {
   const domainEscalation = escalationState?.perDomain[domain];
   const domainSessions = sessions.filter(s => s.domain === domain);
   const activeDeviation = findActiveDeviationAt(deviations, domain, new Date());
-  const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes } = getDomainStatus(domain);
+  const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes, overachievementTier, overachievementRaw } = getDomainStatus(domain);
+  const isRampUp = escalationState?.isRampUp ?? false;
+  const showOverachievement = !isRampUp && overachievementTier !== 'NONE';
 
   // Build full 42-day dataset once; slice to viewDays for display
   const allChartData = Array.from({ length: ALL_DAYS }).map((_, i) => {
@@ -308,11 +311,18 @@ export default function DomainDetail() {
           <div className="flex items-start justify-between mb-4">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">SLO Score</div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <span className={`text-5xl font-extrabold tracking-tighter ${statusText}`}>{score}</span>
                 <div className={`px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wide border ${statusBg} ${statusText} ${statusBorder}`}>
                   {status}
                 </div>
+                {showOverachievement && (
+                  <OverachievementBadge
+                    tier={overachievementTier}
+                    rawScore={overachievementRaw}
+                    testIdSuffix={domain}
+                  />
+                )}
               </div>
               <div className="text-xs text-muted-foreground mt-1.5">
                 {pctOfTarget}% of {targetMinutes}m/week SLO · {policy.cadence}

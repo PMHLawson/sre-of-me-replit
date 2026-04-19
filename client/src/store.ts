@@ -5,6 +5,7 @@ import type {
   ComplianceColor,
   EscalationStateResponse,
   Deviation as ServerDeviation,
+  OverachievementTier,
 } from '@shared/schema';
 
 export type Domain = 'martial-arts' | 'meditation' | 'fitness' | 'music';
@@ -59,6 +60,10 @@ export interface DomainStatus {
   previousWeekMinutes: number;
   sessionFloor: number;
   cadence: string;
+  /** C2.1 — Uncapped MIN(raw_session_score, raw_duration_score). */
+  overachievementRaw: number;
+  /** C2.1 — Tier derived from overachievementRaw. */
+  overachievementTier: OverachievementTier;
 }
 
 /**
@@ -218,6 +223,11 @@ export const calculateDomainStatus = (sessions: Session[], domain: Domain): Doma
     previousWeekMinutes,
     sessionFloor: policy.sessionFloor,
     cadence: policy.cadence,
+    // Demo / fallback path: overachievement isn't computed here (no qualifying-day
+    // signal available), so default to NONE. The API-backed path provides the
+    // real tier in production usage.
+    overachievementRaw: score,
+    overachievementTier: 'NONE',
   };
 };
 
@@ -245,6 +255,8 @@ export const apiBackedDomainStatus = (
     previousWeekMinutes,
     sessionFloor: svc.policy.sessionFloor,
     cadence: svc.policy.cadence,
+    overachievementRaw: svc.overachievement_raw,
+    overachievementTier: svc.overachievement_tier,
   };
 };
 
