@@ -23,6 +23,39 @@
 
 import type { Domain } from '@/store';
 
+/**
+ * Same-origin path allowlist. Mirrors the SW's sanitizePath/DEEPLINK_*.
+ * Any deep-link target must match one of these prefixes (exact for "/"
+ * and "/history" etc, prefix for "/domain/"). Blocks open-redirect via
+ * push payloads carrying absolute URLs or arbitrary paths.
+ */
+const DEEPLINK_PREFIXES = ['/domain/'];
+const DEEPLINK_EXACT = new Set([
+  '/',
+  '/history',
+  '/settings',
+  '/system-health',
+  '/decide',
+  '/log',
+]);
+
+/**
+ * Returns the input path if it is a same-origin app route in the
+ * allowlist; otherwise '/'. Strips query/hash for the allowlist check
+ * but preserves them in the returned value on success.
+ */
+export function sanitizeDeepLinkPath(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0) return '/';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return '/';
+  if (!raw.startsWith('/')) return '/';
+  const pathOnly = raw.split(/[?#]/, 1)[0];
+  if (DEEPLINK_EXACT.has(pathOnly)) return raw;
+  for (const prefix of DEEPLINK_PREFIXES) {
+    if (pathOnly.startsWith(prefix) && pathOnly.length > prefix.length) return raw;
+  }
+  return '/';
+}
+
 export type ClientTriggerType =
   | 'ESCALATION_CHANGE'
   | 'COMPLIANCE_WARNING'

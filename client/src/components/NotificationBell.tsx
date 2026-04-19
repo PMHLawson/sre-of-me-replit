@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store';
+import { sanitizeDeepLinkPath } from '@/lib/notification-deeplink';
 
 const SEVERITY_DOT: Record<string, string> = {
   ADVISORY: 'bg-yellow-400',
@@ -59,12 +60,16 @@ export function NotificationBell() {
   const handleRowClick = (id: string, deepLink: string) => {
     markRead(id);
     setOpen(false);
-    setLocation(deepLink);
+    // Stored deepLinks already pass through the lib helper, but re-sanitize
+    // before navigation as defence-in-depth against future store-injection bugs.
+    setLocation(sanitizeDeepLinkPath(deepLink));
   };
 
   const handleSnooze = () => {
     const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     setSnooze(until);
+    // Also drop any unread items so the badge clears immediately.
+    clearAll();
   };
   const handleUnsnooze = () => setSnooze(null);
 

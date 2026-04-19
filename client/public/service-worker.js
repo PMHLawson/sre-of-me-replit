@@ -22,13 +22,45 @@ self.addEventListener('activate', (event) => {
 });
 
 /**
+ * Same-origin path allowlist. Any deep-link target must match one of these
+ * prefixes (exact for "/" and "/history" etc, prefix for "/domain/").
+ * This blocks open-redirect via push payloads carrying absolute URLs or
+ * arbitrary paths and is mirrored in client/src/lib/notification-deeplink.ts.
+ */
+const DEEPLINK_PREFIXES = ['/domain/'];
+const DEEPLINK_EXACT = new Set([
+  '/',
+  '/history',
+  '/settings',
+  '/system-health',
+  '/decide',
+  '/log',
+]);
+
+function sanitizePath(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return '/';
+  // Reject anything that smells like an absolute URL or protocol-relative.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return '/';
+  if (!raw.startsWith('/')) return '/';
+  // Strip query/hash for the allowlist check; preserve them on success.
+  const pathOnly = raw.split(/[?#]/, 1)[0];
+  if (DEEPLINK_EXACT.has(pathOnly)) return raw;
+  for (const prefix of DEEPLINK_PREFIXES) {
+    if (pathOnly.startsWith(prefix) && pathOnly.length > prefix.length) return raw;
+  }
+  return '/';
+}
+
+/**
  * Resolve the deep-link path for a TriggerType. Mirrors the routing
- * table documented in the C4.4 plan: dashboard for state-of-the-system
- * triggers, domain detail for per-domain triggers, history for
- * milestones.
+ * table documented in the C4.4 plan. Any payload-supplied deepLink is
+ * passed through sanitizePath so an external URL in a push payload
+ * cannot trick us into navigating off-origin.
  */
 function resolveDeepLink(payload) {
-  if (payload && typeof payload.deepLink === 'string') return payload.deepLink;
+  if (payload && typeof payload.deepLink === 'string') {
+    return sanitizePath(payload.deepLink);
+  }
   const type = payload && payload.type;
   const domain = payload && payload.domain;
   switch (type) {
@@ -38,7 +70,9 @@ function resolveDeepLink(payload) {
     case 'COMPLIANCE_WARNING':
     case 'DEVIATION_ENDING':
     case 'OVERACHIEVEMENT_SUSTAINED':
-      return domain ? `/domain/${encodeURIComponent(domain)}` : '/';
+      return domain && typeof domain === 'string' && /^[a-z-]{1,32}$/.test(domain)
+        ? `/domain/${encodeURIComponent(domain)}`
+        : '/';
     case 'RAMP_UP_MILESTONE':
       return '/history';
     default:

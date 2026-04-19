@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useEffect } from "react";
 import { useAppStore } from "@/store";
 import { useAuth } from "@/hooks/use-auth";
+import { sanitizeDeepLinkPath } from "@/lib/notification-deeplink";
 
 import Dashboard from "@/pages/dashboard";
 import LogSession from "@/pages/log-session";
@@ -65,7 +66,9 @@ function AuthGate() {
       const handler = (event: MessageEvent) => {
         const data = event.data;
         if (data && data.type === 'notification-click' && typeof data.path === 'string') {
-          setLocation(data.path);
+          // Defence-in-depth: SW already sanitizes via resolveDeepLink, but
+          // postMessage can come from any registered worker; re-validate.
+          setLocation(sanitizeDeepLinkPath(data.path));
         }
       };
       navigator.serviceWorker.addEventListener('message', handler);

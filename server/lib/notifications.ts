@@ -105,6 +105,13 @@ export type TriggerEvent =
  */
 export interface EvaluateTriggersInput {
   policy: PolicyStateResponse | null;
+  /**
+   * Previous policy snapshot, used to gate OVERACHIEVEMENT_SUSTAINED on
+   * the threshold-CROSSING transition (prev < threshold && curr >= threshold)
+   * rather than firing every day after the threshold is reached. Pass
+   * `null` on first run to suppress the trigger.
+   */
+  previousPolicy?: PolicyStateResponse | null;
   current: EscalationStateResponse | null;
   previous: EscalationStateResponse | null;
   /**
@@ -186,7 +193,14 @@ function eventId(parts: Array<string | number>): string {
  * `notificationsEnabled` is false (or settings is null), `[]` is returned.
  */
 export function evaluateTriggers(input: EvaluateTriggersInput): TriggerEvent[] {
-  const { policy, current, previous, endedDeviations = [], settings = null } = input;
+  const {
+    policy,
+    previousPolicy = null,
+    current,
+    previous,
+    endedDeviations = [],
+    settings = null,
+  } = input;
 
   // Notifications globally disabled → no events.
   if (!settings || settings.notificationsEnabled === false) return [];
@@ -232,12 +246,14 @@ export function evaluateTriggers(input: EvaluateTriggersInput): TriggerEvent[] {
       };
       events.push(change);
 
-      // 2. Compliance warning — fires when crossing UP into ADVISORY or WARNING
-      // (i.e. just left the green/NOMINAL zone but hasn't broken budget yet).
+      // 2. Compliance warning — fires on ANY upward transition that lands
+      // in ADVISORY or WARNING (e.g. NOMINAL→ADVISORY, NOMINAL→WARNING,
+      // ADVISORY→WARNING). The intent is "you've crossed into a softer
+      // alert tier but haven't broken budget yet" — that's true on each
+      // step up while still in those tiers.
       if (
         direction === "up" &&
-        (cur.tier === "ADVISORY" || cur.tier === "WARNING") &&
-        prev.tier === "NOMINAL"
+        (cur.tier === "ADVISORY" || cur.tier === "WARNING")
       ) {
         const warning: ComplianceWarningEvent = {
           id: eventId(["COMPLIANCE_WARNING", domain, cur.tier, logicalDay]),
@@ -282,12 +298,20 @@ export function evaluateTriggers(input: EvaluateTriggersInput): TriggerEvent[] {
   }
 
   // --- 5. Overachievement sustained ---
-  if (policy?.sustainedOverachievement) {
+  // Threshold-CROSSING semantics: only fire on the day the consecutiveDays
+  // counter transitions from below the threshold to at-or-above it. Without
+  // a prior policy snapshot we cannot detect a transition, so suppress.
+  if (policy?.sustainedOverachievement && previousPolicy?.sustainedOverachievement) {
     for (const domain of Object.keys(policy.sustainedOverachievement) as Domain[]) {
       const entry = policy.sustainedOverachievement[domain];
+      const prevEntry = previousPolicy.sustainedOverachievement[domain];
       if (!entry) continue;
       if (entry.tier === "NONE") continue;
       if (entry.consecutiveDays < OVERACHIEVEMENT_SUSTAINED_THRESHOLD_DAYS) continue;
+      // Suppress unless this is the crossing day. If prevEntry is missing
+      // (first sighting of this domain in the policy state), treat prev as 0.
+      const prevDays = prevEntry?.consecutiveDays ?? 0;
+      if (prevDays >= OVERACHIEVEMENT_SUSTAINED_THRESHOLD_DAYS) continue;
 
       const name = formatDomain(domain);
       events.push({
