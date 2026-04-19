@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -115,3 +115,40 @@ export type DomainEscalation = z.infer<typeof domainEscalationSchema>;
 export type EscalationHistoryDayDomain = z.infer<typeof escalationHistoryDayDomainSchema>;
 export type EscalationHistoryEntry = z.infer<typeof escalationHistoryEntrySchema>;
 export type EscalationStateResponse = z.infer<typeof escalationStateResponseSchema>;
+
+// ----- Deviations -----
+// A deviation marks a planned/active period where a domain is intentionally
+// off-target (injury, travel, sabbatical, etc.). Active deviations may be
+// excluded from the composite and hold the error budget steady.
+export const deviations = pgTable("deviations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: text("user_id").notNull(),
+  domain: text("domain").notNull(),
+  reason: text("reason").notNull(),
+  startAt: timestamp("start_at", { withTimezone: true }).notNull(),
+  endAt: timestamp("end_at", { withTimezone: true }),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  excludeFromComposite: boolean("exclude_from_composite").notNull().default(true),
+});
+
+export const insertDeviationSchema = createInsertSchema(deviations)
+  .omit({ id: true, userId: true, endedAt: true, deletedAt: true })
+  .extend({
+    domain: z.enum(domainEnum),
+    reason: z.string().min(1).max(500),
+    startAt: z.string().datetime({ offset: true }),
+    endAt: z.string().datetime({ offset: true }).nullable().optional(),
+    excludeFromComposite: z.boolean().optional(),
+  });
+
+export const updateDeviationSchema = z.object({
+  reason: z.string().min(1).max(500).optional(),
+  startAt: z.string().datetime({ offset: true }).optional(),
+  endAt: z.string().datetime({ offset: true }).nullable().optional(),
+  excludeFromComposite: z.boolean().optional(),
+});
+
+export type InsertDeviation = z.infer<typeof insertDeviationSchema>;
+export type UpdateDeviation = z.infer<typeof updateDeviationSchema>;
+export type Deviation = typeof deviations.$inferSelect;
