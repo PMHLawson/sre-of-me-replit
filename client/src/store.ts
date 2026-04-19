@@ -20,15 +20,15 @@ export interface Session {
 }
 
 /**
- * PATCH /api/sessions/:id payload. All fields are optional except `reason`,
- * which is required by the server-side audit log (B2.1).
+ * Partial update for a session row. The audit reason is passed as a separate
+ * argument to `updateSession(id, patch, reason)` and merged into the PATCH
+ * body, mirroring the server-side updateSessionSchema (B2.1).
  */
 export interface SessionPatch {
   domain?: Domain;
   durationMinutes?: number;
   timestamp?: string;
   notes?: string | null;
-  reason: string;
 }
 
 export interface DomainPolicy {
@@ -95,7 +95,7 @@ interface AppState {
   fetchSessions: () => Promise<void>;
   fetchPolicyState: () => Promise<void>;
   fetchEscalationState: () => Promise<void>;
-  updateSession: (id: string, patch: SessionPatch) => Promise<Session | null>;
+  updateSession: (id: string, patch: SessionPatch, reason: string) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<boolean>;
   fetchDeviations: () => Promise<void>;
   createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
@@ -324,12 +324,12 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      updateSession: async (id, patch) => {
+      updateSession: async (id, patch, reason) => {
         try {
           const res = await fetch(`/api/sessions/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch),
+            body: JSON.stringify({ ...patch, reason }),
           });
           if (!res.ok) throw new Error('Failed to update session');
           const saved: Session = await res.json();

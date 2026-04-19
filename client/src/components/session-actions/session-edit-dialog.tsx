@@ -48,8 +48,8 @@ interface SessionEditDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Session to edit. Form pre-fills from these values. */
   session: Session | null;
-  /** Called with the patch payload (includes the required reason note). */
-  onSubmit: (patch: SessionPatch) => Promise<Session | null>;
+  /** Called with the field patch and the required audit reason. */
+  onSubmit: (patch: SessionPatch, reason: string) => Promise<Session | null>;
 }
 
 export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: SessionEditDialogProps) {
@@ -93,12 +93,11 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
       durationMinutes: durationNum,
       timestamp: fromLocalInputValue(timestampLocal),
       notes: notes.trim() ? notes.trim() : null,
-      reason: reason.trim(),
     };
 
     setSubmitting(true);
     try {
-      const result = await onSubmit(patch);
+      const result = await onSubmit(patch, reason.trim());
       if (!result) {
         setError('Could not save changes. Please try again.');
         return;

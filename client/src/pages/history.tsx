@@ -244,7 +244,7 @@ export default function History() {
         open={!!editing}
         onOpenChange={(o) => { if (!o) setEditing(null); }}
         session={editing}
-        onSubmit={(patch) => editing ? updateSession(editing.id, patch) : Promise.resolve(null)}
+        onSubmit={(patch, reason) => editing ? updateSession(editing.id, patch, reason) : Promise.resolve(null)}
       />
       <SessionDeleteDialog
         open={!!deleting}
