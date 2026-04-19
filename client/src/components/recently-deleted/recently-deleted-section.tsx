@@ -18,6 +18,7 @@ const DOMAIN_LABEL: Record<Domain, string> = {
 export function RecentlyDeletedSection() {
   const deletedSessions = useAppStore((s) => s.deletedSessions);
   const deletedSessionsLoaded = useAppStore((s) => s.deletedSessionsLoaded);
+  const deletedSessionsError = useAppStore((s) => s.deletedSessionsError);
   const fetchDeletedSessions = useAppStore((s) => s.fetchDeletedSessions);
   const restoreSession = useAppStore((s) => s.restoreSession);
 
@@ -93,7 +94,25 @@ export function RecentlyDeletedSection() {
             </div>
           )}
 
-          {deletedSessionsLoaded && sortedDeleted.length === 0 && (
+          {deletedSessionsLoaded && deletedSessionsError && (
+            <div
+              className="text-center py-6 space-y-2"
+              data-testid="text-recently-deleted-error"
+            >
+              <p className="text-sm text-status-critical font-medium">
+                {deletedSessionsError}
+              </p>
+              <button
+                onClick={() => void fetchDeletedSessions()}
+                className="text-xs font-bold text-primary underline underline-offset-2 hover:text-primary/80"
+                data-testid="button-recently-deleted-retry"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
+          {deletedSessionsLoaded && !deletedSessionsError && sortedDeleted.length === 0 && (
             <div
               className="text-center py-8 text-sm text-muted-foreground font-medium"
               data-testid="text-recently-deleted-empty"

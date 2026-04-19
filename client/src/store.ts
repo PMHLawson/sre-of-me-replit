@@ -100,6 +100,8 @@ interface AppState {
   /** Soft-deleted sessions still within retention window. Lazy-loaded. */
   deletedSessions: Session[];
   deletedSessionsLoaded: boolean;
+  /** Non-null when the last fetchDeletedSessions call failed. */
+  deletedSessionsError: string | null;
   fetchDeletedSessions: () => Promise<void>;
   restoreSession: (id: string) => Promise<boolean>;
   fetchDeviations: () => Promise<void>;
@@ -376,8 +378,11 @@ export const useAppStore = create<AppState>()(
 
       deletedSessions: [],
       deletedSessionsLoaded: false,
+      deletedSessionsError: null,
 
       fetchDeletedSessions: async () => {
+        // Clear any prior error so a retry shows the loading state again.
+        set({ deletedSessionsError: null });
         try {
           const res = await fetch('/api/sessions/deleted');
           if (!res.ok) throw new Error('Failed to fetch deleted sessions');
@@ -385,7 +390,10 @@ export const useAppStore = create<AppState>()(
           set({ deletedSessions: data, deletedSessionsLoaded: true });
         } catch (err) {
           console.error('fetchDeletedSessions error:', err);
-          set({ deletedSessionsLoaded: true });
+          set({
+            deletedSessionsLoaded: true,
+            deletedSessionsError: 'Could not load deleted sessions.',
+          });
         }
       },
 
