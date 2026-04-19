@@ -2,8 +2,8 @@ import { useRef, useEffect, useState, useMemo } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
 import { ArrowLeft, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session } from '@/store';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, isDeviationActiveAt, type Session } from '@/store';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, ReferenceArea, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
@@ -34,8 +34,18 @@ const BAR_SLOT_WIDE   = 24;  // 30d / 42d
 const CHART_HEIGHT    = 180;
 
 // Shared chart content — defined outside main component to avoid recreation on each render
+type ChartDatum = {
+  dayLabel: string;
+  fullDate: string;
+  minutes: number;
+  isToday: boolean;
+  tier: string;
+  hasAnomaly: boolean;
+  hasDeviation: boolean;
+};
+
 type ChartBarsProps = {
-  data: { dayLabel: string; fullDate: string; minutes: number; isToday: boolean; tier: string }[];
+  data: ChartDatum[];
   accentHex: string;
   needsScroll: boolean;
   fixedWidth: number;
@@ -46,11 +56,36 @@ type ChartBarsProps = {
   getBarOpacity: (tier: string) => number;
 };
 
+// Color used for anomaly markers and warning overlays. Hardcoded amber/red
+// to remain legible against any domain accent without inheriting Tailwind
+// CSS-variable tokens (Recharts SVG can't resolve `hsl(var(--…))`).
+const ANOMALY_COLOR = '#E2B23E';
+const DEVIATION_BAND_COLOR = '#9CA3AF';
+
+// Collapse consecutive deviation days into [start,end] dayLabel pairs so the
+// chart can render one ReferenceArea per contiguous run.
+function deviationRuns(data: ChartDatum[]): { x1: string; x2: string }[] {
+  const runs: { x1: string; x2: string }[] = [];
+  let runStart: string | null = null;
+  for (let i = 0; i < data.length; i++) {
+    const cell = data[i];
+    if (cell.hasDeviation) {
+      if (runStart === null) runStart = cell.dayLabel;
+      const next = data[i + 1];
+      if (!next || !next.hasDeviation) {
+        runs.push({ x1: runStart, x2: cell.dayLabel });
+        runStart = null;
+      }
+    }
+  }
+  return runs;
+}
+
 const TooltipContent = ({
   active, payload, accentHex, sessionFloor,
 }: { active?: boolean; payload?: any[]; accentHex: string; sessionFloor: number }) => {
   if (!active || !payload?.length) return null;
-  const d = payload[0].payload;
+  const d = payload[0].payload as ChartDatum;
   return (
     <div className="bg-popover border border-border/60 p-3 rounded-xl shadow-lg text-sm">
       <div className="font-semibold text-foreground">{d.fullDate}</div>
@@ -60,6 +95,14 @@ const TooltipContent = ({
       {d.minutes > 0 && d.minutes < sessionFloor && (
         <div className="text-[10px] text-status-degraded mt-0.5">Below {sessionFloor}m floor</div>
       )}
+      {d.hasAnomaly && (
+        <div className="text-[10px] mt-0.5" style={{ color: ANOMALY_COLOR }}>
+          Anomalous session flagged
+        </div>
+      )}
+      {d.hasDeviation && (
+        <div className="text-[10px] text-muted-foreground mt-0.5">Deviation active</div>
+      )}
       <div className="text-[10px] text-muted-foreground mt-0.5 capitalize">
         {d.tier === 'current' ? 'Current 7d' : d.tier === 'previous' ? 'Prev 7d' : 'Older'}
       </div>
@@ -67,7 +110,22 @@ const TooltipContent = ({
   );
 };
 
+// Render a small filled circle above any bar whose day has an anomaly. Uses
+// the Recharts custom-label callback signature; `value` and the rest are
+// supplied by the Bar parent and ignored here aside from positional args.
+const AnomalyMarker = ({ x, y, width, payload }: any) => {
+  if (!payload?.hasAnomaly) return null;
+  const cx = x + width / 2;
+  const cy = y - 6;
+  return (
+    <g pointerEvents="none">
+      <circle cx={cx} cy={cy} r={3} fill={ANOMALY_COLOR} stroke="#FFFFFF" strokeWidth={0.5} />
+    </g>
+  );
+};
+
 function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity }: ChartBarsProps) {
+  const runs = deviationRuns(data);
   const internals = (
     <>
       <XAxis
@@ -90,6 +148,27 @@ function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays,
           <TooltipContent {...props} accentHex={accentHex} sessionFloor={policySessionFloor} />
         )}
       />
+      {/* Deviation bands — render before bars so they sit underneath. */}
+      {runs.map((r, i) => (
+        <ReferenceArea
+          key={`dev-${i}-${r.x1}-${r.x2}`}
+          x1={r.x1}
+          x2={r.x2}
+          fill={DEVIATION_BAND_COLOR}
+          fillOpacity={0.18}
+          stroke={DEVIATION_BAND_COLOR}
+          strokeOpacity={0.25}
+          ifOverflow="extendDomain"
+        />
+      ))}
+      {/* Threshold annotations: session floor (lower) and daily pro-rate (target). */}
+      <ReferenceLine
+        y={policySessionFloor}
+        stroke="#A9BBC2"
+        strokeOpacity={0.45}
+        strokeDasharray="2 4"
+        label={{ value: `floor ${policySessionFloor}m`, position: 'insideBottomLeft', fontSize: 9, fill: '#A9BBC2', fillOpacity: 0.7, dy: -2 }}
+      />
       <ReferenceLine
         y={policyDailyProRate}
         stroke={accentHex}
@@ -97,16 +176,26 @@ function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays,
         strokeDasharray="3 3"
         label={{ value: `${policyDailyProRate}m/d`, position: 'insideTopLeft', fontSize: 9, fill: accentHex, fillOpacity: 0.6, dy: -2 }}
       />
-      <Bar dataKey="minutes" radius={[4, 4, 0, 0]} maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}>
-        {data.map((entry, idx) => (
-          <Cell
-            key={`cell-${idx}`}
-            fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
-            fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.18}
-            stroke={entry.isToday ? accentHex : 'none'}
-            strokeWidth={entry.isToday ? 1.5 : 0}
-          />
-        ))}
+      <Bar
+        dataKey="minutes"
+        radius={[4, 4, 0, 0]}
+        maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}
+        label={AnomalyMarker as any}
+        isAnimationActive={false}
+      >
+        {data.map((entry, idx) => {
+          const strokeColor = entry.hasAnomaly ? ANOMALY_COLOR : entry.isToday ? accentHex : 'none';
+          const strokeWidth = entry.hasAnomaly ? 1.5 : entry.isToday ? 1.5 : 0;
+          return (
+            <Cell
+              key={`cell-${idx}`}
+              fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
+              fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.18}
+              stroke={strokeColor}
+              strokeWidth={strokeWidth}
+            />
+          );
+        })}
       </Bar>
     </>
   );
@@ -196,12 +285,16 @@ export default function DomainDetail() {
   // data false positives during ramp-up.
   const showOverachievement = overachievementTier !== 'NONE';
 
-  // Build full 42-day dataset once; slice to viewDays for display
-  const allChartData = Array.from({ length: ALL_DAYS }).map((_, i) => {
+  // Build full 42-day dataset once; slice to viewDays for display.
+  // Each day cell carries `hasAnomaly` (any session that day was flagged as
+  // a 2-sigma anomaly) and `hasDeviation` (a deviation covers this domain
+  // on that day) so the chart can render overlays without recomputing.
+  const allChartData = useMemo<ChartDatum[]>(() => Array.from({ length: ALL_DAYS }).map((_, i) => {
     const date = subDays(new Date(), ALL_DAYS - 1 - i);
-    const minutes = domainSessions
-      .filter(s => isSameDay(parseISO(s.timestamp), date))
-      .reduce((sum, s) => sum + s.durationMinutes, 0);
+    const sameDaySessions = domainSessions.filter(s => isSameDay(parseISO(s.timestamp), date));
+    const minutes = sameDaySessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+    const hasAnomaly = sameDaySessions.some(s => s.isAnomaly);
+    const hasDeviation = deviations.some(d => isDeviationActiveAt(d, domain, date));
     const tier = i >= ALL_DAYS - 7 ? 'current' : i >= ALL_DAYS - 14 ? 'previous' : 'older';
     return {
       dayLabel: format(date, 'EEE')[0] + format(date, 'd'),
@@ -209,10 +302,12 @@ export default function DomainDetail() {
       minutes,
       isToday: i === ALL_DAYS - 1,
       tier,
+      hasAnomaly,
+      hasDeviation,
     };
-  });
+  }), [domainSessions, deviations, domain]);
 
-  const chartData = allChartData.slice(ALL_DAYS - viewDays);
+  const chartData = useMemo(() => allChartData.slice(ALL_DAYS - viewDays), [allChartData, viewDays]);
 
   // Responsive vs. fixed-scroll strategy
   // ≤14d: fills full container width via ResponsiveContainer (no scroll needed)
