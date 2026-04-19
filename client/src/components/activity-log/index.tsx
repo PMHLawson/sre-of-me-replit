@@ -266,19 +266,27 @@ function DeviationEventRow({
           <span className="text-[10px] font-bold uppercase tracking-widest text-status-advisory">
             {headline}
           </span>
-          {isHistory && (
-            <span className="text-[11px] font-semibold capitalize text-foreground">
-              {formatDomain(domain)}
-            </span>
-          )}
-          {excludeFromComposite && (
-            <span
-              className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-deviation/10 text-status-deviation border border-status-deviation/20"
-              title="This deviation excludes the domain from the composite score"
-            >
-              Excluded
-            </span>
-          )}
+          <span
+            className="text-[11px] font-semibold capitalize text-foreground"
+            data-testid="activity-deviation-domain"
+          >
+            {formatDomain(domain)}
+          </span>
+          <span
+            className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+              excludeFromComposite
+                ? 'bg-status-deviation/10 text-status-deviation border-status-deviation/20'
+                : 'bg-muted text-muted-foreground border-border/50'
+            }`}
+            title={
+              excludeFromComposite
+                ? 'This deviation excludes the domain from the composite score'
+                : 'This deviation still counts toward the composite score'
+            }
+            data-testid="activity-deviation-type"
+          >
+            {excludeFromComposite ? 'Excluded from composite' : 'Counts in composite'}
+          </span>
           {endedEarly && (
             <span
               className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border/50"
