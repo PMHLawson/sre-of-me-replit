@@ -91,7 +91,7 @@ export function CalendarHeatMap({ sessions, days, testIdPrefix = 'heatmap' }: Ca
         </div>
       </div>
 
-      <div className="overflow-x-auto -mx-1 px-1">
+      <div className={`${days > 28 ? 'overflow-x-auto' : ''} -mx-1 px-1`}>
         <div className="flex gap-1 items-start" style={{ width: 'fit-content' }}>
           <div
             className="grid text-[9px] font-mono font-medium text-muted-foreground"
@@ -168,15 +168,18 @@ export function CalendarHeatMap({ sessions, days, testIdPrefix = 'heatmap' }: Ca
 
       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground font-medium">
         <span>Less</span>
-        {INTENSITY_TIERS.map((t) => (
-          <span
-            key={t.min}
-            className="inline-block w-3 h-3 rounded-[3px]"
-            style={{ backgroundColor: 'hsl(var(--primary))', opacity: t.opacity }}
-            title={t.label}
-            aria-label={t.label}
-          />
-        ))}
+        <span
+          className="inline-block w-3 h-3 rounded-[3px]"
+          style={{ backgroundColor: 'hsl(var(--muted))', opacity: 0.35 }}
+          title="0m"
+          aria-label="0 minutes"
+        />
+        <span
+          className="inline-block w-3 h-3 rounded-[3px]"
+          style={{ backgroundColor: 'hsl(var(--primary))', opacity: 1 }}
+          title="90m+"
+          aria-label="90 minutes or more"
+        />
         <span>More</span>
       </div>
     </div>
