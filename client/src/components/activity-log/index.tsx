@@ -119,7 +119,7 @@ function SessionRow({ entry, variant, onEdit, onDelete }: SessionRowProps) {
   return (
     <div
       className={`bg-card border rounded-2xl p-4 flex items-center justify-between shadow-sm transition-opacity ${borderClass}`}
-      data-testid={`session-item-${session.id}`}
+      data-testid={`session-row-${session.id}`}
     >
       <div className="flex gap-3 items-start min-w-0">
         {!isHistory && (
