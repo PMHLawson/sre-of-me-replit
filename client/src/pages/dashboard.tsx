@@ -11,6 +11,7 @@ import {
   ChevronRight,
   LogOut,
   User,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
@@ -200,6 +201,14 @@ export default function Dashboard() {
             <p className="text-sm font-medium text-muted-foreground mt-1 tracking-wide">SYSTEM OBSERVABILITY</p>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setLocation('/settings')}
+              className="w-10 h-10 rounded-full hover:bg-muted/60 flex items-center justify-center transition-colors text-muted-foreground hover:text-foreground"
+              aria-label="Settings"
+              data-testid="button-settings"
+            >
+              <SettingsIcon className="w-4 h-4" />
+            </button>
             <ThemeToggle />
             <button 
               onClick={() => setLocation('/decide')}

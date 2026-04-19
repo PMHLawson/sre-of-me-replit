@@ -13,6 +13,7 @@ import Decide from "@/pages/decide";
 import History from "@/pages/history";
 import DomainDetail from "@/pages/domain-detail";
 import SystemHealth from "@/pages/system-health";
+import SettingsPage from "@/pages/settings";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/landing";
 
@@ -25,6 +26,7 @@ function Router() {
       <Route path="/history" component={History}/>
       <Route path="/domain/:domain" component={DomainDetail}/>
       <Route path="/system-health" component={SystemHealth}/>
+      <Route path="/settings" component={SettingsPage}/>
       <Route component={NotFound} />
     </Switch>
   );
