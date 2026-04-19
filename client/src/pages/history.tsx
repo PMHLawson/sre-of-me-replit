@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Plus } from 'lucide-react';
 import { useAppStore, Domain, type Session } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
@@ -243,6 +243,16 @@ export default function History() {
         session={deleting}
         onConfirm={(id) => deleteSession(id)}
       />
+
+      {/* .910 §20 per-tab FAB — Metrics uses plus icon for quick-log. */}
+      <button
+        onClick={() => setLocation('/log')}
+        className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/30 flex items-center justify-center active:scale-95 transition-transform z-40"
+        aria-label="Quick log session"
+        data-testid="fab-metrics-quicklog"
+      >
+        <Plus className="w-6 h-6" strokeWidth={3} />
+      </button>
     </div>
   );
 }

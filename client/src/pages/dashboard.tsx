@@ -6,6 +6,7 @@ import {
   Dumbbell, 
   Music, 
   Plus, 
+  Check,
   History, 
   GitPullRequestDraft,
   ChevronRight,
@@ -436,6 +437,18 @@ export default function Dashboard() {
           </button>
         </div>
       </main>
+
+      {/* .910 §20 per-tab FAB — Dashboard uses checkmark icon. Routes to
+          /log so it composes with the existing in-body Quick Log card
+          rather than replacing it (preserves current Replit strength). */}
+      <button
+        onClick={() => setLocation('/log')}
+        className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/30 flex items-center justify-center active:scale-95 transition-transform z-40"
+        aria-label="Log session"
+        data-testid="fab-dashboard-log"
+      >
+        <Check className="w-6 h-6" strokeWidth={3} />
+      </button>
     </div>
   );
 }
