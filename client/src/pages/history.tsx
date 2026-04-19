@@ -8,9 +8,22 @@ import { SessionEditDialog } from '@/components/session-actions/session-edit-dia
 import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
 import { RecentlyDeletedSection } from '@/components/recently-deleted/recently-deleted-section';
 import { ActivityLog } from '@/components/activity-log';
+import { CalendarHeatMap } from '@/components/metrics/heatmap';
 import { buildActivityLog, type ActivityLogEntry } from '@/lib/activity-log';
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
+
+// Cadence levels mirror the .010 review rhythm:
+//   7d  = daily dashboard glance
+//   14d = weekly Monday 7-day review (extra context)
+//   30d = monthly trend review
+//   90d = quarterly SLO adjustment evaluation
+const HEATMAP_RANGES = [
+  { label: '7d',  days: 7  },
+  { label: '14d', days: 14 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+];
 
 interface WeekBucket {
   label: string;
@@ -29,6 +42,7 @@ export default function History() {
   const [visibleWeeks, setVisibleWeeks] = useState(2); // 2 weeks default = 14 days
   const [editing, setEditing] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState<Session | null>(null);
+  const [heatmapDays, setHeatmapDays] = useState(30);
 
   // Bucket the unified activity log into weeks (Mon–Sun), then by date label.
   // Week totals are computed from session entries only — deviation events do
@@ -98,6 +112,32 @@ export default function History() {
       </header>
 
       <main className="px-4 py-6 space-y-6 pb-24">
+        {/* Activity heat map — supports the four .010 review cadence levels */}
+        <section className="bg-card border border-border/50 rounded-3xl p-5 shadow-sm space-y-4">
+          <div className="flex items-center justify-end">
+            <div
+              className="flex items-center gap-1 bg-muted/60 rounded-xl p-1"
+              data-testid="group-heatmap-range"
+            >
+              {HEATMAP_RANGES.map((opt) => (
+                <button
+                  key={opt.days}
+                  onClick={() => setHeatmapDays(opt.days)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    heatmapDays === opt.days
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                  data-testid={`button-heatmap-range-${opt.label}`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <CalendarHeatMap sessions={sessions} days={heatmapDays} />
+        </section>
+
         {visibleWeekBuckets.map((week) => (
           <section key={week.weekStart.toISOString()} className="space-y-3">
             {/* Week header — totals computed from session entries only */}
