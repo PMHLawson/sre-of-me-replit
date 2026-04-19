@@ -57,6 +57,15 @@ describe('sanitizeDeepLinkPath — rejects unsafe inputs', () => {
   it('rejects bare /domain/ (prefix matched but no name segment)', () => {
     expect(sanitizeDeepLinkPath('/domain/')).toBe('/');
   });
+
+  it('rejects /domain with no trailing slash (not on the allowlist)', () => {
+    expect(sanitizeDeepLinkPath('/domain')).toBe('/');
+  });
+
+  it('rejects look-alike paths that are prefixes of allowlisted routes', () => {
+    expect(sanitizeDeepLinkPath('/historyx')).toBe('/');
+    expect(sanitizeDeepLinkPath('/settings/secret')).toBe('/');
+  });
 });
 
 describe('sanitizeDeepLinkPath — accepts allowlisted inputs', () => {

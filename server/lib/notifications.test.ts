@@ -161,6 +161,36 @@ describe("evaluateTriggers — global gates", () => {
     expect(events).toEqual([]);
   });
 
+  it("with notificationTier=PAGE, drops BREACH events but keeps PAGE events", () => {
+    // BREACH transition (severity=BREACH, rank 3) should be dropped at PAGE
+    // (rank 4); PAGE transition (severity=PAGE) should still pass.
+    const previous = makeEscalationState({});
+    const currentBreachOnly = makeEscalationState({
+      fitness: { tier: "BREACH", rationale: "Out of budget." },
+    });
+    expect(
+      evaluateTriggers({
+        policy: null,
+        current: currentBreachOnly,
+        previous,
+        settings: makeSettings(true, "PAGE"),
+      }),
+    ).toEqual([]);
+
+    const currentPage = makeEscalationState({
+      fitness: { tier: "PAGE", rationale: "Critical breach." },
+    });
+    const events = evaluateTriggers({
+      policy: null,
+      current: currentPage,
+      previous,
+      settings: makeSettings(true, "PAGE"),
+    });
+    expect(events.some((e) => e.type === "ESCALATION_CHANGE" && e.severity === "PAGE")).toBe(
+      true,
+    );
+  });
+
   it("keeps WARNING-tier events when filter is WARNING", () => {
     const previous = makeEscalationState({});
     const current = makeEscalationState({
