@@ -22,14 +22,45 @@ export const sessions = pgTable("sessions", {
   // Soft-delete marker. Active sessions have NULL. Set on DELETE; cleared on RESTORE.
   // Hard-deletion is performed by the retention purge (B2.4).
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  // C1.1 — Anomaly flag set when the user confirmed a 2-sigma duration anomaly
+  // at save time. Stored on the row so historical surfaces can mark the session
+  // without recomputing the baseline.
+  isAnomaly: boolean("is_anomaly").notNull().default(false),
+  // C1.1 — Required note when `isAnomaly` is true; null otherwise.
+  anomalyNote: text("anomaly_note"),
 });
 
-export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, deletedAt: true }).extend({
+export const insertSessionSchema = createInsertSchema(sessions)
+  .omit({ id: true, deletedAt: true })
+  .extend({
+    domain: z.enum(domainEnum),
+    durationMinutes: z.number().int().positive(),
+    timestamp: z.string().datetime({ offset: true }),
+    notes: z.string().optional(),
+    // Backward-compatible: existing POST callers omit these and the row
+    // defaults to isAnomaly=false / anomalyNote=null.
+    isAnomaly: z.boolean().optional(),
+    anomalyNote: z.string().nullable().optional(),
+  });
+
+/** POST /api/sessions/anomaly-check request payload. */
+export const anomalyCheckRequestSchema = z.object({
   domain: z.enum(domainEnum),
   durationMinutes: z.number().int().positive(),
-  timestamp: z.string().datetime({ offset: true }),
-  notes: z.string().optional(),
 });
+
+/** POST /api/sessions/anomaly-check response payload. */
+export const anomalyCheckResponseSchema = z.object({
+  isAnomaly: z.boolean(),
+  coldStart: z.boolean(),
+  sampleCount: z.number(),
+  mean: z.number(),
+  stdDev: z.number(),
+  zScore: z.number(),
+});
+
+export type AnomalyCheckRequest = z.infer<typeof anomalyCheckRequestSchema>;
+export type AnomalyCheckResponse = z.infer<typeof anomalyCheckResponseSchema>;
 
 /**
  * PATCH /api/sessions/:id payload. All session fields are optional, but

@@ -6,11 +6,13 @@ import {
   updateSessionSchema,
   insertDeviationSchema,
   updateDeviationSchema,
+  anomalyCheckRequestSchema,
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
 import { computeCompositeState, isInRampUp } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
+import { detectAnomaly } from "./lib/anomaly";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -74,12 +76,41 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: "Invalid session data", errors: parsed.error.flatten() });
     }
+    // Server-side guard: an anomaly note is required whenever isAnomaly is true.
+    if (parsed.data.isAnomaly && !parsed.data.anomalyNote?.trim()) {
+      return res.status(400).json({ message: "Anomaly note is required when isAnomaly is true" });
+    }
     try {
       const userId: string = req.user.claims.sub;
-      const session = await storage.createSession({ ...parsed.data, userId });
+      const session = await storage.createSession({
+        ...parsed.data,
+        userId,
+        isAnomaly: parsed.data.isAnomaly ?? false,
+        anomalyNote: parsed.data.isAnomaly ? (parsed.data.anomalyNote ?? null) : null,
+      });
       res.status(201).json(serializeSession(session));
     } catch {
       res.status(500).json({ message: "Failed to create session" });
+    }
+  });
+
+  // POST /api/sessions/anomaly-check — preview whether a candidate duration is
+  // a 2-sigma anomaly given the user's 42-day baseline for the domain. Pure
+  // read; does not persist anything. Used by Log Session before save.
+  app.post("/api/sessions/anomaly-check", isAuthenticated, async (req: any, res) => {
+    const parsed = anomalyCheckRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid anomaly-check request", errors: parsed.error.flatten() });
+    }
+    try {
+      const userId: string = req.user.claims.sub;
+      const sessions = await storage.getSessions(userId);
+      const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, sessions);
+      // JSON cannot serialize Infinity; coerce to a large finite sentinel.
+      const zScore = Number.isFinite(result.zScore) ? result.zScore : 9999;
+      res.json({ ...result, zScore });
+    } catch {
+      res.status(500).json({ message: "Failed to compute anomaly check" });
     }
   });
 
