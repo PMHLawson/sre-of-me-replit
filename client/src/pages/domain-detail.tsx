@@ -1,13 +1,15 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useMemo } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
-import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff, Pencil, Trash2 } from 'lucide-react';
+import { ArrowLeft, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
 import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
+import { ActivityLog } from '@/components/activity-log';
+import { buildActivityLog } from '@/lib/activity-log';
 
 // Documented palette (ADR-014 / 40.30.OCMP.915) — hardcoded hex required for Recharts SVG
 const DOMAIN_COLOR: Record<Domain, string> = {
@@ -211,9 +213,15 @@ export default function DomainDetail() {
   const delta      = recentMinutes - previousWeekMinutes;
   const pctOfTarget = Math.round((recentMinutes / targetMinutes) * 100);
 
-  const recentSessions = [...domainSessions]
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 5);
+  // Recent activity for this domain — sessions interleaved with deviation
+  // start/end events, newest first, capped to 5 entries.
+  const recentActivity = useMemo(
+    () =>
+      buildActivityLog(sessions, deviations)
+        .filter((e) => e.domain === domain)
+        .slice(0, 5),
+    [sessions, deviations, domain],
+  );
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300 pb-24">
@@ -421,79 +429,16 @@ export default function DomainDetail() {
           </div>
         </section>
 
-        {/* Recent Sessions */}
+        {/* Recent Activity — sessions interleaved with deviation events */}
         <section>
-          <h2 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3 px-1">Recent Sessions</h2>
-          <div className="space-y-2.5">
-            {recentSessions.length > 0 ? recentSessions.map(session => {
-              const belowFloor = session.durationMinutes < policy.sessionFloor;
-              return (
-                <div
-                  key={session.id}
-                  className={`bg-card border rounded-2xl p-4 flex items-center justify-between shadow-sm transition-opacity ${
-                    belowFloor ? 'border-status-degraded/30 opacity-75' : 'border-border/50'
-                  }`}
-                  data-testid={`session-row-${session.id}`}
-                >
-                  <div className="flex gap-3 items-start">
-                    <div className="mt-0.5 text-muted-foreground/50">
-                      <Clock className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <div className="font-semibold text-sm text-foreground">
-                          {format(parseISO(session.timestamp), 'MMM d, yyyy · h:mm a')}
-                        </div>
-                        {belowFloor && (
-                          <span
-                            className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-degraded/10 text-status-degraded border border-status-degraded/20"
-                            title={`Below ${policy.sessionFloor}m floor — counts toward minutes but not qualifying days`}
-                            data-testid={`badge-below-floor-${session.id}`}
-                          >
-                            Below floor
-                          </span>
-                        )}
-                      </div>
-                      {session.notes && (
-                        <div className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2">{session.notes}</div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 ml-3 shrink-0">
-                    <div className={`font-mono text-xs font-bold px-2.5 py-1.5 rounded-lg ${
-                      belowFloor
-                        ? 'bg-status-degraded/10 text-status-degraded'
-                        : 'bg-primary/10 text-primary'
-                    }`}>
-                      {session.durationMinutes}m
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <button
-                        onClick={() => setEditing(session)}
-                        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 active:scale-95 transition-all"
-                        aria-label="Edit session"
-                        data-testid={`button-edit-session-${session.id}`}
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => setDeleting(session)}
-                        className="p-1.5 rounded-lg text-muted-foreground hover:text-status-critical hover:bg-status-critical/10 active:scale-95 transition-all"
-                        aria-label="Delete session"
-                        data-testid={`button-delete-session-${session.id}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            }) : (
-              <div className="text-center py-10 text-muted-foreground bg-card border border-border/50 rounded-3xl shadow-sm">
-                No sessions found.
-              </div>
-            )}
-          </div>
+          <h2 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3 px-1">Recent Activity</h2>
+          <ActivityLog
+            entries={recentActivity}
+            variant="domain-detail"
+            onEdit={(s) => setEditing(s)}
+            onDelete={(s) => setDeleting(s)}
+            emptyMessage="No activity yet for this domain."
+          />
         </section>
       </main>
 
