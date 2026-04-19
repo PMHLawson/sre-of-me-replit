@@ -17,6 +17,10 @@ export interface Session {
   notes?: string | null;
   /** Non-null when soft-deleted; cleared on restore. */
   deletedAt?: string | null;
+  /** True when the user confirmed a 2-sigma duration anomaly at save time. */
+  isAnomaly?: boolean;
+  /** Required note when isAnomaly is true; null otherwise. */
+  anomalyNote?: string | null;
 }
 
 /**
