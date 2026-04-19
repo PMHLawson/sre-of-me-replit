@@ -6,6 +6,7 @@ import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session
 import { ThemeToggle } from '@/components/theme-toggle';
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
 import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
+import { RecentlyDeletedSection } from '@/components/recently-deleted/recently-deleted-section';
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
 
@@ -238,6 +239,8 @@ export default function History() {
             No sessions logged yet.
           </div>
         )}
+
+        <RecentlyDeletedSection />
       </main>
 
       <SessionEditDialog

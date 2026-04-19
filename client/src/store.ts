@@ -97,6 +97,11 @@ interface AppState {
   fetchEscalationState: () => Promise<void>;
   updateSession: (id: string, patch: SessionPatch, reason: string) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<boolean>;
+  /** Soft-deleted sessions still within retention window. Lazy-loaded. */
+  deletedSessions: Session[];
+  deletedSessionsLoaded: boolean;
+  fetchDeletedSessions: () => Promise<void>;
+  restoreSession: (id: string) => Promise<boolean>;
   fetchDeviations: () => Promise<void>;
   createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
   updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
@@ -357,9 +362,48 @@ export const useAppStore = create<AppState>()(
             get().fetchPolicyState(),
             get().fetchEscalationState(),
           ]);
+          // If the deleted-sessions list was already loaded, refresh it so the
+          // newly-deleted row appears in Recently Deleted without a manual reopen.
+          if (get().deletedSessionsLoaded) {
+            await get().fetchDeletedSessions();
+          }
           return true;
         } catch (err) {
           console.error('deleteSession error:', err);
+          return false;
+        }
+      },
+
+      deletedSessions: [],
+      deletedSessionsLoaded: false,
+
+      fetchDeletedSessions: async () => {
+        try {
+          const res = await fetch('/api/sessions/deleted');
+          if (!res.ok) throw new Error('Failed to fetch deleted sessions');
+          const data: Session[] = await res.json();
+          set({ deletedSessions: data, deletedSessionsLoaded: true });
+        } catch (err) {
+          console.error('fetchDeletedSessions error:', err);
+          set({ deletedSessionsLoaded: true });
+        }
+      },
+
+      restoreSession: async (id) => {
+        try {
+          const res = await fetch(`/api/sessions/${id}/restore`, { method: 'POST' });
+          if (!res.ok) throw new Error('Failed to restore session');
+          // Refresh active + deleted lists and derived state so the restored
+          // row is back in History and the SLO/escalation surfaces re-include it.
+          await Promise.all([
+            get().fetchSessions(),
+            get().fetchDeletedSessions(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return true;
+        } catch (err) {
+          console.error('restoreSession error:', err);
           return false;
         }
       },
