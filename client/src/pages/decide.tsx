@@ -211,6 +211,12 @@ export default function Decide() {
           <div>
             <h1 className="text-xl font-bold tracking-tight">Decide</h1>
             <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-0.5">TRIAGE ENGINE</p>
+            <p
+              className="text-xs italic text-muted-foreground/70 mt-1.5"
+              data-testid="text-anchor-decide"
+            >
+              Execute the policy. Trust the process.
+            </p>
           </div>
         </div>
         <ThemeToggle />

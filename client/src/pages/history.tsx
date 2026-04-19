@@ -106,6 +106,12 @@ export default function History() {
             <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-0.5">
               {weekBuckets.length} weeks · {sessions.length} sessions
             </p>
+            <p
+              className="text-xs italic text-muted-foreground/70 mt-1.5"
+              data-testid="text-anchor-metrics"
+            >
+              Invest in the long game.
+            </p>
           </div>
         </div>
         <ThemeToggle />

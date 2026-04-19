@@ -113,6 +113,15 @@ function AuthGate() {
     <>
       <Toaster />
       <Router />
+      {/* .910 §12 motivational anchor — app-shell splash. Persistent so it's
+          present on app open and on every tab switch without introducing new
+          transient overlay behavior. */}
+      <p
+        className="fixed bottom-2 left-1/2 -translate-x-1/2 text-[10px] italic text-muted-foreground/50 pointer-events-none select-none z-50"
+        data-testid="text-anchor-shell"
+      >
+        Protect what grows you.
+      </p>
     </>
   );
 }

@@ -200,6 +200,12 @@ export default function Dashboard() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-foreground">SRE-of-Me</h1>
             <p className="text-sm font-medium text-muted-foreground mt-1 tracking-wide">SYSTEM OBSERVABILITY</p>
+            <p
+              className="text-xs italic text-muted-foreground/70 mt-2"
+              data-testid="text-anchor-dashboard"
+            >
+              Capacity is built, not found.
+            </p>
           </div>
           <div className="flex items-center gap-3">
             <NotificationBell />
