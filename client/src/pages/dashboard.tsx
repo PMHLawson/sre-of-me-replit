@@ -46,6 +46,10 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   // Subscribe to policyState so the component re-renders when API-backed
   // policy data arrives or refreshes; getDomainStatus reads it under the hood.
   useAppStore(state => state.policyState);
+  // B3.2 — During the post-signup ramp-up window, the "priority recovery"
+  // pulsing red dot is suppressed so a brand-new user doesn't see urgency
+  // signals before their SLOs are even meaningful.
+  const isRampUp = useAppStore(state => state.escalationState?.isRampUp ?? false);
   
   const domainStatus = getDomainStatus(domain);
   const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
@@ -54,7 +58,8 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   
   // Only apply aggressive visual signaling if the domain is ACTUALLY in trouble
   // Just being the "lowest score" among 4 perfectly healthy domains shouldn't trigger red alerts.
-  const isTargetForRecovery = weakestDomain === domain && isDegradedOrCritical;
+  // Ramp-up forces this off regardless.
+  const isTargetForRecovery = !isRampUp && weakestDomain === domain && isDegradedOrCritical;
   
   const getStatusColor = () => {
     switch (status) {
@@ -142,6 +147,8 @@ export default function Dashboard() {
     return () => document.removeEventListener('mousedown', handler);
   }, [userMenuOpen]);
 
+  const isRampUp = escalationState?.isRampUp ?? false;
+
   // Composite numeric score is still an average of per-domain scores. The
   // status banner (NOMINAL/ADVISORY/WARNING/BREACH) is sourced exclusively
   // from escalationState.composite — the same model that drives the
@@ -227,52 +234,91 @@ export default function Dashboard() {
           </div>
         </div>
         
-        {/* Composite Health Overview */}
-        <div 
-          className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-accent/30 transition-all active:scale-[0.98]"
-          onClick={() => setLocation('/system-health')}
-          data-testid="card-system-health"
-        >
-          <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/5 rounded-full blur-3xl"></div>
-          <div className="flex flex-col relative z-10">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2 flex items-center gap-2">
-                  System Health
-                  <ChevronRight className="w-3 h-3" />
-                </div>
-                <div className="flex items-center gap-3">
-                  {!sessionsLoaded ? (
-                    <span className="text-5xl font-extrabold tracking-tighter text-muted-foreground/30">—</span>
-                  ) : (
-                    <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
-                      {systemHealth.score}
+        {/* Composite Health Overview — ramp-up takes a distinct teal/cyan
+            treatment so a brand-new user understands why their dashboard reads
+            NOMINAL even with little or no logged activity (B3.2). */}
+        {isRampUp ? (
+          <div
+            className="bg-primary/10 border border-primary/30 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-primary/15 transition-all active:scale-[0.98]"
+            onClick={() => setLocation('/system-health')}
+            data-testid="card-system-health-rampup"
+          >
+            <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/20 rounded-full blur-3xl"></div>
+            <div className="flex flex-col relative z-10">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-widest text-primary/80 mb-2 flex items-center gap-2">
+                    System Health
+                    <ChevronRight className="w-3 h-3" />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-3xl font-extrabold tracking-tight text-primary" data-testid="text-rampup-headline">
+                      System Calibrating
                     </span>
-                  )}
+                  </div>
+                </div>
+                <div
+                  className="px-4 py-2 rounded-2xl text-sm font-bold tracking-wide bg-primary/20 text-primary"
+                  data-testid="badge-rampup"
+                >
+                  RAMP-UP
                 </div>
               </div>
-              {!sessionsLoaded ? (
-                <div className="px-4 py-2 rounded-2xl text-sm font-bold tracking-wide bg-muted text-muted-foreground/50">
-                  Loading…
-                </div>
-              ) : (
-                <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
-                  {systemHealth.status}
-                </div>
-              )}
-            </div>
-            
-            <div className="pt-4 border-t border-border/40">
-              <p className="text-sm text-foreground/80 leading-relaxed font-medium">
-                {!sessionsLoaded ? 'Syncing session data…' : systemHealth.rationale}
-              </p>
+
+              <div className="pt-4 border-t border-primary/20">
+                <p className="text-sm text-foreground/80 leading-relaxed font-medium" data-testid="text-rampup-rationale">
+                  7-day runway active. Escalation tiers are suppressed while the system learns your cadence — log sessions normally and SLO surfacing will resume once the window completes.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div 
+            className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-accent/30 transition-all active:scale-[0.98]"
+            onClick={() => setLocation('/system-health')}
+            data-testid="card-system-health"
+          >
+            <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/5 rounded-full blur-3xl"></div>
+            <div className="flex flex-col relative z-10">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2 flex items-center gap-2">
+                    System Health
+                    <ChevronRight className="w-3 h-3" />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {!sessionsLoaded ? (
+                      <span className="text-5xl font-extrabold tracking-tighter text-muted-foreground/30">—</span>
+                    ) : (
+                      <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
+                        {systemHealth.score}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {!sessionsLoaded ? (
+                  <div className="px-4 py-2 rounded-2xl text-sm font-bold tracking-wide bg-muted text-muted-foreground/50">
+                    Loading…
+                  </div>
+                ) : (
+                  <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-wide ${systemHealth.bg} ${systemHealth.color}`}>
+                    {systemHealth.status}
+                  </div>
+                )}
+              </div>
+              
+              <div className="pt-4 border-t border-border/40">
+                <p className="text-sm text-foreground/80 leading-relaxed font-medium">
+                  {!sessionsLoaded ? 'Syncing session data…' : systemHealth.rationale}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </header>
 
       <main className="px-4 space-y-4">
-        {escalationState && (
+        {escalationState && !isRampUp && (
           <section className="space-y-3">
             <div className="flex items-center justify-between px-2">
               <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Escalation</h2>
@@ -284,6 +330,24 @@ export default function Dashboard() {
               perDomain={escalationState.perDomain}
               onSelect={(d) => setLocation(`/domain/${d}`)}
             />
+          </section>
+        )}
+        {escalationState && isRampUp && (
+          <section
+            className="bg-primary/5 border border-primary/20 rounded-2xl p-4 mx-2"
+            data-testid="section-rampup-escalation-suppressed"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0"></div>
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-widest text-primary/90 mb-1">
+                  Escalation Suppressed
+                </h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Per-domain escalation tiers are paused during the 7-day ramp-up. Domain scores below remain real — they show your actual cadence as the system calibrates.
+                </p>
+              </div>
+            </div>
           </section>
         )}
 

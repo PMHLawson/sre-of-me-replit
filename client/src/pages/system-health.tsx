@@ -45,6 +45,8 @@ export default function SystemHealth() {
   const policyState = useAppStore(state => state.policyState);
   const escalationState = useAppStore(state => state.escalationState);
 
+  const isRampUp = escalationState?.isRampUp ?? false;
+
   const { escalation, domainsInfo, insights, compositeScore } = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
     let totalScore = 0;
@@ -151,45 +153,98 @@ export default function SystemHealth() {
 
       <main className="px-4 py-6 space-y-8">
 
-        {/* Composite Score + Escalation State */}
-        <section className={`border rounded-3xl p-6 shadow-sm relative overflow-hidden ${escalation.bg} ${escalation.border}`}>
-          <div className="absolute -right-6 -top-6 w-32 h-32 bg-current/5 rounded-full blur-3xl opacity-30"></div>
-          <div className="flex flex-col relative z-10">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Composite Score</div>
-                <div className={`text-5xl font-extrabold tracking-tighter ${escalation.text}`}>
-                  {compositeScore}
+        {isRampUp ? (
+          /* B3.2 — Ramp-up hero replaces both the composite score banner and
+             the escalation protocol reference grid. The Domain State Board
+             below remains visible because raw scores are still authentic. */
+          <section
+            className="border border-primary/30 bg-primary/10 rounded-3xl p-6 shadow-sm relative overflow-hidden"
+            data-testid="section-rampup-hero"
+          >
+            <div className="absolute -right-6 -top-6 w-40 h-40 bg-primary/20 rounded-full blur-3xl opacity-50"></div>
+            <div className="relative z-10 space-y-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-widest text-primary/80 mb-2">
+                    System State
+                  </div>
+                  <div className="text-3xl font-extrabold tracking-tight text-primary" data-testid="text-rampup-hero-headline">
+                    System Calibrating
+                  </div>
+                </div>
+                <div className="px-4 py-2 rounded-2xl text-sm font-bold tracking-widest border bg-primary/20 text-primary border-primary/30">
+                  RAMP-UP
                 </div>
               </div>
-              <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-widest border ${escalation.bg} ${escalation.text} ${escalation.border}`}>
-                {escalation.state}
-              </div>
-            </div>
-            <div className="pt-4 border-t border-current/10">
-              <p className="text-sm text-foreground leading-relaxed font-medium">
-                {escalation.rationale}
-              </p>
-            </div>
-          </div>
-        </section>
 
-        {/* Escalation Reference */}
-        <section className="space-y-3">
-          <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest pl-2">Escalation Protocol</h2>
-          <div className="grid grid-cols-2 gap-2">
-            {([['NOMINAL','All SLOs met. Full flex capacity.','text-status-healthy bg-status-healthy/10'],
-               ['ADVISORY','Trends declining. Note & monitor.','text-status-advisory bg-status-advisory/10'],
-               ['WARNING','SLO slippage. Decline P3. Time-box P2.','text-status-degraded bg-status-degraded/10'],
-               ['BREACH','Critical. Cultivation = P1.','text-status-critical bg-status-critical/10']] as const
-            ).map(([state, desc, cls]) => (
-              <div key={state} className={`rounded-2xl p-3.5 border border-transparent ${cls} ${escalation.state === state ? 'ring-2 ring-current/30' : ''}`}>
-                <div className="font-bold text-xs tracking-widest mb-1">{state}</div>
-                <div className="text-[10px] opacity-80 leading-snug font-medium">{desc}</div>
+              <div className="pt-4 border-t border-primary/20 space-y-3">
+                <p className="text-sm text-foreground leading-relaxed font-medium">
+                  You are inside the 7-day post-signup runway window. Until the runway completes,
+                  per-domain escalation tiers are <strong>suppressed to NOMINAL</strong> across the
+                  board — even when activity is sparse — because there isn't yet enough history for
+                  the SLO model to make meaningful judgements.
+                </p>
+                <p className="text-sm text-foreground/80 leading-relaxed">
+                  Domain scores you see below are <strong>real</strong>: they reflect your actual
+                  cadence so far. Use the runway to log sessions naturally and build a baseline.
+                  Once the runway completes, escalation surfacing resumes automatically and the
+                  system will start flagging WARNING / BREACH conditions normally.
+                </p>
               </div>
-            ))}
-          </div>
-        </section>
+
+              <div className="pt-3 border-t border-primary/20">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-primary/80 mb-1">
+                  Recommended Action
+                </div>
+                <p className="text-xs text-foreground/80 leading-relaxed font-medium">
+                  Log sessions normally. No need to chase SLO targets — focus on getting the cadence right.
+                </p>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <>
+            {/* Composite Score + Escalation State */}
+            <section className={`border rounded-3xl p-6 shadow-sm relative overflow-hidden ${escalation.bg} ${escalation.border}`}>
+              <div className="absolute -right-6 -top-6 w-32 h-32 bg-current/5 rounded-full blur-3xl opacity-30"></div>
+              <div className="flex flex-col relative z-10">
+                <div className="flex items-center justify-between mb-5">
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Composite Score</div>
+                    <div className={`text-5xl font-extrabold tracking-tighter ${escalation.text}`}>
+                      {compositeScore}
+                    </div>
+                  </div>
+                  <div className={`px-4 py-2 rounded-2xl text-sm font-bold tracking-widest border ${escalation.bg} ${escalation.text} ${escalation.border}`}>
+                    {escalation.state}
+                  </div>
+                </div>
+                <div className="pt-4 border-t border-current/10">
+                  <p className="text-sm text-foreground leading-relaxed font-medium">
+                    {escalation.rationale}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* Escalation Reference */}
+            <section className="space-y-3">
+              <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest pl-2">Escalation Protocol</h2>
+              <div className="grid grid-cols-2 gap-2">
+                {([['NOMINAL','All SLOs met. Full flex capacity.','text-status-healthy bg-status-healthy/10'],
+                   ['ADVISORY','Trends declining. Note & monitor.','text-status-advisory bg-status-advisory/10'],
+                   ['WARNING','SLO slippage. Decline P3. Time-box P2.','text-status-degraded bg-status-degraded/10'],
+                   ['BREACH','Critical. Cultivation = P1.','text-status-critical bg-status-critical/10']] as const
+                ).map(([state, desc, cls]) => (
+                  <div key={state} className={`rounded-2xl p-3.5 border border-transparent ${cls} ${escalation.state === state ? 'ring-2 ring-current/30' : ''}`}>
+                    <div className="font-bold text-xs tracking-widest mb-1">{state}</div>
+                    <div className="text-[10px] opacity-80 leading-snug font-medium">{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
 
         {/* System Insights */}
         <section className="space-y-4">
