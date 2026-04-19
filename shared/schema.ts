@@ -99,6 +99,14 @@ export type SessionEdit = typeof sessionEdits.$inferSelect;
 export const complianceColorEnum = ["green", "yellow", "red"] as const;
 export type ComplianceColor = typeof complianceColorEnum[number];
 
+/**
+ * C2.1 — Overachievement tier ladder. Mirrors the engine enum so the
+ * client can render tier-specific visuals from the API response without a
+ * second source of truth.
+ */
+export const overachievementTierEnum = ["NONE", "COMMITTED", "PEAK", "ELITE"] as const;
+export type OverachievementTier = typeof overachievementTierEnum[number];
+
 export const domainPolicySpecSchema = z.object({
   targetMinutes: z.number(),
   sessionFloor: z.number(),
@@ -123,6 +131,10 @@ export const serviceStateSchema = z.object({
   is_deviated: z.boolean().optional(),
   /** True if the active deviation removes this domain from the composite weight. */
   excluded_from_composite: z.boolean().optional(),
+  /** C2.1 — Uncapped MIN(raw_session_score, raw_duration_score). */
+  overachievement_raw: z.number(),
+  /** C2.1 — Tier derived from overachievement_raw. */
+  overachievement_tier: z.enum(overachievementTierEnum),
 });
 
 export const policyStateResponseSchema = z.object({

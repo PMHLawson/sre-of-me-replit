@@ -266,6 +266,43 @@ export function durationScore(minutes: number, targetMinutes: number): number {
   return Math.min(100, Math.round((minutes / targetMinutes) * 100));
 }
 
+/**
+ * C2.1 — Uncapped raw session score. Mirrors `sessionScore` but does not
+ * clamp at 100 so overachievement can be detected. The capped value still
+ * feeds composite/escalation paths; only overachievement surfaces use this.
+ */
+export function rawSessionScore(qualifying: number, sessionsTarget: number): number {
+  if (sessionsTarget <= 0) return 100;
+  return Math.round((qualifying / sessionsTarget) * 100);
+}
+
+/** C2.1 — Uncapped raw duration score. Sibling of `rawSessionScore`. */
+export function rawDurationScore(minutes: number, targetMinutes: number): number {
+  if (targetMinutes <= 0) return 100;
+  return Math.round((minutes / targetMinutes) * 100);
+}
+
+/**
+ * C2.1 — Overachievement tier ladder. Active when both the session and
+ * duration dimensions exceed the SLO target (we take MIN of the two raw
+ * scores so a user must be overachieving on both axes).
+ *
+ * - NONE       ≤ 100  (no overachievement)
+ * - COMMITTED  101-149  (consistently above target)
+ * - PEAK       150-199  (well above target — substantial surplus)
+ * - ELITE      200+     (double-target or more — sustained excellence)
+ */
+export const overachievementTierEnum = ["NONE", "COMMITTED", "PEAK", "ELITE"] as const;
+export type OverachievementTier = typeof overachievementTierEnum[number];
+
+/** Map an uncapped raw score to its overachievement tier. */
+export function overachievementTier(rawScore: number): OverachievementTier {
+  if (rawScore >= 200) return "ELITE";
+  if (rawScore >= 150) return "PEAK";
+  if (rawScore >= 101) return "COMMITTED";
+  return "NONE";
+}
+
 /** Per-service score = mean of session and duration scores. */
 export function serviceScore(sessionScoreValue: number, durationScoreValue: number): number {
   return Math.round((sessionScoreValue + durationScoreValue) / 2);
@@ -332,6 +369,15 @@ export interface ServiceState {
   is_deviated?: boolean;
   /** True if the active deviation excludes this domain from the composite. */
   excluded_from_composite?: boolean;
+  /**
+   * C2.1 — Uncapped MIN(raw_session_score, raw_duration_score). Both axes
+   * must be over target before this exceeds 100. Surfaces use this for the
+   * per-card overachievement display; composite/escalation paths still use
+   * the capped `service_score`.
+   */
+  overachievement_raw: number;
+  /** C2.1 — Tier derived from `overachievement_raw`. */
+  overachievement_tier: OverachievementTier;
 }
 
 /** Compute full per-service state for a single domain. */
@@ -354,6 +400,13 @@ export function computeServiceState<T extends Session>(
   const dScore = durationScore(minutes, policy.targetMinutes);
   const svcScore = serviceScore(sScore, dScore);
 
+  // C2.1 — Overachievement uses uncapped raw scores. MIN ensures both axes
+  // (frequency + duration) must be above target before the tier activates.
+  const rawSession = rawSessionScore(qDays, policy.sessionsTarget);
+  const rawDuration = rawDurationScore(minutes, policy.targetMinutes);
+  const oaRaw = Math.min(rawSession, rawDuration);
+  const oaTier = overachievementTier(oaRaw);
+
   const devMap = buildDeviationMap(opts.deviations, now);
   const dev = devMap[domain];
 
@@ -371,6 +424,8 @@ export function computeServiceState<T extends Session>(
     window_days: window,
     is_deviated: dev.active,
     excluded_from_composite: dev.excludeFromComposite,
+    overachievement_raw: oaRaw,
+    overachievement_tier: oaTier,
   };
 }
 
