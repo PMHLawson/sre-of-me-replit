@@ -24,6 +24,23 @@ function formatLocalDateTime(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * Resolve a datetime-local string to a Date safe to pass to `.toISOString()`.
+ * Empty / malformed input falls back to "now" (the picker's default), and
+ * any future moment is clamped to "now" — the input's `max` attribute is
+ * UX-only and can be bypassed by DOM tampering or hydration edge cases, so
+ * this is the actual hard guard that backs SOMR-304's "no future timestamps"
+ * acceptance criterion.
+ */
+function resolveSessionTimestamp(local: string): Date {
+  const now = new Date();
+  if (!local) return now;
+  const parsed = new Date(local);
+  if (Number.isNaN(parsed.getTime())) return now;
+  if (parsed.getTime() > now.getTime()) return now;
+  return parsed;
+}
+
 export default function LogSession() {
   const [, setLocation] = useLocation();
   const searchParams = new URLSearchParams(window.location.search);
@@ -168,11 +185,11 @@ export default function LogSession() {
     }
 
     // ── All clear → persist ──────────────────────────────────────────────
-    // D1.1 (SOMR-304): timestamp now comes from the picker. `new Date(local)`
-    // parses the datetime-local string in the browser's local zone; toISOString
-    // converts to UTC with the "Z" offset, satisfying the schema's
-    // `datetime({ offset: true })` contract.
-    const isoTimestamp = new Date(sessionDate).toISOString();
+    // D1.1 (SOMR-304): timestamp now comes from the picker, resolved via
+    // `resolveSessionTimestamp` which guarantees a valid Date and clamps any
+    // future moment back to "now". `.toISOString()` then produces the "Z"-
+    // suffixed string the schema's `datetime({ offset: true })` accepts.
+    const isoTimestamp = resolveSessionTimestamp(sessionDate).toISOString();
     const trimmedNotes = notes.trim();
 
     // ── D1.2 (SOMR-305) edit path — PATCH instead of POST ────────────────
