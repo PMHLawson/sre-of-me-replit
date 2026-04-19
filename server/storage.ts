@@ -20,6 +20,13 @@ export interface IStorage {
   softDeleteSession(userId: string, id: string): Promise<Session | undefined>;
   restoreSession(userId: string, id: string): Promise<Session | undefined>;
   getDeletedSessions(userId: string): Promise<Session[]>;
+  /**
+   * Hard-delete soft-deleted sessions whose `deletedAt <= cutoff` (inclusive).
+   * Active sessions (`deletedAt IS NULL`) are never matched. Idempotent —
+   * once expired rows are removed a re-run with the same cutoff is a no-op.
+   * Returns the number of rows removed.
+   */
+  purgeExpiredDeletedSessions(cutoff: Date): Promise<number>;
 
   // Deviations
   createDeviation(deviation: InsertDeviation & { userId: string }): Promise<Deviation>;
@@ -173,6 +180,17 @@ export class DatabaseStorage implements IStorage {
       .from(sessions)
       .where(and(eq(sessions.userId, userId), isNotNull(sessions.deletedAt)))
       .orderBy(desc(sessions.deletedAt));
+  }
+
+  async purgeExpiredDeletedSessions(cutoff: Date): Promise<number> {
+    // Inclusive comparator (deletedAt <= cutoff). The predicate is gated to
+    // soft-deleted rows only, so active sessions (deletedAt IS NULL) are never
+    // matched and a re-run with the same cutoff is a no-op (idempotent).
+    const removed = await db
+      .delete(sessions)
+      .where(and(isNotNull(sessions.deletedAt), lte(sessions.deletedAt, cutoff)))
+      .returning({ id: sessions.id });
+    return removed.length;
   }
 
   // ----- Deviations -----
