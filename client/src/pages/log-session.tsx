@@ -371,6 +371,9 @@ export default function LogSession() {
   // available via the slider below — no separate "Custom" button needed.
   const durations = [5, 10, 15, 20, 30];
   const saving = stage === 'saving';
+  // After save lands, lock the form until we redirect / undo / edit so the
+  // user can't tweak fields and trigger a second save during the toast window.
+  const formDisabled = saving || stage === 'saved';
   const floor = DOMAIN_POLICY[domain].sessionFloor;
   // Recomputed every render so the cap moves forward in real time and
   // future timestamps cannot be selected.
@@ -400,7 +403,8 @@ export default function LogSession() {
               <button
                 key={d.id}
                 onClick={() => setDomainAndReset(d.id)}
-                className={`p-4 rounded-xl border text-left transition-all active:scale-95 ${
+                disabled={formDisabled}
+                className={`p-4 rounded-xl border text-left transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed ${
                   domain === d.id
                     ? `border-primary bg-primary/5 text-primary ring-1 ring-primary/20`
                     : 'border-border/50 bg-card text-muted-foreground hover:bg-accent/50'
@@ -427,8 +431,9 @@ export default function LogSession() {
             type="datetime-local"
             value={sessionDate}
             max={maxDateTime}
+            disabled={formDisabled}
             onChange={(e) => setSessionDate(e.target.value)}
-            className="w-full bg-card border border-border/50 rounded-2xl p-4 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all shadow-sm"
+            className="w-full bg-card border border-border/50 rounded-2xl p-4 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
             data-testid="input-session-date"
           />
           <p className="text-xs text-muted-foreground/80">
@@ -451,7 +456,8 @@ export default function LogSession() {
               <button
                 key={m}
                 onClick={() => setDurationAndReset(m)}
-                className={`px-4 py-2.5 rounded-full text-sm font-medium transition-all active:scale-95 ${
+                disabled={formDisabled}
+                className={`px-4 py-2.5 rounded-full text-sm font-medium transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed ${
                   duration === m
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'bg-card border border-border/50 text-foreground hover:bg-accent/50'
@@ -469,8 +475,9 @@ export default function LogSession() {
             max="240"
             step="5"
             value={duration}
+            disabled={formDisabled}
             onChange={(e) => setDurationAndReset(Number(e.target.value))}
-            className="w-full mt-6 accent-primary h-2 bg-muted rounded-lg appearance-none cursor-pointer"
+            className="w-full mt-6 accent-primary h-2 bg-muted rounded-lg appearance-none cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             data-testid="input-duration-slider"
           />
         </section>
@@ -481,8 +488,9 @@ export default function LogSession() {
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
+            disabled={formDisabled}
             placeholder="How did it go?"
-            className="w-full bg-card border border-border/50 rounded-2xl p-4 min-h-[120px] resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground placeholder:text-muted-foreground/50 transition-all shadow-sm"
+            className="w-full bg-card border border-border/50 rounded-2xl p-4 min-h-[120px] resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground placeholder:text-muted-foreground/50 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
             data-testid="input-notes"
           />
         </section>
@@ -491,7 +499,7 @@ export default function LogSession() {
       <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background to-transparent pb-8 pt-12 pointer-events-none">
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={formDisabled}
           className="w-full h-14 rounded-2xl bg-primary text-primary-foreground font-semibold text-lg flex items-center justify-center gap-2 active:scale-[0.98] transition-transform shadow-lg shadow-primary/20 pointer-events-auto disabled:opacity-60 disabled:cursor-not-allowed"
           data-testid="button-save-session"
         >
@@ -559,12 +567,12 @@ export default function LogSession() {
         <PromptModal
           icon={<Repeat className="w-6 h-6 text-status-advisory" />}
           tone="advisory"
-          title="Already logged today"
+          title="Already logged on this date"
           testId="modal-frequency"
           body={
             <p>
-              You've already logged a {domain.replace('-', ' ')} session today. Logging another is
-              fine — just confirming this isn't a duplicate.
+              You've already logged a {domain.replace('-', ' ')} session on this date. Logging
+              another is fine — just confirming this isn't a duplicate.
             </p>
           }
           confirmLabel="Save anyway"
