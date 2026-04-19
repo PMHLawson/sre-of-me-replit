@@ -113,11 +113,23 @@ const TooltipContent = ({
   );
 };
 
-// Render a small filled circle above any bar whose day has an anomaly. Uses
-// the Recharts custom-label callback signature; `value` and the rest are
-// supplied by the Bar parent and ignored here aside from positional args.
-const AnomalyMarker = ({ x, y, width, payload }: any) => {
-  if (!payload?.hasAnomaly) return null;
+// Props that Recharts injects into a Bar's `label` content renderer. Only
+// the geometry and source datum are used here, but the shape is declared
+// explicitly so the marker stays type-safe (no implicit `any`).
+interface AnomalyMarkerProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  payload?: ChartDatum;
+}
+
+// Render a small filled circle above any bar whose day has an anomaly.
+// Recharts' label content type requires a non-null SVG element, so we return
+// an empty `<g/>` for non-anomalous days rather than null.
+function AnomalyMarker({ x, y, width, payload }: AnomalyMarkerProps): React.ReactElement<SVGElement> {
+  if (!payload?.hasAnomaly || x === undefined || y === undefined || width === undefined) {
+    return <g />;
+  }
   const cx = x + width / 2;
   const cy = y - 6;
   return (
@@ -125,7 +137,7 @@ const AnomalyMarker = ({ x, y, width, payload }: any) => {
       <circle cx={cx} cy={cy} r={3} fill={ANOMALY_COLOR} stroke="#FFFFFF" strokeWidth={0.5} />
     </g>
   );
-};
+}
 
 function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity }: ChartBarsProps) {
   const runs = deviationRuns(data);
@@ -184,7 +196,7 @@ function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays,
         dataKey="minutes"
         radius={[4, 4, 0, 0]}
         maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}
-        label={AnomalyMarker as any}
+        label={AnomalyMarker}
         isAnimationActive={false}
       >
         {data.map((entry, idx) => {
