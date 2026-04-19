@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
-import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
+import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
@@ -149,12 +149,14 @@ export default function DomainDetail() {
   const accentHex = DOMAIN_COLOR[domain];
 
   const sessions = useAppStore(s => s.sessions);
+  const deviations = useAppStore(s => s.deviations);
   const getDomainStatus = useAppStore(s => s.getDomainStatus);
   // Re-render when API-backed policy state arrives or refreshes.
   useAppStore(s => s.policyState);
   const escalationState = useAppStore(s => s.escalationState);
   const domainEscalation = escalationState?.perDomain[domain];
   const domainSessions = sessions.filter(s => s.domain === domain);
+  const activeDeviation = findActiveDeviationAt(deviations, domain, new Date());
   const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes } = getDomainStatus(domain);
 
   // Build full 42-day dataset once; slice to viewDays for display
@@ -237,6 +239,45 @@ export default function DomainDetail() {
         {/* Escalation Surface — derived from /api/escalation-state */}
         {domainEscalation && (
           <EscalationCard esc={domainEscalation} domainLabel={domainName} />
+        )}
+
+        {/* Active deviation notice — surfaces the current deviation in context.
+            Error-budget drawdown is held steady server-side while this is active. */}
+        {activeDeviation && (
+          <div
+            className="bg-status-advisory/10 border border-status-advisory/30 rounded-2xl p-4 flex items-start gap-3"
+            data-testid="notice-deviation-active"
+          >
+            <CalendarOff className="w-4 h-4 mt-0.5 text-status-advisory shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold uppercase tracking-widest text-status-advisory">
+                  Deviation active
+                </span>
+                {activeDeviation.excludeFromComposite && (
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-status-advisory bg-status-advisory/15 px-2 py-0.5 rounded-full">
+                    Excluded from composite
+                  </span>
+                )}
+              </div>
+              <p
+                className="text-sm font-medium text-foreground mt-1 break-words"
+                data-testid="text-deviation-reason"
+              >
+                {activeDeviation.reason}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1 font-mono">
+                Since {format(parseISO(activeDeviation.startAt), 'MMM d, h:mm a')}
+                {activeDeviation.endAt
+                  ? ` → planned end ${format(parseISO(activeDeviation.endAt), 'MMM d, h:mm a')}`
+                  : ' → ongoing'}
+              </p>
+              <p className="text-xs text-muted-foreground mt-2">
+                Error-budget drawdown is paused for this domain while the deviation is active.
+                Manage from the Dashboard.
+              </p>
+            </div>
+          </div>
         )}
 
         {/* Per-day tier history strip — last N days at a glance */}

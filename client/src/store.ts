@@ -219,6 +219,33 @@ export const apiBackedDomainStatus = (
   };
 };
 
+/**
+ * True if the deviation covers `at` for `domain`. Mirrors the server-side
+ * predicate in `server/lib/policy-engine.ts` so client-rendered deviation
+ * markers match what /api/policy-state and /api/escalation-state apply.
+ */
+export function isDeviationActiveAt(
+  d: Pick<Deviation, 'domain' | 'startAt' | 'endAt' | 'endedAt' | 'deletedAt'>,
+  domain: Domain,
+  at: Date,
+): boolean {
+  if (d.domain !== domain) return false;
+  if (d.deletedAt) return false;
+  if (d.endedAt && new Date(d.endedAt) <= at) return false;
+  if (new Date(d.startAt) > at) return false;
+  if (d.endAt && new Date(d.endAt) < at) return false;
+  return true;
+}
+
+/** Find the first deviation in `deviations` that covers `domain` at `at`. */
+export function findActiveDeviationAt(
+  deviations: Deviation[],
+  domain: Domain,
+  at: Date,
+): Deviation | undefined {
+  return deviations.find((d) => isDeviationActiveAt(d, domain, at));
+}
+
 let policyStateRequestCounter = 0;
 let policyStateAbortController: AbortController | null = null;
 

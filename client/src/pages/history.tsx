@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';
 import { ArrowLeft } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
@@ -10,6 +10,7 @@ const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
 export default function History() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
+  const deviations = useAppStore(state => state.deviations);
   const [visibleWeeks, setVisibleWeeks] = useState(2); // show 2 weeks by default (14 days)
 
   // Build week buckets: each entry is one calendar week (Mon–Sun)
@@ -121,18 +122,27 @@ export default function History() {
                     {dateLabel}
                   </h2>
                   {week.sessionsByDate[dateLabel].map(session => {
-                    const floor = DOMAIN_POLICY[session.domain as Domain].sessionFloor;
+                    const dom = session.domain as Domain;
+                    const floor = DOMAIN_POLICY[dom].sessionFloor;
                     const belowFloor = session.durationMinutes < floor;
+                    const deviationAtSession = findActiveDeviationAt(
+                      deviations,
+                      dom,
+                      parseISO(session.timestamp),
+                    );
+                    const inDeviation = !!deviationAtSession;
                     return (
                       <div
                         key={session.id}
                         className={`bg-card border rounded-2xl p-4 flex items-center justify-between shadow-sm transition-opacity ${
-                          belowFloor ? 'border-status-degraded/30 opacity-75' : 'border-border/50'
+                          belowFloor ? 'border-status-degraded/30 opacity-75' :
+                          inDeviation ? 'border-status-advisory/30' :
+                          'border-border/50'
                         }`}
                         data-testid={`session-item-${session.id}`}
                       >
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <div className="font-semibold capitalize text-base tracking-tight text-foreground">
                               {session.domain.replace('-', ' ')}
                             </div>
@@ -143,6 +153,15 @@ export default function History() {
                                 data-testid={`badge-below-floor-${session.id}`}
                               >
                                 Below floor
+                              </span>
+                            )}
+                            {inDeviation && (
+                              <span
+                                className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-advisory/10 text-status-advisory border border-status-advisory/20"
+                                title={`Deviation active: ${deviationAtSession?.reason}`}
+                                data-testid={`badge-deviation-${session.id}`}
+                              >
+                                Deviation
                               </span>
                             )}
                           </div>
