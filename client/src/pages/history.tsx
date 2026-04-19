@@ -169,9 +169,9 @@ export default function History() {
           </button>
         )}
 
-        {sessions.length === 0 && (
+        {weekBuckets.length === 0 && (
           <div className="text-center py-12 text-muted-foreground font-medium">
-            No sessions logged yet.
+            No activity logged yet.
           </div>
         )}
 
