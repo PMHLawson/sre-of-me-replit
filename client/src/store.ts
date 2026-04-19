@@ -118,7 +118,13 @@ interface AppState {
   updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
   endDeviation: (id: string) => Promise<Deviation | null>;
   deleteDeviation: (id: string) => Promise<boolean>;
-  addSession: (session: Omit<Session, 'id'>) => Promise<void>;
+  /**
+   * Persist a new session. Returns the saved row (with server-assigned id)
+   * on success, a locally-generated stand-in in demo mode, or null on
+   * network/server failure. The return value enables post-save flows like
+   * the D1.2 Undo/Edit toast that need the new session's id.
+   */
+  addSession: (session: Omit<Session, 'id'>) => Promise<Session | null>;
   getDomainStatus: (domain: Domain) => DomainStatus;
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
   theme: 'dark' | 'light';
@@ -668,10 +674,11 @@ export const useAppStore = create<AppState>()(
       addSession: async (session) => {
         const { demoState } = get();
         if (demoState !== 'default') {
-          set((state) => ({
-            sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
-          }));
-          return;
+          // Demo / fixture mode: synthesize a row locally so the UI updates
+          // and post-save flows (D1.2 Undo/Edit toast) still have an id.
+          const local: Session = { ...session, id: crypto.randomUUID() } as Session;
+          set((state) => ({ sessions: [local, ...state.sessions] }));
+          return local;
         }
         try {
           const res = await fetch('/api/sessions', {
@@ -685,11 +692,16 @@ export const useAppStore = create<AppState>()(
           // Refresh API-backed policy + escalation state so server-computed surfaces reflect the new session.
           get().fetchPolicyState();
           get().fetchEscalationState();
+          return saved;
         } catch (err) {
           console.error('addSession error:', err);
+          // Fail-soft: still surface the new entry locally so the user
+          // doesn't lose their input. The toast caller treats `null` as
+          // "saved-but-not-confirmed" and will skip the Undo affordance.
           set((state) => ({
-            sessions: [{ ...session, id: crypto.randomUUID() }, ...state.sessions]
+            sessions: [{ ...session, id: crypto.randomUUID() } as Session, ...state.sessions]
           }));
+          return null;
         }
       },
 

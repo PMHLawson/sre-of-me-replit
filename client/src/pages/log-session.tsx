@@ -1,11 +1,17 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
-import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Repeat } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
+import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Repeat, Undo2, Pencil } from 'lucide-react';
+import { useAppStore, Domain, DOMAIN_POLICY, type Session } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
 
-type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving';
+// 'saved' = D1.2 post-save toast window. While in this stage no further form
+// edits are accepted; the user can Undo, Edit, or wait for auto-dismiss.
+type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving' | 'saved';
+
+// D1.2 (SOMR-305) — how long the post-save toast remains on screen before
+// auto-dismissing and navigating back to the dashboard.
+const POST_SAVE_TOAST_MS = 8000;
 
 /**
  * Format a Date as the local-time string a `<input type="datetime-local">`
@@ -22,6 +28,11 @@ export default function LogSession() {
   const [, setLocation] = useLocation();
   const searchParams = new URLSearchParams(window.location.search);
   const initialDomain = (searchParams.get('domain') as Domain) || 'martial-arts';
+  // D1.2 (SOMR-305): when present, the page is in edit mode and Save will
+  // PATCH the existing session via the B2 correction path instead of POSTing
+  // a new one. The id is captured once on mount; later URL changes are
+  // ignored for stability.
+  const initialEditId = searchParams.get('edit');
 
   const [domain, setDomain] = useState<Domain>(initialDomain);
   const [duration, setDuration] = useState(30);
@@ -31,13 +42,50 @@ export default function LogSession() {
   // Default = "now" in local time. Capped to "now" via the input's `max`
   // attribute so future dates can't be selected.
   const [sessionDate, setSessionDate] = useState<string>(() => formatLocalDateTime(new Date()));
+  // D1.2 (SOMR-305): set when this page is editing an already-saved session.
+  // Drives PATCH-vs-POST in runSaveFlow. Locked at mount; we never transition
+  // a logging session into an edit session in-place.
+  const editingSessionId = initialEditId;
 
   // Anomaly modal state — populated only while the anomaly modal is showing.
   const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
   const [anomalyNote, setAnomalyNote] = useState('');
 
+  // D1.2 (SOMR-305) — the just-saved row, kept in a ref so the post-save
+  // toast and its timers don't re-render the whole form. Cleared whenever
+  // the toast resolves (Undo, Edit, auto-dismiss).
+  const savedSessionRef = useRef<Session | null>(null);
+  // Tick the toast countdown bar by re-rendering once a frame's-worth of
+  // time has elapsed. The actual auto-dismiss is driven by the timeout
+  // below; this is purely visual.
+  const [toastDismissAt, setToastDismissAt] = useState<number | null>(null);
+
   const addSession = useAppStore(state => state.addSession);
+  const updateSession = useAppStore(state => state.updateSession);
+  const deleteSession = useAppStore(state => state.deleteSession);
   const sessions = useAppStore(state => state.sessions);
+  const fetchSessions = useAppStore(state => state.fetchSessions);
+
+  // ── Edit-mode pre-population (D1.2 / SOMR-305) ──────────────────────────
+  // On mount with `?edit=<id>`, find the row in the store and seed every
+  // field. If the sessions list isn't loaded yet (deep-link, refresh) we
+  // trigger a fetch and try again once it arrives.
+  useEffect(() => {
+    if (!initialEditId) return;
+    const target = sessions.find(s => s.id === initialEditId);
+    if (target) {
+      setDomain(target.domain as Domain);
+      setDuration(target.durationMinutes);
+      setSessionDate(formatLocalDateTime(new Date(target.timestamp)));
+      setNotes(target.notes ?? '');
+    } else if (sessions.length === 0) {
+      // Sessions haven't loaded; kick off a fetch and let the next render
+      // (when sessions populate) re-run this effect.
+      void fetchSessions();
+    }
+    // We intentionally depend on sessions so the effect re-runs after a
+    // deferred fetch resolves.
+  }, [initialEditId, sessions, fetchSessions]);
 
   /**
    * Decisions accumulated as the user walks through each modal. Passed
@@ -124,15 +172,62 @@ export default function LogSession() {
     // parses the datetime-local string in the browser's local zone; toISOString
     // converts to UTC with the "Z" offset, satisfying the schema's
     // `datetime({ offset: true })` contract.
-    await addSession({
+    const isoTimestamp = new Date(sessionDate).toISOString();
+    const trimmedNotes = notes.trim();
+
+    // ── D1.2 (SOMR-305) edit path — PATCH instead of POST ────────────────
+    // Edit-mode saves use the B2 correction endpoint. We do NOT show the
+    // post-save Undo/Edit toast here: the user is already correcting an
+    // earlier save, a second toast would be confusing and the soft-delete
+    // semantics differ. Just navigate back when the patch resolves.
+    if (editingSessionId) {
+      // Note: SessionPatch / server updateSessionSchema only accept the
+      // four user-editable fields below. The original anomaly flag stays
+      // on the row; re-evaluating anomaly on edit is tracked as a separate
+      // follow-up ("Apply the same anomaly check when editing a session").
+      const result = await updateSession(
+        editingSessionId,
+        {
+          domain,
+          durationMinutes: duration,
+          timestamp: isoTimestamp,
+          notes: trimmedNotes || null,
+        },
+        'Post-save edit',
+      );
+      if (result) {
+        setLocation('/');
+      } else {
+        // Patch failed — restore the form so the user can retry rather
+        // than silently dropping their edit.
+        setStage('idle');
+      }
+      return;
+    }
+
+    // ── D1.2 (SOMR-305) new-session path — POST then show toast ──────────
+    const saved = await addSession({
       domain,
       durationMinutes: duration,
-      timestamp: new Date(sessionDate).toISOString(),
-      notes: notes.trim() || undefined,
+      timestamp: isoTimestamp,
+      notes: trimmedNotes || undefined,
       isAnomaly: anomalyDecision.isAnomaly,
       anomalyNote: anomalyDecision.isAnomaly ? anomalyDecision.note : null,
     });
-    setLocation('/');
+
+    if (saved) {
+      // Hand the user the post-save Undo/Edit window. The toast component
+      // owns its own auto-dismiss timer; here we just stage it.
+      savedSessionRef.current = saved;
+      setToastDismissAt(Date.now() + POST_SAVE_TOAST_MS);
+      setStage('saved');
+    } else {
+      // Server-side persistence failed (we still surfaced the row locally);
+      // there's no canonical id to Undo against, so skip the toast and
+      // navigate immediately. The fail-soft local insert in addSession
+      // ensures the user's input isn't lost.
+      setLocation('/');
+    }
   };
 
   // Holds the in-flight decisions while a modal is open so confirm handlers
@@ -195,6 +290,62 @@ export default function LogSession() {
 
   const onFrequencyCancel = () => {
     setStage('idle');
+  };
+
+  // ── D1.2 (SOMR-305) post-save toast handlers ─────────────────────────────
+  // Auto-dismiss timer: when the toast appears, schedule a navigation to the
+  // dashboard so the user is never trapped if they walk away. Cleared on
+  // unmount and on any explicit Undo/Edit/Dismiss interaction.
+  useEffect(() => {
+    if (stage !== 'saved') return;
+    const t = window.setTimeout(() => {
+      savedSessionRef.current = null;
+      setLocation('/');
+    }, POST_SAVE_TOAST_MS);
+    return () => window.clearTimeout(t);
+  }, [stage, setLocation]);
+
+  // Tick the countdown bar at ~10fps. Cheap and avoids requestAnimationFrame
+  // bookkeeping. The setTimeout above remains the source of truth for
+  // auto-dismiss; this is purely visual.
+  useEffect(() => {
+    if (stage !== 'saved' || toastDismissAt === null) return;
+    const i = window.setInterval(() => {
+      // force re-render via state churn
+      setToastDismissAt((prev) => (prev === null ? null : prev));
+      if (Date.now() >= toastDismissAt) window.clearInterval(i);
+    }, 100);
+    return () => window.clearInterval(i);
+  }, [stage, toastDismissAt]);
+
+  const onPostSaveUndo = async () => {
+    const saved = savedSessionRef.current;
+    if (!saved) {
+      setLocation('/');
+      return;
+    }
+    savedSessionRef.current = null;
+    // Soft-delete via the same B2 deletion path used elsewhere; no extra
+    // confirmation prompt — the toast itself was the confirmation window.
+    await deleteSession(saved.id);
+    setLocation('/');
+  };
+
+  const onPostSaveEdit = () => {
+    const saved = savedSessionRef.current;
+    if (!saved) {
+      setLocation('/');
+      return;
+    }
+    savedSessionRef.current = null;
+    // Navigate to the same page in edit mode. A fresh mount picks up the
+    // ?edit=<id> query param and pre-populates the form.
+    setLocation(`/log?edit=${saved.id}`);
+  };
+
+  const onPostSaveDismiss = () => {
+    savedSessionRef.current = null;
+    setLocation('/');
   };
 
   const setDomainAndReset = (d: Domain) => {
@@ -417,6 +568,98 @@ export default function LogSession() {
           onCancel={onFrequencyCancel}
         />
       )}
+
+      {/* ── Post-save Undo/Edit toast (D1.2 / SOMR-305) ───────────────── */}
+      {stage === 'saved' && toastDismissAt !== null && (
+        <PostSaveToast
+          dismissAt={toastDismissAt}
+          totalMs={POST_SAVE_TOAST_MS}
+          onUndo={onPostSaveUndo}
+          onEdit={onPostSaveEdit}
+          onDismiss={onPostSaveDismiss}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Post-save toast (D1.2 / SOMR-305) ──────────────────────────────────────
+//
+// Shown after a successful new-session save. Provides Undo (soft-delete) and
+// Edit (re-open the form pre-populated). Auto-dismisses after totalMs and
+// renders a shrinking progress bar so the user can see the time remaining.
+// Lives at the bottom of the screen above the (no-longer-pointer-events) Save
+// button gradient.
+
+interface PostSaveToastProps {
+  dismissAt: number;
+  totalMs: number;
+  onUndo: () => void;
+  onEdit: () => void;
+  onDismiss: () => void;
+}
+
+function PostSaveToast({ dismissAt, totalMs, onUndo, onEdit, onDismiss }: PostSaveToastProps) {
+  const remaining = Math.max(0, dismissAt - Date.now());
+  const pct = Math.max(0, Math.min(100, (remaining / totalMs) * 100));
+  return (
+    <div
+      className="fixed inset-x-0 bottom-0 z-50 p-4 pb-6 pointer-events-none"
+      role="status"
+      aria-live="polite"
+      data-testid="toast-post-save"
+    >
+      <div className="mx-auto max-w-md bg-card border border-border/60 rounded-2xl shadow-2xl overflow-hidden pointer-events-auto">
+        <div className="flex items-center gap-3 p-4">
+          <div className="shrink-0 w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center">
+            <Check className="w-5 h-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-foreground tracking-tight">Session saved</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Tap Undo or Edit if you logged the wrong thing.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onUndo}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 h-9 rounded-xl border border-border/60 text-foreground text-sm font-medium hover:bg-accent/50 active:scale-95 transition-all"
+            data-testid="button-toast-undo"
+          >
+            <Undo2 className="w-4 h-4" />
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={onEdit}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 h-9 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-95 transition-all"
+            data-testid="button-toast-edit"
+          >
+            <Pencil className="w-4 h-4" />
+            Edit
+          </button>
+        </div>
+        {/* Countdown bar — width tracks remaining time. The transition
+            smooths the per-tick jumps from the parent's interval. */}
+        <div className="h-1 bg-muted/40">
+          <div
+            className="h-full bg-primary transition-[width] duration-100 ease-linear"
+            style={{ width: `${pct}%` }}
+            data-testid="toast-progress"
+          />
+        </div>
+        {/* Hidden dismiss affordance — reserved for keyboard / a11y; the
+            visible Undo and Edit are the primary actions. */}
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="sr-only"
+          aria-label="Dismiss save confirmation"
+          data-testid="button-toast-dismiss"
+        >
+          Dismiss
+        </button>
+      </div>
     </div>
   );
 }
