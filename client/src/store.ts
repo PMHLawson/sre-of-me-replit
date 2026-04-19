@@ -223,10 +223,12 @@ export const calculateDomainStatus = (sessions: Session[], domain: Domain): Doma
     previousWeekMinutes,
     sessionFloor: policy.sessionFloor,
     cadence: policy.cadence,
-    // Demo / fallback path: overachievement isn't computed here (no qualifying-day
-    // signal available), so default to NONE. The API-backed path provides the
-    // real tier in production usage.
-    overachievementRaw: score,
+    // Demo / fallback path: overachievement requires the per-domain
+    // qualifying-day signal that the API computes; we don't replicate it
+    // client-side. Use a neutral baseline (100 = exactly at target) so the
+    // value is semantically truthful, and force tier to NONE so no badge
+    // renders in demo mode.
+    overachievementRaw: 100,
     overachievementTier: 'NONE',
   };
 };

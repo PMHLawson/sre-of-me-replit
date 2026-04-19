@@ -56,10 +56,12 @@ const DomainCard = ({ domain, title }: { domain: Domain, title: string }) => {
   const { domain: weakestDomain, isDegradedOrCritical } = getWeakestDomain();
   
   const { score, trend, status, recentMinutes, targetMinutes, previousWeekMinutes, overachievementTier, overachievementRaw } = domainStatus;
-  // C2.2 — Overachievement badge is suppressed during ramp-up, mirroring the
-  // priority-recovery suppression: until the runway completes, no surface
-  // signals strong evaluations of user behavior.
-  const showOverachievement = !isRampUp && overachievementTier !== 'NONE';
+  // C2.2 — Overachievement is a positive signal: surface it whenever the
+  // tier is non-NONE, including during ramp-up. The MIN(raw_session,
+  // raw_duration) gate already prevents spurious activation from sparse
+  // early data, so an explicit ramp-up suppression isn't needed and would
+  // hide legitimate above-target performance from new users.
+  const showOverachievement = overachievementTier !== 'NONE';
   
   // Only apply aggressive visual signaling if the domain is ACTUALLY in trouble
   // Just being the "lowest score" among 4 perfectly healthy domains shouldn't trigger red alerts.

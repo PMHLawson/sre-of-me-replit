@@ -291,7 +291,7 @@ export default function SystemHealth() {
                     <div className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-widest font-bold border ${getDomainStatusColor(d.status)}`}>
                       {d.status}
                     </div>
-                    {!isRampUp && d.overachievementTier !== 'NONE' && (
+                    {d.overachievementTier !== 'NONE' && (
                       <OverachievementBadge
                         tier={d.overachievementTier}
                         rawScore={d.overachievementRaw}

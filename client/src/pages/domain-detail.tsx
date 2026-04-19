@@ -167,8 +167,9 @@ export default function DomainDetail() {
   const domainSessions = sessions.filter(s => s.domain === domain);
   const activeDeviation = findActiveDeviationAt(deviations, domain, new Date());
   const { score, status, trend, recentMinutes, targetMinutes, previousWeekMinutes, overachievementTier, overachievementRaw } = getDomainStatus(domain);
-  const isRampUp = escalationState?.isRampUp ?? false;
-  const showOverachievement = !isRampUp && overachievementTier !== 'NONE';
+  // C2.2 — Show whenever non-NONE; the MIN gating already prevents sparse-
+  // data false positives during ramp-up.
+  const showOverachievement = overachievementTier !== 'NONE';
 
   // Build full 42-day dataset once; slice to viewDays for display
   const allChartData = Array.from({ length: ALL_DAYS }).map((_, i) => {
