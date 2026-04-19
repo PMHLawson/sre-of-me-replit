@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check, Info } from 'lucide-react';
 import { useAppStore } from '@/store';
@@ -6,9 +6,42 @@ import { ThemeToggle } from '@/components/theme-toggle';
 
 type Priority = 'P1' | 'P2' | 'P3' | null;
 
+// .910 §17 — Decide tab uses a 30-second interaction-based timeout.
+// On expiry the priority selection (and therefore the verdict) clears
+// so the user re-classifies the demand from scratch.
+const DECIDE_INACTIVITY_MS = 30_000;
+
 export default function Decide() {
   const [_, setLocation] = useLocation();
   const [priority, setPriority] = useState<Priority>(null);
+
+  // D3.3 — interaction-based inactivity timer. Any user interaction on the
+  // page resets the 30-second countdown; on expiry, priority is cleared
+  // (verdict logic and copy are unchanged — they simply re-derive from a
+  // null priority). Auth and wouter navigation are not touched.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const reset = () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        setPriority(null);
+      }, DECIDE_INACTIVITY_MS);
+    };
+    const events: Array<keyof WindowEventMap> = [
+      'mousemove',
+      'mousedown',
+      'keydown',
+      'touchstart',
+      'scroll',
+      'wheel',
+    ];
+    events.forEach((e) => window.addEventListener(e, reset, { passive: true }));
+    reset();
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, reset));
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   const getWeakestDomain = useAppStore(state => state.getWeakestDomain);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
