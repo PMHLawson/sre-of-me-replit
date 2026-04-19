@@ -1,19 +1,25 @@
 import { db } from "./db";
 import {
   sessions,
+  sessionEdits,
   deviations,
   type Session,
   type InsertSession,
+  type UpdateSession,
   type Deviation,
   type InsertDeviation,
   type UpdateDeviation,
 } from "@shared/schema";
-import { eq, desc, gte, and, isNull, lte, or, asc, gt } from "drizzle-orm";
+import { eq, desc, gte, and, isNull, lte, or, asc, gt, isNotNull } from "drizzle-orm";
 
 export interface IStorage {
   getSessions(userId: string): Promise<Session[]>;
   getSessionsSince(userId: string, since: Date): Promise<Session[]>;
   createSession(session: InsertSession & { userId: string }): Promise<Session>;
+  updateSession(userId: string, id: string, patch: UpdateSession): Promise<Session | undefined>;
+  softDeleteSession(userId: string, id: string): Promise<Session | undefined>;
+  restoreSession(userId: string, id: string): Promise<Session | undefined>;
+  getDeletedSessions(userId: string): Promise<Session[]>;
 
   // Deviations
   createDeviation(deviation: InsertDeviation & { userId: string }): Promise<Deviation>;
@@ -31,7 +37,7 @@ export class DatabaseStorage implements IStorage {
     return db
       .select()
       .from(sessions)
-      .where(eq(sessions.userId, userId))
+      .where(and(eq(sessions.userId, userId), isNull(sessions.deletedAt)))
       .orderBy(desc(sessions.timestamp));
   }
 
@@ -39,7 +45,13 @@ export class DatabaseStorage implements IStorage {
     return db
       .select()
       .from(sessions)
-      .where(and(eq(sessions.userId, userId), gte(sessions.timestamp, since)))
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          isNull(sessions.deletedAt),
+          gte(sessions.timestamp, since),
+        ),
+      )
       .orderBy(desc(sessions.timestamp));
   }
 
@@ -49,6 +61,118 @@ export class DatabaseStorage implements IStorage {
       .values({ ...insertSession, timestamp: new Date(insertSession.timestamp) })
       .returning();
     return session;
+  }
+
+  /**
+   * Apply a PATCH to a non-deleted session and write a single edit-history
+   * row capturing the prior values of the changed fields plus the reason.
+   * Returns the updated session, or undefined if no matching active row exists.
+   * The history row and the update happen in one transaction so an audit row
+   * is never written without the matching update (and vice versa).
+   */
+  async updateSession(
+    userId: string,
+    id: string,
+    patch: UpdateSession,
+  ): Promise<Session | undefined> {
+    return db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(sessions)
+        .where(
+          and(
+            eq(sessions.userId, userId),
+            eq(sessions.id, id),
+            isNull(sessions.deletedAt),
+          ),
+        );
+      if (!current) return undefined;
+
+      const update: Partial<typeof sessions.$inferInsert> = {};
+      const prior: Record<string, unknown> = {};
+      if (patch.domain !== undefined && patch.domain !== current.domain) {
+        update.domain = patch.domain;
+        prior.domain = current.domain;
+      }
+      if (patch.durationMinutes !== undefined && patch.durationMinutes !== current.durationMinutes) {
+        update.durationMinutes = patch.durationMinutes;
+        prior.durationMinutes = current.durationMinutes;
+      }
+      if (patch.timestamp !== undefined) {
+        const next = new Date(patch.timestamp);
+        if (next.getTime() !== current.timestamp.getTime()) {
+          update.timestamp = next;
+          prior.timestamp = current.timestamp.toISOString();
+        }
+      }
+      if (patch.notes !== undefined && (patch.notes ?? null) !== (current.notes ?? null)) {
+        update.notes = patch.notes ?? null;
+        prior.notes = current.notes;
+      }
+
+      // No-op edits still record an audit row so the reason note is preserved.
+      await tx.insert(sessionEdits).values({
+        sessionId: id,
+        userId,
+        reason: patch.reason,
+        changedFields: JSON.stringify(prior),
+      });
+
+      if (Object.keys(update).length === 0) {
+        return current;
+      }
+
+      const [updated] = await tx
+        .update(sessions)
+        .set(update)
+        .where(
+          and(
+            eq(sessions.userId, userId),
+            eq(sessions.id, id),
+            isNull(sessions.deletedAt),
+          ),
+        )
+        .returning();
+      return updated;
+    });
+  }
+
+  async softDeleteSession(userId: string, id: string): Promise<Session | undefined> {
+    const [row] = await db
+      .update(sessions)
+      .set({ deletedAt: new Date() })
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          eq(sessions.id, id),
+          isNull(sessions.deletedAt),
+        ),
+      )
+      .returning();
+    return row;
+  }
+
+  async restoreSession(userId: string, id: string): Promise<Session | undefined> {
+    const [row] = await db
+      .update(sessions)
+      .set({ deletedAt: null })
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          eq(sessions.id, id),
+          isNotNull(sessions.deletedAt),
+        ),
+      )
+      .returning();
+    return row;
+  }
+
+  async getDeletedSessions(userId: string): Promise<Session[]> {
+    return db
+      .select()
+      .from(sessions)
+      .where(and(eq(sessions.userId, userId), isNotNull(sessions.deletedAt)))
+      .orderBy(desc(sessions.deletedAt));
   }
 
   // ----- Deviations -----

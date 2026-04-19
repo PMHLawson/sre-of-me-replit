@@ -1,7 +1,12 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertSessionSchema, insertDeviationSchema, updateDeviationSchema } from "@shared/schema";
+import {
+  insertSessionSchema,
+  updateSessionSchema,
+  insertDeviationSchema,
+  updateDeviationSchema,
+} from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { computeCompositeState } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
@@ -16,7 +21,7 @@ export async function registerRoutes(
     try {
       const userId: string = req.user.claims.sub;
       const sessions = await storage.getSessions(userId);
-      res.json(sessions.map(s => ({ ...s, timestamp: s.timestamp.toISOString() })));
+      res.json(sessions.map(serializeSession));
     } catch {
       res.status(500).json({ message: "Failed to fetch sessions" });
     }
@@ -63,9 +68,63 @@ export async function registerRoutes(
     try {
       const userId: string = req.user.claims.sub;
       const session = await storage.createSession({ ...parsed.data, userId });
-      res.status(201).json({ ...session, timestamp: session.timestamp.toISOString() });
+      res.status(201).json(serializeSession(session));
     } catch {
       res.status(500).json({ message: "Failed to create session" });
+    }
+  });
+
+  // GET /api/sessions/deleted — soft-deleted sessions for the authenticated user.
+  // Static path is registered before /api/sessions/:id below so it is not
+  // captured as an :id parameter.
+  app.get("/api/sessions/deleted", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const rows = await storage.getDeletedSessions(userId);
+      res.json(rows.map(serializeSession));
+    } catch {
+      res.status(500).json({ message: "Failed to fetch deleted sessions" });
+    }
+  });
+
+  // PATCH /api/sessions/:id — edit a non-deleted session. Body must include
+  // `reason` so every change is captured in the edit-history audit table.
+  app.patch("/api/sessions/:id", isAuthenticated, async (req: any, res) => {
+    const parsed = updateSessionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid session patch", errors: parsed.error.flatten() });
+    }
+    try {
+      const userId: string = req.user.claims.sub;
+      const row = await storage.updateSession(userId, req.params.id, parsed.data);
+      if (!row) return res.status(404).json({ message: "Session not found" });
+      res.json(serializeSession(row));
+    } catch {
+      res.status(500).json({ message: "Failed to update session" });
+    }
+  });
+
+  // DELETE /api/sessions/:id — soft-delete (sets deletedAt; never hard-deletes).
+  app.delete("/api/sessions/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const row = await storage.softDeleteSession(userId, req.params.id);
+      if (!row) return res.status(404).json({ message: "Session not found" });
+      res.json(serializeSession(row));
+    } catch {
+      res.status(500).json({ message: "Failed to delete session" });
+    }
+  });
+
+  // POST /api/sessions/:id/restore — clear deletedAt on a soft-deleted session.
+  app.post("/api/sessions/:id/restore", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const row = await storage.restoreSession(userId, req.params.id);
+      if (!row) return res.status(404).json({ message: "Deleted session not found" });
+      res.json(serializeSession(row));
+    } catch {
+      res.status(500).json({ message: "Failed to restore session" });
     }
   });
 
@@ -159,6 +218,14 @@ export async function registerRoutes(
   });
 
   return httpServer;
+}
+
+function serializeSession(row: import("@shared/schema").Session) {
+  return {
+    ...row,
+    timestamp: row.timestamp.toISOString(),
+    deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
+  };
 }
 
 function serializeDeviation(row: import("@shared/schema").Deviation) {

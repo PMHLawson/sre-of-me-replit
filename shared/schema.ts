@@ -19,17 +19,49 @@ export const sessions = pgTable("sessions", {
   durationMinutes: integer("duration_minutes").notNull(),
   timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   notes: text("notes"),
+  // Soft-delete marker. Active sessions have NULL. Set on DELETE; cleared on RESTORE.
+  // Hard-deletion is performed by the retention purge (B2.4).
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
 
-export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true }).extend({
+export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, deletedAt: true }).extend({
   domain: z.enum(domainEnum),
   durationMinutes: z.number().int().positive(),
   timestamp: z.string().datetime({ offset: true }),
   notes: z.string().optional(),
 });
 
+/**
+ * PATCH /api/sessions/:id payload. All session fields are optional, but
+ * `reason` (the edit-history note) is required so every change is audited.
+ */
+export const updateSessionSchema = z.object({
+  domain: z.enum(domainEnum).optional(),
+  durationMinutes: z.number().int().positive().optional(),
+  timestamp: z.string().datetime({ offset: true }).optional(),
+  notes: z.string().nullable().optional(),
+  reason: z.string().min(1).max(500),
+});
+
 export type InsertSession = z.infer<typeof insertSessionSchema>;
+export type UpdateSession = z.infer<typeof updateSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
+
+/**
+ * Per-edit audit log. Every PATCH on a session writes one row here capturing
+ * the prior values of the changed fields plus the user-supplied reason.
+ * `changedFields` is JSON text so the schema can grow without migrations.
+ */
+export const sessionEdits = pgTable("session_edits", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId: varchar("session_id").notNull(),
+  userId: text("user_id").notNull(),
+  editedAt: timestamp("edited_at", { withTimezone: true }).notNull().defaultNow(),
+  reason: text("reason").notNull(),
+  changedFields: text("changed_fields").notNull(),
+});
+
+export type SessionEdit = typeof sessionEdits.$inferSelect;
 
 // ----- Policy state response (GET /api/policy-state) -----
 
