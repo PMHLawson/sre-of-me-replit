@@ -467,6 +467,49 @@ function compositeScoreExcluding(
   return Math.round(total / weightSum);
 }
 
+/**
+ * C2.3 — Per-domain trailing run of consecutive days where the
+ * overachievement tier was active (≠ NONE). The reported `tier` is the
+ * tier of the most recent (newest) day in the streak; `consecutiveDays`
+ * is 0 when the most recent day was NONE. Designed to feed sustained-
+ * overachievement notification triggers without requiring the consumer
+ * to recompute history.
+ */
+export interface SustainedOverachievementEntry {
+  consecutiveDays: number;
+  tier: OverachievementTier;
+}
+
+export function computeSustainedOverachievement<T extends Session>(
+  allSessions: T[],
+  opts: PolicyEngineOptions = {},
+): Record<Domain, SustainedOverachievementEntry> {
+  const window = completedWindowDays(opts);
+  const result = {} as Record<Domain, SustainedOverachievementEntry>;
+  for (const domain of domainEnum) {
+    let tier: OverachievementTier = "NONE";
+    let consecutiveDays = 0;
+    // Walk newest → oldest. For each historical day D we recompute the
+    // service state with `now` anchored just past D's logical-day boundary,
+    // so the trailing window covers D plus the 6 prior days.
+    for (let i = window.length - 1; i >= 0; i--) {
+      const day = window[i];
+      const [y, m, d] = day.split("-").map((n) => parseInt(n, 10));
+      // Anchor at next calendar day, 18:00 UTC — comfortably past any
+      // reasonable timezone's dayStartHour, keeping logical-day assignment
+      // unambiguous.
+      const nextDayUtc = Date.UTC(y, m - 1, d + 1, 18);
+      const nowForDay = new Date(nextDayUtc);
+      const state = computeServiceState(domain, allSessions, { ...opts, now: nowForDay });
+      if (state.overachievement_tier === "NONE") break;
+      if (i === window.length - 1) tier = state.overachievement_tier;
+      consecutiveDays++;
+    }
+    result[domain] = { consecutiveDays, tier };
+  }
+  return result;
+}
+
 /** Compute composite state across all known domains. */
 export function computeCompositeState<T extends Session>(
   allSessions: T[],

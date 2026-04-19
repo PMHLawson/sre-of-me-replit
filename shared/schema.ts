@@ -137,6 +137,17 @@ export const serviceStateSchema = z.object({
   overachievement_tier: z.enum(overachievementTierEnum),
 });
 
+/**
+ * C2.3 — Per-domain trailing run of consecutive overachievement days.
+ * `consecutiveDays` is 0 when the most recent day was NONE; `tier` is the
+ * tier of the most recent day in the streak (or NONE).
+ */
+export const sustainedOverachievementEntrySchema = z.object({
+  consecutiveDays: z.number(),
+  tier: z.enum(overachievementTierEnum),
+});
+export type SustainedOverachievementEntry = z.infer<typeof sustainedOverachievementEntrySchema>;
+
 export const policyStateResponseSchema = z.object({
   logical_day: z.string(),
   window_days: z.array(z.string()),
@@ -151,6 +162,11 @@ export const policyStateResponseSchema = z.object({
    * teal/cyan "system calibrating" treatment.
    */
   isRampUp: z.boolean(),
+  /**
+   * C2.3 — Per-domain sustained-overachievement runs, shaped for future
+   * notification triggers (e.g. fire when consecutiveDays >= N for tier T).
+   */
+  sustainedOverachievement: z.record(z.enum(domainEnum), sustainedOverachievementEntrySchema),
 });
 
 export type ServiceState = z.infer<typeof serviceStateSchema>;

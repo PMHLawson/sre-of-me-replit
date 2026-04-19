@@ -10,7 +10,7 @@ import {
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
-import { computeCompositeState, isInRampUp } from "./lib/policy-engine";
+import { computeCompositeState, isInRampUp, computeSustainedOverachievement } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
 import { detectAnomaly, BASELINE_DAYS } from "./lib/anomaly";
 
@@ -41,10 +41,19 @@ export async function registerRoutes(
         authStorage.getUser(userId),
       ]);
       const userCreatedAt = user?.createdAt ?? undefined;
-      const state = computeCompositeState(sessions, { deviations: activeDeviations, userCreatedAt });
+      const opts = { deviations: activeDeviations, userCreatedAt };
+      const state = computeCompositeState(sessions, opts);
+      // C2.3 — Compute trailing sustained-overachievement runs per domain
+      // so future notification triggers can read this without recomputing
+      // history client-side.
+      const sustainedOverachievement = computeSustainedOverachievement(sessions, opts);
       // B3.1 — Surface ramp-up flag on policy-state too so Dashboard surfaces
       // can branch without making a second API call to /api/escalation-state.
-      res.json({ ...state, isRampUp: isInRampUp(userCreatedAt) });
+      res.json({
+        ...state,
+        isRampUp: isInRampUp(userCreatedAt),
+        sustainedOverachievement,
+      });
     } catch {
       res.status(500).json({ message: "Failed to compute policy state" });
     }
