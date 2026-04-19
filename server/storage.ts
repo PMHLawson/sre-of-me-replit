@@ -10,7 +10,7 @@ import {
   type InsertDeviation,
   type UpdateDeviation,
 } from "@shared/schema";
-import { eq, desc, gte, and, isNull, lte, or, asc, gt, isNotNull } from "drizzle-orm";
+import { eq, desc, gte, and, isNull, lte, lt, or, asc, gt, isNotNull } from "drizzle-orm";
 
 export interface IStorage {
   getSessions(userId: string): Promise<Session[]>;
@@ -21,12 +21,12 @@ export interface IStorage {
   restoreSession(userId: string, id: string): Promise<Session | undefined>;
   getDeletedSessions(userId: string): Promise<Session[]>;
   /**
-   * Hard-delete soft-deleted sessions whose `deletedAt <= cutoff` (inclusive).
-   * Active sessions (`deletedAt IS NULL`) are never matched. Idempotent —
-   * once expired rows are removed a re-run with the same cutoff is a no-op.
-   * Returns the number of rows removed.
+   * Hard-delete soft-deleted sessions strictly older than `olderThan`
+   * (`deletedAt < olderThan`). Active sessions (`deletedAt IS NULL`) are
+   * never matched. Idempotent — once expired rows are removed a re-run with
+   * the same cutoff is a no-op. Returns the number of rows removed.
    */
-  purgeExpiredDeletedSessions(cutoff: Date): Promise<number>;
+  purgeExpiredDeletedSessions(olderThan: Date): Promise<number>;
 
   // Deviations
   createDeviation(deviation: InsertDeviation & { userId: string }): Promise<Deviation>;
@@ -182,13 +182,14 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(sessions.deletedAt));
   }
 
-  async purgeExpiredDeletedSessions(cutoff: Date): Promise<number> {
-    // Inclusive comparator (deletedAt <= cutoff). The predicate is gated to
-    // soft-deleted rows only, so active sessions (deletedAt IS NULL) are never
-    // matched and a re-run with the same cutoff is a no-op (idempotent).
+  async purgeExpiredDeletedSessions(olderThan: Date): Promise<number> {
+    // Strict comparator (deletedAt < olderThan) — matches the "older than"
+    // semantics of the IStorage contract. Predicate is gated to soft-deleted
+    // rows only, so active sessions (deletedAt IS NULL) are never matched
+    // and a re-run with the same cutoff is a no-op (idempotent).
     const removed = await db
       .delete(sessions)
-      .where(and(isNotNull(sessions.deletedAt), lte(sessions.deletedAt, cutoff)))
+      .where(and(isNotNull(sessions.deletedAt), lt(sessions.deletedAt, olderThan)))
       .returning({ id: sessions.id });
     return removed.length;
   }
