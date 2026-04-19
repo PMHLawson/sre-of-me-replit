@@ -15,22 +15,6 @@ const DomainIcon = ({ domain, className }: { domain: Domain, className?: string 
 
 type EscalationState = 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH';
 
-// Maps the server-computed escalation tier (from /api/escalation-state, derived from the
-// stitched-window policy engine) onto the four banner states this page already renders.
-// PAGE collapses into BREACH for display — both demand the same operator response.
-function tierToState(tier: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE'): EscalationState {
-  if (tier === 'PAGE') return 'BREACH';
-  return tier;
-}
-
-// Local fallback used only when escalationState is null (demo modes or pre-fetch).
-function localFallbackState(criticalCount: number, degradedCount: number, trendingDownCount: number): EscalationState {
-  if (criticalCount > 0) return 'BREACH';
-  if (degradedCount > 0) return 'WARNING';
-  if (trendingDownCount > 1) return 'ADVISORY';
-  return 'NOMINAL';
-}
-
 function escalationColor(state: EscalationState) {
   switch (state) {
     case 'BREACH':  return { text: 'text-status-critical',  bg: 'bg-status-critical/10',  border: 'border-status-critical/20' };
@@ -64,16 +48,12 @@ export default function SystemHealth() {
   const { escalation, domainsInfo, insights, compositeScore } = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
     let totalScore = 0;
-    let criticalCount = 0;
-    let degradedCount = 0;
     let trendingUpCount = 0;
     let trendingDownCount = 0;
 
     const domainsInfo = domains.map(d => {
       const status = getDomainStatus(d);
       totalScore += status.score;
-      if (status.status === 'critical') criticalCount++;
-      if (status.status === 'degraded') degradedCount++;
       if (status.trend === 'up') trendingUpCount++;
       if (status.trend === 'down') trendingDownCount++;
       return { domain: d, ...status };
@@ -81,27 +61,21 @@ export default function SystemHealth() {
 
     const compositeScore = Math.round(totalScore / 4);
 
-    // Prefer server-computed escalation tier when available; fall back to the local heuristic
-    // for demo modes / pre-fetch. PAGE collapses into BREACH for this banner.
-    const state: EscalationState = escalationState
-      ? tierToState(escalationState.highestTier)
-      : localFallbackState(criticalCount, degradedCount, trendingDownCount);
+    // The banner's escalation status is sourced from escalationState.composite —
+    // the same model that drives the per-domain Escalation strip on the dashboard —
+    // so the two surfaces never disagree. Pre-fetch / demo modes show NOMINAL.
+    const state: EscalationState = escalationState?.composite.displayStatus ?? 'NOMINAL';
     const colors = escalationColor(state);
 
-    // Drill-down lists: when escalation comes from the API we cite tier membership directly,
-    // so Dashboard and System Health agree on which domains drove the headline state.
-    const tierName = (d: Domain): 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE' | null =>
-      escalationState?.perDomain[d]?.tier ?? null;
-
-    const critDomains = escalationState
-      ? domainsInfo.filter(d => tierName(d.domain) === 'BREACH' || tierName(d.domain) === 'PAGE').map(d => formatDomainName(d.domain))
-      : domainsInfo.filter(d => d.status === 'critical').map(d => formatDomainName(d.domain));
-    const degDomains = escalationState
-      ? domainsInfo.filter(d => tierName(d.domain) === 'WARNING').map(d => formatDomainName(d.domain))
-      : domainsInfo.filter(d => d.status === 'degraded').map(d => formatDomainName(d.domain));
-    const downDomains = escalationState
-      ? domainsInfo.filter(d => tierName(d.domain) === 'ADVISORY').map(d => formatDomainName(d.domain))
-      : domainsInfo.filter(d => d.trend === 'down').map(d => formatDomainName(d.domain));
+    // Drill-down lists also come from the composite's tier membership, so the
+    // rationale copy below cites the same domains the strip is highlighting.
+    const byTier = escalationState?.composite.domainsByTier;
+    const critDomains = [
+      ...((byTier?.BREACH ?? []) as Domain[]),
+      ...((byTier?.PAGE ?? []) as Domain[]),
+    ].map(formatDomainName);
+    const degDomains = ((byTier?.WARNING ?? []) as Domain[]).map(formatDomainName);
+    const downDomains = ((byTier?.ADVISORY ?? []) as Domain[]).map(formatDomainName);
 
     const rationale = escalationRationale(state, critDomains, degDomains, downDomains);
 

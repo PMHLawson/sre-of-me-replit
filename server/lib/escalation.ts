@@ -72,6 +72,22 @@ export interface EscalationHistoryEntry {
   highestTier: EscalationTier;
 }
 
+/** Display status used by the System Health banner — PAGE collapses to BREACH. */
+export type CompositeDisplayStatus = "NOMINAL" | "ADVISORY" | "WARNING" | "BREACH";
+
+export interface CompositeEscalation {
+  /** Highest tier across all domains (mirrors `highestTier`). */
+  tier: EscalationTier;
+  /** Banner-friendly status; PAGE collapses to BREACH. */
+  displayStatus: CompositeDisplayStatus;
+  /** Pre-baked rationale string for the System Health banner. */
+  rationale: string;
+  /** Pre-baked recommended next action for the System Health banner. */
+  recommendedAction: string;
+  /** Domains grouped by tier — lets surfaces describe membership without recomputing. */
+  domainsByTier: Record<EscalationTier, Domain[]>;
+}
+
 export interface EscalationStateResponse {
   /** Logical day key the computation is anchored on. */
   logical_day: string;
@@ -79,6 +95,12 @@ export interface EscalationStateResponse {
   perDomain: Record<Domain, DomainEscalation>;
   /** Highest-severity tier across all domains. */
   highestTier: EscalationTier;
+  /**
+   * Composite system-level summary derived from the same per-domain escalation
+   * model. Surfaces (Dashboard banner, System Health banner) consume this rather
+   * than recomputing system status from individual domain scores client-side.
+   */
+  composite: CompositeEscalation;
   /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
   history: EscalationHistoryEntry[];
 }
@@ -219,6 +241,63 @@ export function computeDomainEscalation<T extends Session>(
   };
 }
 
+function joinDomainNames(domains: Domain[]): string {
+  return domains.map(formatDomainName).join(", ");
+}
+
+/**
+ * Build the composite system-level summary from per-domain escalation results.
+ * The displayStatus collapses PAGE → BREACH so consumers can render a single
+ * banner with the same status taxonomy used elsewhere in the UI.
+ */
+export function computeComposite(
+  perDomain: Record<Domain, DomainEscalation>,
+  highestTier: EscalationTier
+): CompositeEscalation {
+  const domainsByTier: Record<EscalationTier, Domain[]> = {
+    NOMINAL: [], ADVISORY: [], WARNING: [], BREACH: [], PAGE: [],
+  };
+  for (const d of domainEnum) {
+    domainsByTier[perDomain[d].tier].push(d);
+  }
+
+  const breachLike = [...domainsByTier.PAGE, ...domainsByTier.BREACH];
+  const warning = domainsByTier.WARNING;
+  const advisory = domainsByTier.ADVISORY;
+
+  let displayStatus: CompositeDisplayStatus;
+  let rationale: string;
+  let recommendedAction: string;
+  if (highestTier === "BREACH" || highestTier === "PAGE") {
+    displayStatus = "BREACH";
+    const lead = breachLike.length > 0
+      ? `${breachLike.length} domain${breachLike.length === 1 ? "" : "s"} critically below SLO (${joinDomainNames(breachLike)}).`
+      : `One or more domains critically below SLO.`;
+    rationale = `${lead} Cultivation elevated to P1 priority. Decline all P2/P3 until system recovers.`;
+    recommendedAction = "Cultivation = P1. Decline all P2 and P3 demands until the system recovers to WARNING.";
+  } else if (highestTier === "WARNING") {
+    displayStatus = "WARNING";
+    const lead = warning.length > 0
+      ? `${warning.length} domain${warning.length === 1 ? "" : "s"} below SLO green threshold (${joinDomainNames(warning)}).`
+      : `One or more domains below SLO green threshold.`;
+    rationale = `${lead} Decline P3. Time-box any P2. Schedule makeup within 3 days.`;
+    recommendedAction = "Decline P3 demands. Time-box any accepted P2 and schedule a makeup session within 3 days.";
+  } else if (highestTier === "ADVISORY") {
+    displayStatus = "ADVISORY";
+    const lead = advisory.length > 0
+      ? `${advisory.length} domain${advisory.length === 1 ? "" : "s"} trending low or trailing inactive days (${joinDomainNames(advisory)}).`
+      : `Momentum declining or trailing low-effort days detected.`;
+    rationale = `All domains above SLO floor, but ${lead.toLowerCase().replace(/\.$/, "")}. Note and monitor — avoid new recurring commitments.`;
+    recommendedAction = "Note and monitor. Avoid new recurring commitments until trends stabilize.";
+  } else {
+    displayStatus = "NOMINAL";
+    rationale = "All domains meeting SLO targets. Full flex capacity — eligible to accept P2 and evaluate P3 demands.";
+    recommendedAction = "Maintain current cadence. Accept P2 normally and evaluate P3 demands for strategic alignment.";
+  }
+
+  return { tier: highestTier, displayStatus, rationale, recommendedAction, domainsByTier };
+}
+
 /** Compute escalation state for every known domain. */
 export function computeEscalationState<T extends Session>(
   allSessions: T[],
@@ -235,8 +314,9 @@ export function computeEscalationState<T extends Session>(
     perDomain[d] = esc;
     if (TIER_RANK[esc.tier] > TIER_RANK[highestTier]) highestTier = esc.tier;
   }
+  const composite = computeComposite(perDomain, highestTier);
   const history = computeEscalationHistory(allSessions, opts, historyDays);
-  return { logical_day: todayKey, perDomain, highestTier, history };
+  return { logical_day: todayKey, perDomain, highestTier, composite, history };
 }
 
 /**

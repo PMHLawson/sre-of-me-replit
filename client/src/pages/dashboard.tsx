@@ -141,68 +141,29 @@ export default function Dashboard() {
     return () => document.removeEventListener('mousedown', handler);
   }, [userMenuOpen]);
 
-  // Calculate overall composite health score using Notion escalation states
+  // Composite numeric score is still an average of per-domain scores. The
+  // status banner (NOMINAL/ADVISORY/WARNING/BREACH) is sourced exclusively
+  // from escalationState.composite — the same model that drives the
+  // per-domain Escalation strip — so the two surfaces never disagree.
   const systemHealth = useMemo(() => {
     const domains: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
-    let totalScore = 0;
-    let criticalCount = 0;
-    let degradedCount = 0;
-    let trendingDownCount = 0;
-
-    domains.forEach(d => {
-      const { score, status, trend } = getDomainStatus(d);
-      totalScore += score;
-      if (status === 'critical') criticalCount++;
-      if (status === 'degraded') degradedCount++;
-      if (trend === 'down') trendingDownCount++;
-    });
-
+    const totalScore = domains.reduce((acc, d) => acc + getDomainStatus(d).score, 0);
     const average = Math.round(totalScore / 4);
 
-    let sysStatus = 'NOMINAL';
-    let sysColor = 'text-status-healthy';
-    let sysBg = 'bg-status-healthy/10';
-    let rationale = 'All domains meeting SLO targets. Full flex capacity — eligible to accept P2 and evaluate P3 demands.';
+    const composite = escalationState?.composite;
+    const status = composite?.displayStatus ?? 'NOMINAL';
+    const colorByStatus: Record<string, { color: string; bg: string }> = {
+      NOMINAL:  { color: 'text-status-healthy',   bg: 'bg-status-healthy/10' },
+      ADVISORY: { color: 'text-status-advisory',  bg: 'bg-status-advisory/10' },
+      WARNING:  { color: 'text-status-degraded',  bg: 'bg-status-degraded/10' },
+      BREACH:   { color: 'text-status-critical',  bg: 'bg-status-critical/10' },
+    };
+    const { color, bg } = colorByStatus[status];
+    const rationale = composite?.rationale
+      ?? 'All domains meeting SLO targets. Full flex capacity — eligible to accept P2 and evaluate P3 demands.';
 
-    if (escalationState) {
-      const tier = escalationState.highestTier;
-      if (tier === 'BREACH' || tier === 'PAGE') {
-        sysStatus = 'BREACH';
-        sysColor = 'text-status-critical';
-        sysBg = 'bg-status-critical/10';
-        rationale = `${criticalCount > 0 ? `${criticalCount} domain(s) critically below SLO. ` : ''}Cultivation elevated to P1 priority. Decline all P2/P3 until system recovers.`;
-      } else if (tier === 'WARNING') {
-        sysStatus = 'WARNING';
-        sysColor = 'text-status-degraded';
-        sysBg = 'bg-status-degraded/10';
-        rationale = `${degradedCount > 0 ? `${degradedCount} domain(s) below SLO green threshold. ` : ''}Decline P3. Time-box any P2. Schedule makeup within 3 days.`;
-      } else if (tier === 'ADVISORY') {
-        sysStatus = 'ADVISORY';
-        sysColor = 'text-status-advisory';
-        sysBg = 'bg-status-advisory/10';
-        rationale = 'All domains above SLO floor, but momentum declining or trailing low-effort days detected. Note and monitor — avoid new recurring commitments.';
-      }
-    } else {
-      if (criticalCount > 0) {
-        sysStatus = 'BREACH';
-        sysColor = 'text-status-critical';
-        sysBg = 'bg-status-critical/10';
-        rationale = `${criticalCount} domain(s) critically below SLO. Cultivation elevated to P1 priority. Decline all P2/P3 until system recovers.`;
-      } else if (degradedCount > 0) {
-        sysStatus = 'WARNING';
-        sysColor = 'text-status-degraded';
-        sysBg = 'bg-status-degraded/10';
-        rationale = `${degradedCount} domain(s) below SLO green threshold. Decline P3. Time-box any P2. Schedule makeup within 3 days.`;
-      } else if (trendingDownCount > 1) {
-        sysStatus = 'ADVISORY';
-        sysColor = 'text-status-advisory';
-        sysBg = 'bg-status-advisory/10';
-        rationale = 'All domains above SLO floor, but momentum declining across multiple areas. Note and monitor — avoid new recurring commitments.';
-      }
-    }
-
-    return { score: average, status: sysStatus, color: sysColor, bg: sysBg, rationale };
-  }, [sessions, policyState, escalationState]);
+    return { score: average, status, color, bg, rationale };
+  }, [sessions, policyState, escalationState, getDomainStatus]);
 
   const demoState = useAppStore(state => state.demoState);
   const setDemoState = useAppStore(state => state.setDemoState);

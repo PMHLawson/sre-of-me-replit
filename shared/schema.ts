@@ -102,10 +102,36 @@ export const escalationHistoryEntrySchema = z.object({
   highestTier: z.enum(escalationTierEnum),
 });
 
+/**
+ * Display status used by the System Health banner. Collapses PAGE into BREACH
+ * because both demand the same operator response in the UI surface.
+ */
+export const compositeDisplayStatusEnum = ["NOMINAL", "ADVISORY", "WARNING", "BREACH"] as const;
+export type CompositeDisplayStatus = typeof compositeDisplayStatusEnum[number];
+
+export const compositeEscalationSchema = z.object({
+  /** Highest tier across all domains (mirrors `highestTier`). */
+  tier: z.enum(escalationTierEnum),
+  /** Banner-friendly status; PAGE collapses to BREACH. */
+  displayStatus: z.enum(compositeDisplayStatusEnum),
+  /** Pre-baked rationale string for the System Health banner. */
+  rationale: z.string(),
+  /** Pre-baked recommended next action for the System Health banner. */
+  recommendedAction: z.string(),
+  /** Domains grouped by tier — lets surfaces describe membership without recomputing. */
+  domainsByTier: z.record(z.enum(escalationTierEnum), z.array(z.enum(domainEnum))),
+});
+
 export const escalationStateResponseSchema = z.object({
   logical_day: z.string(),
   perDomain: z.record(z.enum(domainEnum), domainEscalationSchema),
   highestTier: z.enum(escalationTierEnum),
+  /**
+   * Composite system-level summary derived from the same model as `perDomain`.
+   * Surfaces (Dashboard banner, System Health banner) should consume this rather
+   * than recomputing system status from individual domain scores client-side.
+   */
+  composite: compositeEscalationSchema,
   /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
   history: z.array(escalationHistoryEntrySchema),
 });
@@ -114,6 +140,7 @@ export type ErrorBudget = z.infer<typeof errorBudgetSchema>;
 export type DomainEscalation = z.infer<typeof domainEscalationSchema>;
 export type EscalationHistoryDayDomain = z.infer<typeof escalationHistoryDayDomainSchema>;
 export type EscalationHistoryEntry = z.infer<typeof escalationHistoryEntrySchema>;
+export type CompositeEscalation = z.infer<typeof compositeEscalationSchema>;
 export type EscalationStateResponse = z.infer<typeof escalationStateResponseSchema>;
 
 // ----- Deviations -----
