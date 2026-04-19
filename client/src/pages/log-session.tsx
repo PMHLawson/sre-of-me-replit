@@ -1,11 +1,22 @@
 import { useRef, useState } from 'react';
 import { useLocation } from 'wouter';
-import { ArrowLeft, Check, Clock, AlertTriangle, TrendingDown, Repeat } from 'lucide-react';
+import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Repeat } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
 
 type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving';
+
+/**
+ * Format a Date as the local-time string a `<input type="datetime-local">`
+ * accepts: `YYYY-MM-DDThh:mm`. We deliberately use local components (not
+ * toISOString, which is UTC) so the picker shows the wall-clock time the
+ * user is actually living in.
+ */
+function formatLocalDateTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 export default function LogSession() {
   const [, setLocation] = useLocation();
@@ -16,6 +27,10 @@ export default function LogSession() {
   const [duration, setDuration] = useState(30);
   const [notes, setNotes] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
+  // D1.1 (SOMR-304): user-selectable session timestamp for backdating.
+  // Default = "now" in local time. Capped to "now" via the input's `max`
+  // attribute so future dates can't be selected.
+  const [sessionDate, setSessionDate] = useState<string>(() => formatLocalDateTime(new Date()));
 
   // Anomaly modal state — populated only while the anomaly modal is showing.
   const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
@@ -82,18 +97,22 @@ export default function LogSession() {
       return;
     }
 
-    // ── Step 3: frequency advisory (already logged this domain today) ────
+    // ── Step 3: frequency advisory (already logged this domain on the
+    //           selected day) ───────────────────────────────────────────────
+    // D1.1 (SOMR-304): compare against the user-selected `sessionDate`, not
+    // wall-clock "now". Backdating to a day with no sessions for this domain
+    // must NOT trigger a false "already logged today" prompt.
     if (!decisions.frequencyAck) {
-      const today = new Date();
-      const todayKey = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
-      const hasToday = sessions.some((s) => {
+      const selected = new Date(sessionDate);
+      const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
+      const hasOnSelectedDay = sessions.some((s) => {
         if (s.deletedAt) return false;
         if (s.domain !== domain) return false;
         const t = new Date(s.timestamp);
         const k = `${t.getFullYear()}-${t.getMonth()}-${t.getDate()}`;
-        return k === todayKey;
+        return k === selectedKey;
       });
-      if (hasToday) {
+      if (hasOnSelectedDay) {
         pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
         setStage('frequency');
         return;
@@ -101,10 +120,14 @@ export default function LogSession() {
     }
 
     // ── All clear → persist ──────────────────────────────────────────────
+    // D1.1 (SOMR-304): timestamp now comes from the picker. `new Date(local)`
+    // parses the datetime-local string in the browser's local zone; toISOString
+    // converts to UTC with the "Z" offset, satisfying the schema's
+    // `datetime({ offset: true })` contract.
     await addSession({
       domain,
       durationMinutes: duration,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(sessionDate).toISOString(),
       notes: notes.trim() || undefined,
       isAnomaly: anomalyDecision.isAnomaly,
       anomalyNote: anomalyDecision.isAnomaly ? anomalyDecision.note : null,
@@ -189,9 +212,14 @@ export default function LogSession() {
     { id: 'music', label: 'Music' }
   ];
 
-  const durations = [15, 30, 45, 60, 90, 120];
+  // D1.1 (SOMR-304): preset set per .910 spec. Custom durations remain
+  // available via the slider below — no separate "Custom" button needed.
+  const durations = [5, 10, 15, 20, 30];
   const saving = stage === 'saving';
   const floor = DOMAIN_POLICY[domain].sessionFloor;
+  // Recomputed every render so the cap moves forward in real time and
+  // future timestamps cannot be selected.
+  const maxDateTime = formatLocalDateTime(new Date());
 
   return (
     <div className="min-h-screen bg-background text-foreground pb-24 font-sans transition-colors duration-300">
@@ -228,6 +256,29 @@ export default function LogSession() {
               </button>
             ))}
           </div>
+        </section>
+
+        {/* Session date/time — D1.1 (SOMR-304) backdating affordance */}
+        <section className="space-y-3">
+          <label
+            htmlFor="input-session-date"
+            className="text-sm font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-2"
+          >
+            <CalendarClock className="w-4 h-4" />
+            Session date / time
+          </label>
+          <input
+            id="input-session-date"
+            type="datetime-local"
+            value={sessionDate}
+            max={maxDateTime}
+            onChange={(e) => setSessionDate(e.target.value)}
+            className="w-full bg-card border border-border/50 rounded-2xl p-4 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all shadow-sm"
+            data-testid="input-session-date"
+          />
+          <p className="text-xs text-muted-foreground/80">
+            Defaults to now. Pick an earlier time to backdate a session you forgot to log.
+          </p>
         </section>
 
         {/* Duration Selection */}
