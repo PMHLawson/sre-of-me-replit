@@ -1,9 +1,11 @@
 import { useState, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';
-import { ArrowLeft } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt } from '@/store';
+import { ArrowLeft, Pencil, Trash2 } from 'lucide-react';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
+import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
 
@@ -11,7 +13,11 @@ export default function History() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
   const deviations = useAppStore(state => state.deviations);
+  const updateSession = useAppStore(state => state.updateSession);
+  const deleteSession = useAppStore(state => state.deleteSession);
   const [visibleWeeks, setVisibleWeeks] = useState(2); // show 2 weeks by default (14 days)
+  const [editing, setEditing] = useState<Session | null>(null);
+  const [deleting, setDeleting] = useState<Session | null>(null);
 
   // Build week buckets: each entry is one calendar week (Mon–Sun)
   const weekBuckets = useMemo(() => {
@@ -171,12 +177,32 @@ export default function History() {
                             </div>
                           )}
                         </div>
-                        <div className="text-right">
-                          <div className={`font-mono font-bold ${belowFloor ? 'text-status-degraded' : 'text-primary'}`}>
-                            {session.durationMinutes}m
+                        <div className="flex items-center gap-2 ml-3 shrink-0">
+                          <div className="text-right">
+                            <div className={`font-mono font-bold ${belowFloor ? 'text-status-degraded' : 'text-primary'}`}>
+                              {session.durationMinutes}m
+                            </div>
+                            <div className="text-xs font-medium text-muted-foreground mt-0.5">
+                              {format(parseISO(session.timestamp), 'h:mm a')}
+                            </div>
                           </div>
-                          <div className="text-xs font-medium text-muted-foreground mt-0.5">
-                            {format(parseISO(session.timestamp), 'h:mm a')}
+                          <div className="flex flex-col gap-1">
+                            <button
+                              onClick={() => setEditing(session)}
+                              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 active:scale-95 transition-all"
+                              aria-label="Edit session"
+                              data-testid={`button-edit-session-${session.id}`}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setDeleting(session)}
+                              className="p-1.5 rounded-lg text-muted-foreground hover:text-status-critical hover:bg-status-critical/10 active:scale-95 transition-all"
+                              aria-label="Delete session"
+                              data-testid={`button-delete-session-${session.id}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -213,6 +239,19 @@ export default function History() {
           </div>
         )}
       </main>
+
+      <SessionEditDialog
+        open={!!editing}
+        onOpenChange={(o) => { if (!o) setEditing(null); }}
+        session={editing}
+        onSubmit={(patch) => updateSession(editing!.id, patch)}
+      />
+      <SessionDeleteDialog
+        open={!!deleting}
+        onOpenChange={(o) => { if (!o) setDeleting(null); }}
+        session={deleting}
+        onConfirm={(id) => deleteSession(id)}
+      />
     </div>
   );
 }

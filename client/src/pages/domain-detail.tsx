@@ -1,11 +1,13 @@
 import { useRef, useEffect, useState } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
-import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
-import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt } from '@/store';
+import { ArrowLeft, Clock, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff, Pencil, Trash2 } from 'lucide-react';
+import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session } from '@/store';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, Cell, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
+import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
+import { SessionDeleteDialog } from '@/components/session-actions/session-delete-dialog';
 
 // Documented palette (ADR-014 / 40.30.OCMP.915) — hardcoded hex required for Recharts SVG
 const DOMAIN_COLOR: Record<Domain, string> = {
@@ -150,7 +152,11 @@ export default function DomainDetail() {
 
   const sessions = useAppStore(s => s.sessions);
   const deviations = useAppStore(s => s.deviations);
+  const updateSession = useAppStore(s => s.updateSession);
+  const deleteSession = useAppStore(s => s.deleteSession);
   const getDomainStatus = useAppStore(s => s.getDomainStatus);
+  const [editing, setEditing] = useState<Session | null>(null);
+  const [deleting, setDeleting] = useState<Session | null>(null);
   // Re-render when API-backed policy state arrives or refreshes.
   useAppStore(s => s.policyState);
   const escalationState = useAppStore(s => s.escalationState);
@@ -453,12 +459,32 @@ export default function DomainDetail() {
                       )}
                     </div>
                   </div>
-                  <div className={`font-mono text-xs font-bold px-2.5 py-1.5 rounded-lg ml-3 shrink-0 ${
-                    belowFloor
-                      ? 'bg-status-degraded/10 text-status-degraded'
-                      : 'bg-primary/10 text-primary'
-                  }`}>
-                    {session.durationMinutes}m
+                  <div className="flex items-center gap-2 ml-3 shrink-0">
+                    <div className={`font-mono text-xs font-bold px-2.5 py-1.5 rounded-lg ${
+                      belowFloor
+                        ? 'bg-status-degraded/10 text-status-degraded'
+                        : 'bg-primary/10 text-primary'
+                    }`}>
+                      {session.durationMinutes}m
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <button
+                        onClick={() => setEditing(session)}
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 active:scale-95 transition-all"
+                        aria-label="Edit session"
+                        data-testid={`button-edit-session-${session.id}`}
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => setDeleting(session)}
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-status-critical hover:bg-status-critical/10 active:scale-95 transition-all"
+                        aria-label="Delete session"
+                        data-testid={`button-delete-session-${session.id}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -482,6 +508,19 @@ export default function DomainDetail() {
           Log {domainName}
         </button>
       </div>
+
+      <SessionEditDialog
+        open={!!editing}
+        onOpenChange={(o) => { if (!o) setEditing(null); }}
+        session={editing}
+        onSubmit={(patch) => updateSession(editing!.id, patch)}
+      />
+      <SessionDeleteDialog
+        open={!!deleting}
+        onOpenChange={(o) => { if (!o) setDeleting(null); }}
+        session={deleting}
+        onConfirm={(id) => deleteSession(id)}
+      />
     </div>
   );
 }

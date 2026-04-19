@@ -14,7 +14,21 @@ export interface Session {
   domain: Domain;
   durationMinutes: number;
   timestamp: string;
-  notes?: string;
+  notes?: string | null;
+  /** Non-null when soft-deleted; cleared on restore. */
+  deletedAt?: string | null;
+}
+
+/**
+ * PATCH /api/sessions/:id payload. All fields are optional except `reason`,
+ * which is required by the server-side audit log (B2.1).
+ */
+export interface SessionPatch {
+  domain?: Domain;
+  durationMinutes?: number;
+  timestamp?: string;
+  notes?: string | null;
+  reason: string;
 }
 
 export interface DomainPolicy {
@@ -81,6 +95,8 @@ interface AppState {
   fetchSessions: () => Promise<void>;
   fetchPolicyState: () => Promise<void>;
   fetchEscalationState: () => Promise<void>;
+  updateSession: (id: string, patch: SessionPatch) => Promise<Session | null>;
+  deleteSession: (id: string) => Promise<boolean>;
   fetchDeviations: () => Promise<void>;
   createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
   updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
@@ -305,6 +321,46 @@ export const useAppStore = create<AppState>()(
         } catch (err) {
           console.error('fetchEscalationState error:', err);
           set({ escalationStateLoaded: true });
+        }
+      },
+
+      updateSession: async (id, patch) => {
+        try {
+          const res = await fetch(`/api/sessions/${id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          if (!res.ok) throw new Error('Failed to update session');
+          const saved: Session = await res.json();
+          set((state) => ({
+            sessions: state.sessions.map((s) => (s.id === id ? saved : s)),
+          }));
+          // Refresh derived API state so policy/escalation reflect the edit.
+          await Promise.all([
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return saved;
+        } catch (err) {
+          console.error('updateSession error:', err);
+          return null;
+        }
+      },
+
+      deleteSession: async (id) => {
+        try {
+          const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to delete session');
+          set((state) => ({ sessions: state.sessions.filter((s) => s.id !== id) }));
+          await Promise.all([
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return true;
+        } catch (err) {
+          console.error('deleteSession error:', err);
+          return false;
         }
       },
 
