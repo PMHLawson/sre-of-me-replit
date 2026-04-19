@@ -24,11 +24,8 @@ export interface Session {
   anomalyNote: string | null;
 }
 
-/**
- * Partial update for a session row. The audit reason is passed as a separate
- * argument to `updateSession(id, patch, reason)` and merged into the PATCH
- * body, mirroring the server-side updateSessionSchema (B2.1).
- */
+// Mirrors the server's updateSessionSchema. The audit `reason` is a
+// separate arg to updateSession() and merged into the PATCH body.
 export interface SessionPatch {
   domain?: Domain;
   durationMinutes?: number;
@@ -118,12 +115,8 @@ interface AppState {
   updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
   endDeviation: (id: string) => Promise<Deviation | null>;
   deleteDeviation: (id: string) => Promise<boolean>;
-  /**
-   * Persist a new session. Returns the saved row (with server-assigned id)
-   * on success, a locally-generated stand-in in demo mode, or null on
-   * network/server failure. The return value enables post-save flows like
-   * the D1.2 Undo/Edit toast that need the new session's id.
-   */
+  // Returns the saved row (or a local stand-in in demo mode) so callers
+  // can act on the new id; null on network/server failure.
   addSession: (session: Omit<Session, 'id'>) => Promise<Session | null>;
   getDomainStatus: (domain: Domain) => DomainStatus;
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
@@ -674,8 +667,6 @@ export const useAppStore = create<AppState>()(
       addSession: async (session) => {
         const { demoState } = get();
         if (demoState !== 'default') {
-          // Demo / fixture mode: synthesize a row locally so the UI updates
-          // and post-save flows (D1.2 Undo/Edit toast) still have an id.
           const local: Session = { ...session, id: crypto.randomUUID() } as Session;
           set((state) => ({ sessions: [local, ...state.sessions] }));
           return local;

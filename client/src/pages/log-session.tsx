@@ -5,33 +5,18 @@ import { useAppStore, Domain, DOMAIN_POLICY, type Session } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
 
-// 'saved' = D1.2 post-save toast window. While in this stage no further form
-// edits are accepted; the user can Undo, Edit, or wait for auto-dismiss.
 type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving' | 'saved';
 
-// D1.2 (SOMR-305) — how long the post-save toast remains on screen before
-// auto-dismissing and navigating back to the dashboard.
 const POST_SAVE_TOAST_MS = 8000;
 
-/**
- * Format a Date as the local-time string a `<input type="datetime-local">`
- * accepts: `YYYY-MM-DDThh:mm`. We deliberately use local components (not
- * toISOString, which is UTC) so the picker shows the wall-clock time the
- * user is actually living in.
- */
+// Local-time string accepted by <input type="datetime-local"> (not UTC).
 function formatLocalDateTime(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/**
- * Resolve a datetime-local string to a Date safe to pass to `.toISOString()`.
- * Empty / malformed input falls back to "now" (the picker's default), and
- * any future moment is clamped to "now" — the input's `max` attribute is
- * UX-only and can be bypassed by DOM tampering or hydration edge cases, so
- * this is the actual hard guard that backs SOMR-304's "no future timestamps"
- * acceptance criterion.
- */
+// Falls back to "now" for invalid input and clamps future timestamps;
+// the input's max attribute is UX-only.
 function resolveSessionTimestamp(local: string): Date {
   const now = new Date();
   if (!local) return now;
@@ -45,37 +30,21 @@ export default function LogSession() {
   const [, setLocation] = useLocation();
   const searchParams = new URLSearchParams(window.location.search);
   const initialDomain = (searchParams.get('domain') as Domain) || 'martial-arts';
-  // D1.2 (SOMR-305): when present, the page is in edit mode and Save will
-  // PATCH the existing session via the B2 correction path instead of POSTing
-  // a new one. The id is captured once on mount; later URL changes are
-  // ignored for stability.
   const initialEditId = searchParams.get('edit');
 
   const [domain, setDomain] = useState<Domain>(initialDomain);
   const [duration, setDuration] = useState(30);
   const [notes, setNotes] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
-  // D1.1 (SOMR-304): user-selectable session timestamp for backdating.
-  // Default = "now" in local time. Capped to "now" via the input's `max`
-  // attribute so future dates can't be selected.
   const [sessionDate, setSessionDate] = useState<string>(() => formatLocalDateTime(new Date()));
-  // D1.2 (SOMR-305): set when this page is editing an already-saved session.
-  // Drives PATCH-vs-POST in runSaveFlow. Initialised from `?edit=<id>` and
-  // also flipped on by the post-save toast's Edit action — wouter doesn't
-  // remount on query-only navigation, so we drive this from state directly.
+  // wouter's location hook tracks pathname only, so the toast Edit action
+  // flips this in-place rather than relying on a query-string remount.
   const [editingSessionId, setEditingSessionId] = useState<string | null>(initialEditId);
 
-  // Anomaly modal state — populated only while the anomaly modal is showing.
   const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
   const [anomalyNote, setAnomalyNote] = useState('');
 
-  // D1.2 (SOMR-305) — the just-saved row, kept in a ref so the post-save
-  // toast and its timers don't re-render the whole form. Cleared whenever
-  // the toast resolves (Undo, Edit, auto-dismiss).
   const savedSessionRef = useRef<Session | null>(null);
-  // Tick the toast countdown bar by re-rendering once a frame's-worth of
-  // time has elapsed. The actual auto-dismiss is driven by the timeout
-  // below; this is purely visual.
   const [toastDismissAt, setToastDismissAt] = useState<number | null>(null);
   const [toastNow, setToastNow] = useState<number>(() => Date.now());
 
@@ -85,10 +54,7 @@ export default function LogSession() {
   const sessions = useAppStore(state => state.sessions);
   const fetchSessions = useAppStore(state => state.fetchSessions);
 
-  // ── Edit-mode pre-population (D1.2 / SOMR-305) ──────────────────────────
-  // On mount with `?edit=<id>`, find the row in the store and seed every
-  // field. If the sessions list isn't loaded yet (deep-link, refresh) we
-  // trigger a fetch and try again once it arrives.
+  // Edit-mode pre-population: re-runs once sessions arrive on cold deep-link.
   useEffect(() => {
     if (!initialEditId) return;
     const target = sessions.find(s => s.id === initialEditId);
@@ -98,21 +64,12 @@ export default function LogSession() {
       setSessionDate(formatLocalDateTime(new Date(target.timestamp)));
       setNotes(target.notes ?? '');
     } else if (sessions.length === 0) {
-      // Sessions haven't loaded; kick off a fetch and let the next render
-      // (when sessions populate) re-run this effect.
       void fetchSessions();
     }
-    // We intentionally depend on sessions so the effect re-runs after a
-    // deferred fetch resolves.
   }, [initialEditId, sessions, fetchSessions]);
 
-  /**
-   * Decisions accumulated as the user walks through each modal. Passed
-   * explicitly through `runSaveFlow` so we never read stale state from a
-   * captured closure (the previous setTimeout(handleSave, 0) re-entry was
-   * subject to that bug). Each modal confirm handler computes the new
-   * decision locally and re-invokes runSaveFlow with it.
-   */
+  // Decisions accumulated across modal prompts; passed explicitly to avoid
+  // stale-closure reads when handlers re-invoke runSaveFlow.
   interface SaveDecisions {
     anomaly: { isAnomaly: boolean; note: string | null } | null;
     belowFloorAck: boolean;
@@ -122,7 +79,7 @@ export default function LogSession() {
   const runSaveFlow = async (decisions: SaveDecisions) => {
     setStage('saving');
 
-    // ── Step 1: anomaly check ────────────────────────────────────────────
+    // Step 1: anomaly check (fail-open on network/server error).
     let anomalyDecision = decisions.anomaly;
     if (!anomalyDecision) {
       try {
@@ -140,32 +97,24 @@ export default function LogSession() {
             return;
           }
         } else {
-          // Server returned a non-2xx — treat as fail-open (proceed without
-          // flagging) so a transient API problem doesn't block logging.
-          // The session is saved as non-anomalous; users can still review
-          // it later. Logged for observability.
           console.warn('anomaly-check returned non-OK status; proceeding without anomaly flag');
         }
         anomalyDecision = { isAnomaly: false, note: null };
       } catch (err) {
-        // Network error — same fail-open policy. Logging > prompting wins.
         console.warn('anomaly-check failed; proceeding without anomaly flag', err);
         anomalyDecision = { isAnomaly: false, note: null };
       }
     }
 
-    // ── Step 2: below-floor advisory ─────────────────────────────────────
+    // Step 2: below-floor advisory.
     const floor = DOMAIN_POLICY[domain].sessionFloor;
     if (duration < floor && !decisions.belowFloorAck) {
-      // Stash the anomaly decision on the modal so its confirm handler can
-      // forward it without re-running the network check.
       pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
       setStage('below-floor');
       return;
     }
 
-    // Step 3: frequency advisory — compare against the selected day, not
-    // wall-clock today, so backdating doesn't false-trigger (SOMR-304).
+    // Step 3: frequency advisory, keyed off the selected date.
     if (!decisions.frequencyAck) {
       const selected = new Date(sessionDate);
       const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
@@ -183,14 +132,9 @@ export default function LogSession() {
       }
     }
 
-    // All clear → persist. resolveSessionTimestamp guards against invalid
-    // input and clamps future timestamps (SOMR-304).
     const isoTimestamp = resolveSessionTimestamp(sessionDate).toISOString();
     const trimmedNotes = notes.trim();
 
-    // Edit mode (SOMR-305): PATCH via the B2 correction path; no toast.
-    // updateSessionSchema only accepts the four user-editable fields, so
-    // the original anomaly flag is preserved on the row.
     if (editingSessionId) {
       const result = await updateSession(
         editingSessionId,
@@ -202,17 +146,11 @@ export default function LogSession() {
         },
         'Post-save edit',
       );
-      if (result) {
-        setLocation('/');
-      } else {
-        // Patch failed — restore the form so the user can retry rather
-        // than silently dropping their edit.
-        setStage('idle');
-      }
+      if (result) setLocation('/');
+      else setStage('idle');
       return;
     }
 
-    // ── D1.2 (SOMR-305) new-session path — POST then show toast ──────────
     const saved = await addSession({
       domain,
       durationMinutes: duration,
@@ -223,21 +161,16 @@ export default function LogSession() {
     });
 
     if (saved) {
-      // Hand the user the post-save Undo/Edit window. The toast component
-      // owns its own auto-dismiss timer; here we just stage it.
       savedSessionRef.current = saved;
       setToastDismissAt(Date.now() + POST_SAVE_TOAST_MS);
+      setToastNow(Date.now());
       setStage('saved');
     } else {
-      // No canonical id to Undo against on server failure → skip the toast.
-      // The fail-soft local insert in addSession preserves user input.
+      // No id to Undo against → skip the toast.
       setLocation('/');
     }
   };
 
-  // Holds the in-flight decisions while a modal is open so confirm handlers
-  // can resume the pipeline without losing prior decisions or re-running the
-  // anomaly network check. Ref (not state) so updates are synchronous.
   const pendingDecisionsRef = useRef<SaveDecisions>({
     anomaly: null,
     belowFloorAck: false,
@@ -297,10 +230,7 @@ export default function LogSession() {
     setStage('idle');
   };
 
-  // ── D1.2 (SOMR-305) post-save toast handlers ─────────────────────────────
-  // Auto-dismiss timer: when the toast appears, schedule a navigation to the
-  // dashboard so the user is never trapped if they walk away. Cleared on
-  // unmount and on any explicit Undo/Edit/Dismiss interaction.
+  // Auto-dismiss the post-save toast so the user isn't trapped if they walk away.
   useEffect(() => {
     if (stage !== 'saved') return;
     const t = window.setTimeout(() => {
@@ -310,11 +240,11 @@ export default function LogSession() {
     return () => window.clearTimeout(t);
   }, [stage, setLocation]);
 
-  // Tick the countdown bar by updating `toastNow` every ~100ms. The setTimeout
-  // above remains the source of truth for auto-dismiss; this is purely visual.
+  // Tick toastNow every ~100ms while the toast is up so PostSaveToast's
+  // remaining-time calc actually re-renders. The setTimeout above is the
+  // source of truth for the auto-dismiss itself.
   useEffect(() => {
     if (stage !== 'saved' || toastDismissAt === null) return;
-    setToastNow(Date.now());
     const i = window.setInterval(() => {
       const now = Date.now();
       setToastNow(now);
@@ -330,8 +260,6 @@ export default function LogSession() {
       return;
     }
     savedSessionRef.current = null;
-    // Soft-delete via the same B2 deletion path used elsewhere; no extra
-    // confirmation prompt — the toast itself was the confirmation window.
     await deleteSession(saved.id);
     setLocation('/');
   };
@@ -343,12 +271,8 @@ export default function LogSession() {
       return;
     }
     savedSessionRef.current = null;
-    // Drive the edit mode entirely from in-page state. wouter's location hook
-    // tracks pathname, not search, so navigating from /log to /log?edit=<id>
-    // would NOT remount or re-run the prepopulation effect — the form would
-    // stay locked in stage='saved'. Instead: prepopulate fields directly,
-    // flip into edit mode, clear toast state, and update the URL via
-    // history.replaceState so a refresh still works.
+    // Flip into edit mode in-place; URL kept in sync via replaceState since
+    // wouter doesn't remount on a query-only change.
     setDomain(saved.domain as Domain);
     setDuration(saved.durationMinutes);
     setSessionDate(formatLocalDateTime(new Date(saved.timestamp)));
@@ -379,16 +303,11 @@ export default function LogSession() {
     { id: 'music', label: 'Music' }
   ];
 
-  // D1.1 (SOMR-304): preset set per .910 spec. Custom durations remain
-  // available via the slider below — no separate "Custom" button needed.
   const durations = [5, 10, 15, 20, 30];
   const saving = stage === 'saving';
-  // After save lands, lock the form until we redirect / undo / edit so the
-  // user can't tweak fields and trigger a second save during the toast window.
+  // Lock the form during the post-save toast window to prevent a second save.
   const formDisabled = saving || stage === 'saved';
   const floor = DOMAIN_POLICY[domain].sessionFloor;
-  // Recomputed every render so the cap moves forward in real time and
-  // future timestamps cannot be selected.
   const maxDateTime = formatLocalDateTime(new Date());
 
   return (
@@ -593,10 +512,10 @@ export default function LogSession() {
         />
       )}
 
-      {/* ── Post-save Undo/Edit toast (D1.2 / SOMR-305) ───────────────── */}
       {stage === 'saved' && toastDismissAt !== null && (
         <PostSaveToast
           dismissAt={toastDismissAt}
+          now={toastNow}
           totalMs={POST_SAVE_TOAST_MS}
           onUndo={onPostSaveUndo}
           onEdit={onPostSaveEdit}
@@ -607,17 +526,17 @@ export default function LogSession() {
   );
 }
 
-// Post-save toast (SOMR-305): Undo/Edit + shrinking countdown bar.
 interface PostSaveToastProps {
   dismissAt: number;
+  now: number;
   totalMs: number;
   onUndo: () => void;
   onEdit: () => void;
   onDismiss: () => void;
 }
 
-function PostSaveToast({ dismissAt, totalMs, onUndo, onEdit, onDismiss }: PostSaveToastProps) {
-  const remaining = Math.max(0, dismissAt - Date.now());
+function PostSaveToast({ dismissAt, now, totalMs, onUndo, onEdit, onDismiss }: PostSaveToastProps) {
+  const remaining = Math.max(0, dismissAt - now);
   const pct = Math.max(0, Math.min(100, (remaining / totalMs) * 100));
   return (
     <div
