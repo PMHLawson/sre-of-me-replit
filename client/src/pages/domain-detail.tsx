@@ -266,6 +266,27 @@ export default function DomainDetail() {
   const fetchEscalationState = useAppStore(s => s.fetchEscalationState);
   const [editing, setEditing] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState<Session | null>(null);
+  // Personal duration baseline for this domain — same 42-day rolling window
+  // and cold-start rule the anomaly detector uses at save time. Surfaced here
+  // so users can see what "normal" looks like before a prompt fires.
+  type BaselineEntry = { coldStart: boolean; sampleCount: number; mean: number; stdDev: number };
+  type BaselinesResponse = {
+    baselineDays: number;
+    coldStartThreshold: number;
+    perDomain: Record<Domain, BaselineEntry>;
+  };
+  const [baselines, setBaselines] = useState<BaselinesResponse | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/baselines')
+      .then(r => r.ok ? r.json() : null)
+      .then((data: BaselinesResponse | null) => { if (!cancelled && data) setBaselines(data); })
+      .catch(() => { /* surface stays hidden on error */ });
+    return () => { cancelled = true; };
+    // Re-fetch when this domain's session list changes so baseline reflects
+    // a freshly logged / edited / deleted session.
+  }, [sessions]);
+  const baseline = baselines?.perDomain[domain];
   // Re-render when API-backed policy state arrives or refreshes.
   useAppStore(s => s.policyState);
   const escalationState = useAppStore(s => s.escalationState);
@@ -539,6 +560,55 @@ export default function DomainDetail() {
             </div>
           </div>
         </section>
+
+        {/* Personal session-length baseline — same 42-day window the anomaly
+            detector uses at save time. Cold-start state is communicated
+            explicitly so users know why anomaly prompts may not fire yet. */}
+        {baselines && baseline && (
+          <section
+            className="bg-card border border-border/50 rounded-2xl p-4 shadow-sm"
+            data-testid="card-baseline"
+          >
+            <div className="flex items-baseline justify-between mb-2">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Your typical session
+              </div>
+              <div className="text-[10px] text-muted-foreground font-mono">
+                {baselines.baselineDays}d window
+              </div>
+            </div>
+            {baseline.coldStart ? (
+              <div data-testid="text-baseline-cold-start">
+                <div className="text-sm font-semibold text-foreground">
+                  Still learning your baseline
+                </div>
+                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                  Need at least {baselines.coldStartThreshold} sessions in the last{' '}
+                  {baselines.baselineDays} days to estimate your typical length.
+                  You have <span className="font-mono font-semibold text-foreground" data-testid="text-baseline-sample-count">{baseline.sampleCount}</span>
+                  {' '}so far — anomaly prompts will start once the baseline is established.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-baseline gap-3 flex-wrap">
+                  <span className="text-2xl font-extrabold tracking-tight text-foreground" data-testid="text-baseline-mean">
+                    {Math.round(baseline.mean)}m
+                  </span>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    avg · σ <span className="font-mono font-semibold text-foreground" data-testid="text-baseline-stddev">{Math.round(baseline.stdDev)}m</span>
+                    {' '}· n=<span className="font-mono font-semibold text-foreground" data-testid="text-baseline-sample-count">{baseline.sampleCount}</span>
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+                  Sessions outside roughly{' '}
+                  <span className="font-mono">{Math.max(0, Math.round(baseline.mean - 2 * baseline.stdDev))}–{Math.round(baseline.mean + 2 * baseline.stdDev)}m</span>
+                  {' '}will trigger an anomaly prompt at save.
+                </p>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Chart Section */}
         <section className="bg-card border border-border/50 rounded-3xl shadow-sm overflow-hidden">

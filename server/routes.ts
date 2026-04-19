@@ -13,7 +13,8 @@ import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
 import { computeCompositeState, isInRampUp, computeSustainedOverachievement } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
-import { detectAnomaly, BASELINE_DAYS } from "./lib/anomaly";
+import { detectAnomaly, computeBaseline, BASELINE_DAYS, COLD_START_THRESHOLD } from "./lib/anomaly";
+import { domainEnum } from "@shared/schema";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -183,6 +184,29 @@ export async function registerRoutes(
       res.json({ ...result, zScore });
     } catch {
       res.status(500).json({ message: "Failed to compute anomaly check" });
+    }
+  });
+
+  // GET /api/baselines — per-domain 42-day duration baseline (mean, stdDev,
+  // sample count, cold-start flag) for the authenticated user. Surfaces what
+  // "normal" looks like before an anomaly prompt fires, so users can build
+  // trust in the detector and notice baseline drift over time.
+  app.get("/api/baselines", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const cutoff = new Date(Date.now() - BASELINE_DAYS * 24 * 60 * 60 * 1000);
+      const sessions = await storage.getSessionsSince(userId, cutoff);
+      const perDomain: Record<string, ReturnType<typeof computeBaseline>> = {};
+      for (const d of domainEnum) {
+        perDomain[d] = computeBaseline(d, sessions);
+      }
+      res.json({
+        baselineDays: BASELINE_DAYS,
+        coldStartThreshold: COLD_START_THRESHOLD,
+        perDomain,
+      });
+    } catch {
+      res.status(500).json({ message: "Failed to compute baselines" });
     }
   });
 
