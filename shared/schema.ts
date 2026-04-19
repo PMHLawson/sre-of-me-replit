@@ -314,13 +314,24 @@ export const userSettings = pgTable("user_settings", {
 export const insertUserSettingsSchema = createInsertSchema(userSettings)
   .omit({ userId: true, updatedAt: true })
   .extend({
-    dayStartHour: z.number().int().min(0).max(23).optional(),
+    dayStartHour: z.coerce.number().int().min(0).max(23).optional(),
     timezone: z.string().min(1).max(64).optional(),
-    windowDays: z.number().int().min(7).max(42).optional(),
-    notificationsEnabled: z.boolean().optional(),
+    windowDays: z.coerce.number().int().min(7).max(42).optional(),
+    notificationsEnabled: z.coerce.boolean().optional(),
     notificationTier: z.enum(notificationTierEnum).optional(),
   })
   .partial();
 
+export const selectUserSettingsSchema = z.object({
+  userId: z.string(),
+  dayStartHour: z.number().int().min(0).max(23),
+  timezone: z.string().min(1).max(64),
+  windowDays: z.number().int().min(7).max(42),
+  notificationsEnabled: z.boolean(),
+  notificationTier: z.enum(notificationTierEnum),
+  updatedAt: z.date(),
+});
+
 export type InsertUserSettings = z.infer<typeof insertUserSettingsSchema>;
 export type UserSettings = typeof userSettings.$inferSelect;
+export type SelectUserSettings = z.infer<typeof selectUserSettingsSchema>;

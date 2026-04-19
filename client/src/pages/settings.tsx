@@ -84,7 +84,7 @@ export default function SettingsPage() {
           setTzMode('other');
           setTzCustom(data.timezone);
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) setError('Could not load your settings.');
       } finally {
         if (!cancelled) setLoading(false);
@@ -115,7 +115,7 @@ export default function SettingsPage() {
         }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({} as any));
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(body?.message || 'Failed to save settings');
       }
       const saved: Settings = await res.json();
@@ -130,9 +130,10 @@ export default function SettingsPage() {
       // immediately, no manual reload required.
       await Promise.all([fetchPolicyState(), fetchEscalationState()]);
       toast({ title: 'Settings saved', description: 'Your preferences have been updated.' });
-    } catch (err: any) {
-      setError(err?.message || 'Failed to save settings');
-      toast({ title: 'Could not save settings', description: err?.message ?? 'Try again.', variant: 'destructive' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save settings';
+      setError(message);
+      toast({ title: 'Could not save settings', description: message, variant: 'destructive' });
     } finally {
       setSaving(false);
     }
