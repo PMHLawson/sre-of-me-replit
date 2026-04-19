@@ -123,6 +123,7 @@ export default function History() {
                 <button
                   key={opt.days}
                   onClick={() => setHeatmapDays(opt.days)}
+                  aria-pressed={heatmapDays === opt.days}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
                     heatmapDays === opt.days
                       ? 'bg-background text-foreground shadow-sm'

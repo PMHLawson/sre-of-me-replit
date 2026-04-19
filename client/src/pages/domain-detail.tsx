@@ -35,7 +35,8 @@ const CHART_HEIGHT    = 180;
 
 // Shared chart content — defined outside main component to avoid recreation on each render
 type ChartDatum = {
-  dayLabel: string;
+  dateKey: string;   // yyyy-MM-dd — unique x-domain key (used by XAxis + ReferenceArea)
+  dayLabel: string;  // short tick label (e.g. "M5") — display only, not unique over long windows
   fullDate: string;
   minutes: number;
   isToday: boolean;
@@ -62,18 +63,20 @@ type ChartBarsProps = {
 const ANOMALY_COLOR = '#E2B23E';
 const DEVIATION_BAND_COLOR = '#9CA3AF';
 
-// Collapse consecutive deviation days into [start,end] dayLabel pairs so the
-// chart can render one ReferenceArea per contiguous run.
+// Collapse consecutive deviation days into [start,end] dateKey pairs so the
+// chart can render one ReferenceArea per contiguous run. dateKey (yyyy-MM-dd)
+// is unique within the 42-day window — short dayLabel values like "M5" are
+// not, so they would mis-anchor ReferenceArea bands on a categorical axis.
 function deviationRuns(data: ChartDatum[]): { x1: string; x2: string }[] {
   const runs: { x1: string; x2: string }[] = [];
   let runStart: string | null = null;
   for (let i = 0; i < data.length; i++) {
     const cell = data[i];
     if (cell.hasDeviation) {
-      if (runStart === null) runStart = cell.dayLabel;
+      if (runStart === null) runStart = cell.dateKey;
       const next = data[i + 1];
       if (!next || !next.hasDeviation) {
-        runs.push({ x1: runStart, x2: cell.dayLabel });
+        runs.push({ x1: runStart, x2: cell.dateKey });
         runStart = null;
       }
     }
@@ -129,10 +132,11 @@ function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays,
   const internals = (
     <>
       <XAxis
-        dataKey="dayLabel"
+        dataKey="dateKey"
         axisLine={false}
         tickLine={false}
         tick={{ fontSize: 9, fill: '#A9BBC2', fontWeight: 500 }}
+        tickFormatter={(_v: string, idx: number) => data[idx]?.dayLabel ?? ''}
         dy={8}
         interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
       />
@@ -297,6 +301,7 @@ export default function DomainDetail() {
     const hasDeviation = deviations.some(d => isDeviationActiveAt(d, domain, date));
     const tier = i >= ALL_DAYS - 7 ? 'current' : i >= ALL_DAYS - 14 ? 'previous' : 'older';
     return {
+      dateKey: format(date, 'yyyy-MM-dd'),
       dayLabel: format(date, 'EEE')[0] + format(date, 'd'),
       fullDate: format(date, 'MMM d'),
       minutes,
