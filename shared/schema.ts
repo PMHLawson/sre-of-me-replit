@@ -292,3 +292,35 @@ export const updateDeviationSchema = z.object({
 export type InsertDeviation = z.infer<typeof insertDeviationSchema>;
 export type UpdateDeviation = z.infer<typeof updateDeviationSchema>;
 export type Deviation = typeof deviations.$inferSelect;
+
+// ----- User settings (C3.1) -----
+// Per-user runtime knobs for the policy engine + Phase 1 notification preferences.
+// One row per user (PK = userId text to match users.id varchar). Auto-created
+// with safe defaults on first read so existing users are unaffected.
+
+export const notificationTierEnum = ["ADVISORY", "WARNING", "BREACH", "PAGE"] as const;
+export type NotificationTier = typeof notificationTierEnum[number];
+
+export const userSettings = pgTable("user_settings", {
+  userId: text("user_id").primaryKey(),
+  dayStartHour: integer("day_start_hour").notNull().default(4),
+  timezone: text("timezone").notNull().default("America/New_York"),
+  windowDays: integer("window_days").notNull().default(7),
+  notificationsEnabled: boolean("notifications_enabled").notNull().default(false),
+  notificationTier: text("notification_tier").notNull().default("WARNING"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const insertUserSettingsSchema = createInsertSchema(userSettings)
+  .omit({ userId: true, updatedAt: true })
+  .extend({
+    dayStartHour: z.number().int().min(0).max(23).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+    windowDays: z.number().int().min(7).max(42).optional(),
+    notificationsEnabled: z.boolean().optional(),
+    notificationTier: z.enum(notificationTierEnum).optional(),
+  })
+  .partial();
+
+export type InsertUserSettings = z.infer<typeof insertUserSettingsSchema>;
+export type UserSettings = typeof userSettings.$inferSelect;

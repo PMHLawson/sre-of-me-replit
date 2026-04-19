@@ -3,12 +3,15 @@ import {
   sessions,
   sessionEdits,
   deviations,
+  userSettings,
   type Session,
   type InsertSession,
   type UpdateSession,
   type Deviation,
   type InsertDeviation,
   type UpdateDeviation,
+  type UserSettings,
+  type InsertUserSettings,
 } from "@shared/schema";
 import { eq, desc, gte, and, isNull, lte, lt, or, asc, gt, isNotNull } from "drizzle-orm";
 
@@ -37,6 +40,14 @@ export interface IStorage {
   updateDeviation(userId: string, id: string, patch: UpdateDeviation): Promise<Deviation | undefined>;
   endDeviation(userId: string, id: string, endedAt?: Date): Promise<Deviation | undefined>;
   softDeleteDeviation(userId: string, id: string): Promise<Deviation | undefined>;
+
+  // User settings (C3.1)
+  /** Returns the user's settings; creates a default row on first call so
+   *  callers never receive null. */
+  getUserSettings(userId: string): Promise<UserSettings>;
+  /** Upserts the supplied subset of fields onto the user's settings row,
+   *  bumps `updatedAt`, and returns the updated row. */
+  upsertUserSettings(userId: string, patch: InsertUserSettings): Promise<UserSettings>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -318,6 +329,53 @@ export class DatabaseStorage implements IStorage {
           isNull(deviations.deletedAt),
         ),
       )
+      .returning();
+    return row;
+  }
+
+  // ----- User settings -----
+
+  async getUserSettings(userId: string): Promise<UserSettings> {
+    const [existing] = await db
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.userId, userId));
+    if (existing) return existing;
+    // First read for this user — insert defaults so subsequent reads + the
+    // PATCH endpoint always have a row to update. onConflictDoNothing makes
+    // this safe under concurrent first reads.
+    const [created] = await db
+      .insert(userSettings)
+      .values({ userId })
+      .onConflictDoNothing({ target: userSettings.userId })
+      .returning();
+    if (created) return created;
+    // Race lost — re-read.
+    const [row] = await db
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.userId, userId));
+    return row;
+  }
+
+  async upsertUserSettings(
+    userId: string,
+    patch: InsertUserSettings,
+  ): Promise<UserSettings> {
+    const update: Partial<typeof userSettings.$inferInsert> = { updatedAt: new Date() };
+    if (patch.dayStartHour !== undefined) update.dayStartHour = patch.dayStartHour;
+    if (patch.timezone !== undefined) update.timezone = patch.timezone;
+    if (patch.windowDays !== undefined) update.windowDays = patch.windowDays;
+    if (patch.notificationsEnabled !== undefined) update.notificationsEnabled = patch.notificationsEnabled;
+    if (patch.notificationTier !== undefined) update.notificationTier = patch.notificationTier;
+
+    const [row] = await db
+      .insert(userSettings)
+      .values({ userId, ...update })
+      .onConflictDoUpdate({
+        target: userSettings.userId,
+        set: update,
+      })
       .returning();
     return row;
   }

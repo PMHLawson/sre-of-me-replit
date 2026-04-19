@@ -7,6 +7,7 @@ import {
   insertDeviationSchema,
   updateDeviationSchema,
   anomalyCheckRequestSchema,
+  insertUserSettingsSchema,
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
@@ -35,13 +36,23 @@ export async function registerRoutes(
   app.get("/api/policy-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const [sessions, activeDeviations, user] = await Promise.all([
+      const [sessions, activeDeviations, user, settings] = await Promise.all([
         storage.getSessions(userId),
         storage.getActiveDeviations(userId),
         authStorage.getUser(userId),
+        storage.getUserSettings(userId),
       ]);
       const userCreatedAt = user?.createdAt ?? undefined;
-      const opts = { deviations: activeDeviations, userCreatedAt };
+      // C3.3 — Honour the user's persisted runtime knobs so scoring reflects
+      // their chosen timezone / day-start-hour / window length instead of
+      // the hardcoded engine defaults.
+      const opts = {
+        deviations: activeDeviations,
+        userCreatedAt,
+        dayStartHour: settings.dayStartHour,
+        timezone: settings.timezone,
+        windowDays: settings.windowDays,
+      };
       const state = computeCompositeState(sessions, opts);
       // C2.3 — Compute trailing sustained-overachievement runs per domain
       // so future notification triggers can read this without recomputing
@@ -64,18 +75,48 @@ export async function registerRoutes(
   app.get("/api/escalation-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const [sessions, activeDeviations, user] = await Promise.all([
+      const [sessions, activeDeviations, user, settings] = await Promise.all([
         storage.getSessions(userId),
         storage.getActiveDeviations(userId),
         authStorage.getUser(userId),
+        storage.getUserSettings(userId),
       ]);
       const state = computeEscalationState(sessions, {
         deviations: activeDeviations,
         userCreatedAt: user?.createdAt ?? undefined,
+        dayStartHour: settings.dayStartHour,
+        timezone: settings.timezone,
+        windowDays: settings.windowDays,
       });
       res.json(state);
     } catch {
       res.status(500).json({ message: "Failed to compute escalation state" });
+    }
+  });
+
+  // GET /api/settings — current user's settings (auto-created with defaults on first access).
+  app.get("/api/settings", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId: string = req.user.claims.sub;
+      const settings = await storage.getUserSettings(userId);
+      res.json(settings);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch settings" });
+    }
+  });
+
+  // PATCH /api/settings — update a subset of the user's settings.
+  app.patch("/api/settings", isAuthenticated, async (req: any, res) => {
+    const parsed = insertUserSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid settings", errors: parsed.error.flatten() });
+    }
+    try {
+      const userId: string = req.user.claims.sub;
+      const row = await storage.upsertUserSettings(userId, parsed.data);
+      res.json(row);
+    } catch {
+      res.status(500).json({ message: "Failed to update settings" });
     }
   });
 
