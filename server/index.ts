@@ -3,6 +3,14 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
+import { storage } from "./storage";
+
+/**
+ * Soft-deleted sessions older than this window are hard-deleted at startup.
+ * Tuned to match the user-facing "Recently Deleted" recovery promise (B2.3).
+ */
+const SESSION_RETENTION_DAYS = 30;
+const SESSION_RETENTION_MS = SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 const app = express();
 const httpServer = createServer(app);
@@ -96,6 +104,23 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+
+      // Fire-and-forget retention purge so a transient DB hiccup never blocks
+      // startup. The query is idempotent (predicate-gated to expired rows only)
+      // so re-running on the next restart is safe.
+      const cutoff = new Date(Date.now() - SESSION_RETENTION_MS);
+      storage
+        .purgeExpiredDeletedSessions(cutoff)
+        .then((count) => {
+          log(
+            `purged ${count} soft-deleted session${count === 1 ? "" : "s"} ` +
+              `older than ${SESSION_RETENTION_DAYS}d`,
+            "retention",
+          );
+        })
+        .catch((err) => {
+          console.error("[retention] purgeExpiredDeletedSessions failed:", err);
+        });
     },
   );
 })();
