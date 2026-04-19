@@ -26,14 +26,26 @@ import type {
 
 // ---------------- Types ----------------
 
-export type TriggerType =
-  | "ESCALATION_CHANGE"
-  | "COMPLIANCE_WARNING"
-  | "DEVIATION_ENDING"
-  | "RAMP_UP_MILESTONE"
-  | "OVERACHIEVEMENT_SUSTAINED"
-  | "INACTIVITY";
+/**
+ * The set of trigger TYPES the engine can emit. ESCALATION_CHANGE covers
+ * upward tier transitions (worsening); ESCALATION_RECOVERY covers
+ * downward (improving). The two are distinct so callers can route them
+ * to different surfaces and apply different presentation (e.g. different
+ * tones, different deep-link targets) without inspecting a `direction`
+ * field.
+ */
+export const TriggerType = {
+  ESCALATION_CHANGE: "ESCALATION_CHANGE",
+  ESCALATION_RECOVERY: "ESCALATION_RECOVERY",
+  COMPLIANCE_WARNING: "COMPLIANCE_WARNING",
+  DEVIATION_ENDING: "DEVIATION_ENDING",
+  RAMP_UP_MILESTONE: "RAMP_UP_MILESTONE",
+  OVERACHIEVEMENT_SUSTAINED: "OVERACHIEVEMENT_SUSTAINED",
+  INACTIVITY: "INACTIVITY",
+} as const;
+export type TriggerType = (typeof TriggerType)[keyof typeof TriggerType];
 
+/** Retained for compatibility but no longer used to discriminate event types. */
 export type TriggerDirection = "up" | "down";
 
 export interface TriggerEventBase {
@@ -54,7 +66,17 @@ export interface TriggerEventBase {
 
 export interface EscalationChangeEvent extends TriggerEventBase {
   type: "ESCALATION_CHANGE";
-  direction: TriggerDirection;
+  /** Always 'up' for ESCALATION_CHANGE. Retained for back-compat. */
+  direction: "up";
+  fromTier: EscalationTier;
+  toTier: EscalationTier;
+  domain: Domain;
+}
+
+export interface EscalationRecoveryEvent extends TriggerEventBase {
+  type: "ESCALATION_RECOVERY";
+  /** Always 'down' for ESCALATION_RECOVERY. Retained for back-compat. */
+  direction: "down";
   fromTier: EscalationTier;
   toTier: EscalationTier;
   domain: Domain;
@@ -91,6 +113,7 @@ export interface InactivityEvent extends TriggerEventBase {
 
 export type TriggerEvent =
   | EscalationChangeEvent
+  | EscalationRecoveryEvent
   | ComplianceWarningEvent
   | DeviationEndingEvent
   | RampUpMilestoneEvent
@@ -220,31 +243,43 @@ export function evaluateTriggers(input: EvaluateTriggersInput): TriggerEvent[] {
       const toRank = TIER_RANK[cur.tier];
       if (toRank === fromRank) continue;
 
-      const direction: TriggerDirection = toRank > fromRank ? "up" : "down";
+      const isUp = toRank > fromRank;
       const name = formatDomain(domain);
 
-      const change: EscalationChangeEvent = {
-        id: eventId([
-          "ESCALATION_CHANGE",
+      if (isUp) {
+        const change: EscalationChangeEvent = {
+          id: eventId(["ESCALATION_CHANGE", domain, prev.tier, cur.tier, logicalDay]),
+          type: "ESCALATION_CHANGE",
+          severity: TIER_TO_NOTIFICATION_TIER[cur.tier],
+          title: `${name} escalated to ${cur.tier}`,
+          body: cur.rationale,
           domain,
-          prev.tier,
-          cur.tier,
+          direction: "up",
+          fromTier: prev.tier,
+          toTier: cur.tier,
           logicalDay,
-        ]),
-        type: "ESCALATION_CHANGE",
-        severity: TIER_TO_NOTIFICATION_TIER[cur.tier === "NOMINAL" ? prev.tier : cur.tier],
-        title:
-          direction === "up"
-            ? `${name} escalated to ${cur.tier}`
-            : `${name} recovered to ${cur.tier}`,
-        body: cur.rationale,
-        domain,
-        direction,
-        fromTier: prev.tier,
-        toTier: cur.tier,
-        logicalDay,
-      };
-      events.push(change);
+        };
+        events.push(change);
+      } else {
+        const recovery: EscalationRecoveryEvent = {
+          id: eventId(["ESCALATION_RECOVERY", domain, prev.tier, cur.tier, logicalDay]),
+          type: "ESCALATION_RECOVERY",
+          // Severity reflects the tier we LEFT — recovering FROM PAGE
+          // is more notable than recovering FROM ADVISORY.
+          severity: TIER_TO_NOTIFICATION_TIER[prev.tier === "NOMINAL" ? cur.tier : prev.tier],
+          title: `${name} recovered to ${cur.tier}`,
+          body: cur.rationale,
+          domain,
+          direction: "down",
+          fromTier: prev.tier,
+          toTier: cur.tier,
+          logicalDay,
+        };
+        events.push(recovery);
+      }
+
+      // (re-bind for the compliance warning check below)
+      const direction: TriggerDirection = isUp ? "up" : "down";
 
       // 2. Compliance warning — fires on ANY upward transition that lands
       // in ADVISORY or WARNING (e.g. NOMINAL→ADVISORY, NOMINAL→WARNING,

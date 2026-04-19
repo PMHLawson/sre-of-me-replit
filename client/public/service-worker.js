@@ -65,6 +65,7 @@ function resolveDeepLink(payload) {
   const domain = payload && payload.domain;
   switch (type) {
     case 'ESCALATION_CHANGE':
+    case 'ESCALATION_RECOVERY':
     case 'INACTIVITY':
       return '/';
     case 'COMPLIANCE_WARNING':

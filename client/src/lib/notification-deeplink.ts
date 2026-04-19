@@ -13,12 +13,13 @@
  * mounted; the two must stay in sync.
  *
  * Routing table:
- *   ESCALATION_CHANGE        → /                       (dashboard)
- *   INACTIVITY               → /                       (dashboard)
- *   COMPLIANCE_WARNING       → /domain/:domain         (per-domain page)
- *   DEVIATION_ENDING         → /domain/:domain
- *   OVERACHIEVEMENT_SUSTAINED→ /domain/:domain
- *   RAMP_UP_MILESTONE        → /history
+ *   ESCALATION_CHANGE         → /                       (dashboard, worsening)
+ *   ESCALATION_RECOVERY       → /                       (dashboard, improving)
+ *   INACTIVITY                → /                       (dashboard)
+ *   COMPLIANCE_WARNING        → /domain/:domain         (per-domain page)
+ *   DEVIATION_ENDING          → /domain/:domain
+ *   OVERACHIEVEMENT_SUSTAINED → /domain/:domain
+ *   RAMP_UP_MILESTONE         → /history
  */
 
 import type { Domain } from '@/store';
@@ -58,6 +59,7 @@ export function sanitizeDeepLinkPath(raw: unknown): string {
 
 export type ClientTriggerType =
   | 'ESCALATION_CHANGE'
+  | 'ESCALATION_RECOVERY'
   | 'COMPLIANCE_WARNING'
   | 'DEVIATION_ENDING'
   | 'RAMP_UP_MILESTONE'
@@ -81,6 +83,7 @@ export interface MinimalTriggerEvent {
 export function deepLinkForTrigger(event: MinimalTriggerEvent): string {
   switch (event.type) {
     case 'ESCALATION_CHANGE':
+    case 'ESCALATION_RECOVERY':
     case 'INACTIVITY':
       return '/';
     case 'COMPLIANCE_WARNING':
