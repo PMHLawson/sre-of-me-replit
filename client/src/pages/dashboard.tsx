@@ -16,6 +16,7 @@ import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationStrip } from '@/components/escalation-surface';
+import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useAuth } from '@/hooks/use-auth';
 
 // Documented domain accent palette (ADR-014 / 40.30.OCMP.915) — hardcoded for Tailwind/inline use
@@ -309,6 +310,8 @@ export default function Dashboard() {
           <DomainCard domain="fitness" title="Fitness" />
           <DomainCard domain="music" title="Music" />
         </div>
+
+        <DeviationSection />
 
         <div className="mt-8 flex gap-3 px-2">
           <button 

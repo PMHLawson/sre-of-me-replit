@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { PolicyStateResponse, ComplianceColor, EscalationStateResponse } from '@shared/schema';
+import type {
+  PolicyStateResponse,
+  ComplianceColor,
+  EscalationStateResponse,
+  Deviation as ServerDeviation,
+} from '@shared/schema';
 
 export type Domain = 'martial-arts' | 'meditation' | 'fitness' | 'music';
 
@@ -38,6 +43,32 @@ export interface DomainStatus {
   cadence: string;
 }
 
+/**
+ * Client-side deviation: server `Deviation` row with timestamp fields
+ * serialized to ISO strings (matches the wire format from /api/deviations).
+ */
+export interface Deviation extends Omit<ServerDeviation, 'startAt' | 'endAt' | 'endedAt' | 'deletedAt'> {
+  startAt: string;
+  endAt: string | null;
+  endedAt: string | null;
+  deletedAt: string | null;
+}
+
+export interface DeviationDraft {
+  domain: Domain;
+  reason: string;
+  startAt: string; // ISO with offset
+  endAt?: string | null;
+  excludeFromComposite?: boolean;
+}
+
+export interface DeviationPatch {
+  reason?: string;
+  startAt?: string;
+  endAt?: string | null;
+  excludeFromComposite?: boolean;
+}
+
 interface AppState {
   sessions: Session[];
   sessionsLoaded: boolean;
@@ -45,9 +76,16 @@ interface AppState {
   policyStateLoaded: boolean;
   escalationState: EscalationStateResponse | null;
   escalationStateLoaded: boolean;
+  deviations: Deviation[];
+  deviationsLoaded: boolean;
   fetchSessions: () => Promise<void>;
   fetchPolicyState: () => Promise<void>;
   fetchEscalationState: () => Promise<void>;
+  fetchDeviations: () => Promise<void>;
+  createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
+  updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
+  endDeviation: (id: string) => Promise<Deviation | null>;
+  deleteDeviation: (id: string) => Promise<boolean>;
   addSession: (session: Omit<Session, 'id'>) => Promise<void>;
   getDomainStatus: (domain: Domain) => DomainStatus;
   getWeakestDomain: () => { domain: Domain; isDegradedOrCritical: boolean };
@@ -193,6 +231,8 @@ export const useAppStore = create<AppState>()(
       policyStateLoaded: false,
       escalationState: null,
       escalationStateLoaded: false,
+      deviations: [],
+      deviationsLoaded: false,
       theme: 'dark',
       demoState: 'default',
 
@@ -241,12 +281,100 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      fetchDeviations: async () => {
+        try {
+          const res = await fetch('/api/deviations');
+          if (!res.ok) throw new Error('Failed to fetch deviations');
+          const data: Deviation[] = await res.json();
+          set({ deviations: data, deviationsLoaded: true });
+        } catch (err) {
+          console.error('fetchDeviations error:', err);
+          set({ deviationsLoaded: true });
+        }
+      },
+
+      createDeviation: async (draft) => {
+        try {
+          const res = await fetch('/api/deviations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(draft),
+          });
+          if (!res.ok) throw new Error('Failed to create deviation');
+          const saved: Deviation = await res.json();
+          await Promise.all([
+            get().fetchDeviations(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return saved;
+        } catch (err) {
+          console.error('createDeviation error:', err);
+          return null;
+        }
+      },
+
+      updateDeviation: async (id, patch) => {
+        try {
+          const res = await fetch(`/api/deviations/${id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          if (!res.ok) throw new Error('Failed to update deviation');
+          const saved: Deviation = await res.json();
+          await Promise.all([
+            get().fetchDeviations(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return saved;
+        } catch (err) {
+          console.error('updateDeviation error:', err);
+          return null;
+        }
+      },
+
+      endDeviation: async (id) => {
+        try {
+          const res = await fetch(`/api/deviations/${id}/end`, { method: 'POST' });
+          if (!res.ok) throw new Error('Failed to end deviation');
+          const saved: Deviation = await res.json();
+          await Promise.all([
+            get().fetchDeviations(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return saved;
+        } catch (err) {
+          console.error('endDeviation error:', err);
+          return null;
+        }
+      },
+
+      deleteDeviation: async (id) => {
+        try {
+          const res = await fetch(`/api/deviations/${id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to delete deviation');
+          await Promise.all([
+            get().fetchDeviations(),
+            get().fetchPolicyState(),
+            get().fetchEscalationState(),
+          ]);
+          return true;
+        } catch (err) {
+          console.error('deleteDeviation error:', err);
+          return false;
+        }
+      },
+
       setDemoState: (demoState) => {
         if (demoState === 'default') {
           Promise.all([
             get().fetchSessions(),
             get().fetchPolicyState(),
             get().fetchEscalationState(),
+            get().fetchDeviations(),
           ]).then(() => {
             set({ demoState });
           });
@@ -259,6 +387,8 @@ export const useAppStore = create<AppState>()(
             policyStateLoaded: true,
             escalationState: null,
             escalationStateLoaded: true,
+            deviations: [],
+            deviationsLoaded: true,
           });
         }
       },
