@@ -60,9 +60,10 @@ export default function LogSession() {
   // attribute so future dates can't be selected.
   const [sessionDate, setSessionDate] = useState<string>(() => formatLocalDateTime(new Date()));
   // D1.2 (SOMR-305): set when this page is editing an already-saved session.
-  // Drives PATCH-vs-POST in runSaveFlow. Locked at mount; we never transition
-  // a logging session into an edit session in-place.
-  const editingSessionId = initialEditId;
+  // Drives PATCH-vs-POST in runSaveFlow. Initialised from `?edit=<id>` and
+  // also flipped on by the post-save toast's Edit action — wouter doesn't
+  // remount on query-only navigation, so we drive this from state directly.
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(initialEditId);
 
   // Anomaly modal state — populated only while the anomaly modal is showing.
   const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
@@ -342,9 +343,20 @@ export default function LogSession() {
       return;
     }
     savedSessionRef.current = null;
-    // Navigate to the same page in edit mode. A fresh mount picks up the
-    // ?edit=<id> query param and pre-populates the form.
-    setLocation(`/log?edit=${saved.id}`);
+    // Drive the edit mode entirely from in-page state. wouter's location hook
+    // tracks pathname, not search, so navigating from /log to /log?edit=<id>
+    // would NOT remount or re-run the prepopulation effect — the form would
+    // stay locked in stage='saved'. Instead: prepopulate fields directly,
+    // flip into edit mode, clear toast state, and update the URL via
+    // history.replaceState so a refresh still works.
+    setDomain(saved.domain as Domain);
+    setDuration(saved.durationMinutes);
+    setSessionDate(formatLocalDateTime(new Date(saved.timestamp)));
+    setNotes(saved.notes ?? '');
+    setEditingSessionId(saved.id);
+    setToastDismissAt(null);
+    setStage('idle');
+    window.history.replaceState(null, '', `/log?edit=${saved.id}`);
   };
 
   const onPostSaveDismiss = () => {
