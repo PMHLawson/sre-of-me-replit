@@ -76,6 +76,7 @@ export default function LogSession() {
   // time has elapsed. The actual auto-dismiss is driven by the timeout
   // below; this is purely visual.
   const [toastDismissAt, setToastDismissAt] = useState<number | null>(null);
+  const [toastNow, setToastNow] = useState<number>(() => Date.now());
 
   const addSession = useAppStore(state => state.addSession);
   const updateSession = useAppStore(state => state.updateSession);
@@ -162,11 +163,8 @@ export default function LogSession() {
       return;
     }
 
-    // ── Step 3: frequency advisory (already logged this domain on the
-    //           selected day) ───────────────────────────────────────────────
-    // D1.1 (SOMR-304): compare against the user-selected `sessionDate`, not
-    // wall-clock "now". Backdating to a day with no sessions for this domain
-    // must NOT trigger a false "already logged today" prompt.
+    // Step 3: frequency advisory — compare against the selected day, not
+    // wall-clock today, so backdating doesn't false-trigger (SOMR-304).
     if (!decisions.frequencyAck) {
       const selected = new Date(sessionDate);
       const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
@@ -184,24 +182,15 @@ export default function LogSession() {
       }
     }
 
-    // ── All clear → persist ──────────────────────────────────────────────
-    // D1.1 (SOMR-304): timestamp now comes from the picker, resolved via
-    // `resolveSessionTimestamp` which guarantees a valid Date and clamps any
-    // future moment back to "now". `.toISOString()` then produces the "Z"-
-    // suffixed string the schema's `datetime({ offset: true })` accepts.
+    // All clear → persist. resolveSessionTimestamp guards against invalid
+    // input and clamps future timestamps (SOMR-304).
     const isoTimestamp = resolveSessionTimestamp(sessionDate).toISOString();
     const trimmedNotes = notes.trim();
 
-    // ── D1.2 (SOMR-305) edit path — PATCH instead of POST ────────────────
-    // Edit-mode saves use the B2 correction endpoint. We do NOT show the
-    // post-save Undo/Edit toast here: the user is already correcting an
-    // earlier save, a second toast would be confusing and the soft-delete
-    // semantics differ. Just navigate back when the patch resolves.
+    // Edit mode (SOMR-305): PATCH via the B2 correction path; no toast.
+    // updateSessionSchema only accepts the four user-editable fields, so
+    // the original anomaly flag is preserved on the row.
     if (editingSessionId) {
-      // Note: SessionPatch / server updateSessionSchema only accept the
-      // four user-editable fields below. The original anomaly flag stays
-      // on the row; re-evaluating anomaly on edit is tracked as a separate
-      // follow-up ("Apply the same anomaly check when editing a session").
       const result = await updateSession(
         editingSessionId,
         {
@@ -239,10 +228,8 @@ export default function LogSession() {
       setToastDismissAt(Date.now() + POST_SAVE_TOAST_MS);
       setStage('saved');
     } else {
-      // Server-side persistence failed (we still surfaced the row locally);
-      // there's no canonical id to Undo against, so skip the toast and
-      // navigate immediately. The fail-soft local insert in addSession
-      // ensures the user's input isn't lost.
+      // No canonical id to Undo against on server failure → skip the toast.
+      // The fail-soft local insert in addSession preserves user input.
       setLocation('/');
     }
   };
@@ -322,15 +309,15 @@ export default function LogSession() {
     return () => window.clearTimeout(t);
   }, [stage, setLocation]);
 
-  // Tick the countdown bar at ~10fps. Cheap and avoids requestAnimationFrame
-  // bookkeeping. The setTimeout above remains the source of truth for
-  // auto-dismiss; this is purely visual.
+  // Tick the countdown bar by updating `toastNow` every ~100ms. The setTimeout
+  // above remains the source of truth for auto-dismiss; this is purely visual.
   useEffect(() => {
     if (stage !== 'saved' || toastDismissAt === null) return;
+    setToastNow(Date.now());
     const i = window.setInterval(() => {
-      // force re-render via state churn
-      setToastDismissAt((prev) => (prev === null ? null : prev));
-      if (Date.now() >= toastDismissAt) window.clearInterval(i);
+      const now = Date.now();
+      setToastNow(now);
+      if (now >= toastDismissAt) window.clearInterval(i);
     }, 100);
     return () => window.clearInterval(i);
   }, [stage, toastDismissAt]);
@@ -600,14 +587,7 @@ export default function LogSession() {
   );
 }
 
-// ─── Post-save toast (D1.2 / SOMR-305) ──────────────────────────────────────
-//
-// Shown after a successful new-session save. Provides Undo (soft-delete) and
-// Edit (re-open the form pre-populated). Auto-dismisses after totalMs and
-// renders a shrinking progress bar so the user can see the time remaining.
-// Lives at the bottom of the screen above the (no-longer-pointer-events) Save
-// button gradient.
-
+// Post-save toast (SOMR-305): Undo/Edit + shrinking countdown bar.
 interface PostSaveToastProps {
   dismissAt: number;
   totalMs: number;
