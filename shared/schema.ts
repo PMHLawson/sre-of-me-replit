@@ -120,6 +120,10 @@ export type EscalationStateResponse = z.infer<typeof escalationStateResponseSche
 // A deviation marks a planned/active period where a domain is intentionally
 // off-target (injury, travel, sabbatical, etc.). Active deviations may be
 // excluded from the composite and hold the error budget steady.
+// id is varchar+gen_random_uuid() and domain is text to match the existing
+// `sessions` table convention in this project (Zod validates the domain enum
+// at the API boundary). Changing to pgEnum/uuid() would diverge from the
+// established schema pattern and trigger destructive migrations on existing tables.
 export const deviations = pgTable("deviations", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: text("user_id").notNull(),

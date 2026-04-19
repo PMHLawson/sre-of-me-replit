@@ -8,7 +8,7 @@ import {
   type InsertDeviation,
   type UpdateDeviation,
 } from "@shared/schema";
-import { eq, desc, gte, and, isNull, lte, or, asc } from "drizzle-orm";
+import { eq, desc, gte, and, isNull, lte, or, asc, gt } from "drizzle-orm";
 
 export interface IStorage {
   getSessions(userId: string): Promise<Session[]>;
@@ -93,7 +93,7 @@ export class DatabaseStorage implements IStorage {
           eq(deviations.userId, userId),
           isNull(deviations.deletedAt),
           isNull(deviations.endedAt),
-          gte(deviations.startAt, now),
+          gt(deviations.startAt, now),
         ),
       )
       .orderBy(asc(deviations.startAt));
