@@ -103,10 +103,13 @@ function SessionRow({ entry, variant, onEdit, onDelete }: SessionRowProps) {
   const floor = DOMAIN_POLICY[domain].sessionFloor;
   const belowFloor = session.durationMinutes < floor;
   const inDeviation = !!deviationContext;
+  const isAnomaly = session.isAnomaly === true;
   const ts = parseISO(session.timestamp);
 
   const borderClass = belowFloor
     ? 'border-status-degraded/30 opacity-75'
+    : isAnomaly
+    ? 'border-status-advisory/40'
     : inDeviation
     ? 'border-status-advisory/30'
     : 'border-border/50';
@@ -145,6 +148,19 @@ function SessionRow({ entry, variant, onEdit, onDelete }: SessionRowProps) {
                 data-testid={`badge-below-floor-${session.id}`}
               >
                 Below floor
+              </span>
+            )}
+            {isAnomaly && (
+              <span
+                className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-status-advisory/10 text-status-advisory border border-status-advisory/30"
+                title={
+                  session.anomalyNote
+                    ? `Anomaly: ${session.anomalyNote}`
+                    : 'Anomaly — duration outside the typical baseline'
+                }
+                data-testid={`badge-anomaly-${session.id}`}
+              >
+                Anomaly
               </span>
             )}
             {inDeviation && (
