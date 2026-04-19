@@ -134,6 +134,52 @@ interface AppState {
   snoozeUntil: string | null;
   setSnoozeUntil: (until: string | null) => void;
   isSnoozed: () => boolean;
+
+  /**
+   * Cached browser Notification permission state. Mirrors
+   * `window.Notification?.permission` so components can render without
+   * touching the global. Updated when the user requests permission.
+   */
+  notificationPermission: 'default' | 'granted' | 'denied' | 'unsupported';
+  setNotificationPermission: (
+    p: 'default' | 'granted' | 'denied' | 'unsupported'
+  ) => void;
+  requestNotificationPermission: () => Promise<'default' | 'granted' | 'denied' | 'unsupported'>;
+
+  /**
+   * In-app notification queue. Populated by the trigger evaluator (C4.2)
+   * and drained as the user reads them. Never persisted — wiped on
+   * reload along with snoozeUntil.
+   */
+  pendingNotifications: Array<{
+    id: string;
+    type: string;
+    severity: 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE';
+    title: string;
+    body: string;
+    domain?: Domain;
+    deepLink: string;
+    receivedAt: string;
+    read: boolean;
+  }>;
+  addPendingNotification: (
+    n: Omit<
+      {
+        id: string;
+        type: string;
+        severity: 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE';
+        title: string;
+        body: string;
+        domain?: Domain;
+        deepLink: string;
+        receivedAt: string;
+        read: boolean;
+      },
+      'receivedAt' | 'read'
+    >
+  ) => void;
+  markNotificationRead: (id: string) => void;
+  clearPendingNotifications: () => void;
 }
 
 const generateMockSessions = (scenario: 'default' | 'overperforming' | 'degraded' | 'mixed' = 'default'): Session[] => {
@@ -541,6 +587,48 @@ export const useAppStore = create<AppState>()(
         const t = Date.parse(until);
         return Number.isFinite(t) && t > Date.now();
       },
+
+      notificationPermission:
+        typeof window !== 'undefined' && 'Notification' in window
+          ? (window.Notification.permission as 'default' | 'granted' | 'denied')
+          : 'unsupported',
+      setNotificationPermission: (p) => set({ notificationPermission: p }),
+      requestNotificationPermission: async () => {
+        if (typeof window === 'undefined' || !('Notification' in window)) {
+          set({ notificationPermission: 'unsupported' });
+          return 'unsupported';
+        }
+        try {
+          const result = await window.Notification.requestPermission();
+          const next = result as 'default' | 'granted' | 'denied';
+          set({ notificationPermission: next });
+          return next;
+        } catch {
+          return get().notificationPermission;
+        }
+      },
+
+      pendingNotifications: [],
+      addPendingNotification: (n) => {
+        if (get().isSnoozed()) return;
+        set((state) => {
+          // De-dup by id — engine emits stable ids per logicalDay.
+          if (state.pendingNotifications.some((x) => x.id === n.id)) return state;
+          return {
+            pendingNotifications: [
+              { ...n, receivedAt: new Date().toISOString(), read: false },
+              ...state.pendingNotifications,
+            ].slice(0, 50),
+          };
+        });
+      },
+      markNotificationRead: (id) =>
+        set((state) => ({
+          pendingNotifications: state.pendingNotifications.map((n) =>
+            n.id === id ? { ...n, read: true } : n
+          ),
+        })),
+      clearPendingNotifications: () => set({ pendingNotifications: [] }),
 
       setDemoState: (demoState) => {
         if (demoState === 'default') {

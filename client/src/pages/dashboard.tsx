@@ -16,6 +16,7 @@ import {
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { NotificationBell } from '@/components/NotificationBell';
 import { EscalationStrip, EscalationTimeline } from '@/components/escalation-surface';
 import { OverachievementBadge } from '@/components/overachievement-badge';
 import { DeviationSection } from '@/components/deviations/deviation-section';
@@ -201,6 +202,7 @@ export default function Dashboard() {
             <p className="text-sm font-medium text-muted-foreground mt-1 tracking-wide">SYSTEM OBSERVABILITY</p>
           </div>
           <div className="flex items-center gap-3">
+            <NotificationBell />
             <button
               onClick={() => setLocation('/settings')}
               className="w-10 h-10 rounded-full hover:bg-muted/60 flex items-center justify-center transition-colors text-muted-foreground hover:text-foreground"

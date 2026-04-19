@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -40,7 +40,38 @@ function AuthGate() {
   const fetchEscalationState = useAppStore(state => state.fetchEscalationState);
   const fetchDeviations = useAppStore(state => state.fetchDeviations);
   const demoState = useAppStore(state => state.demoState);
+  const setNotificationPermission = useAppStore(state => state.setNotificationPermission);
+  const [, setLocation] = useLocation();
   const { user, isLoading } = useAuth();
+
+  // C4.3 — service worker registration + notification-click deep-link bridge.
+  // Registers /service-worker.js once, syncs the cached browser permission
+  // into the store, and handles postMessage('notification-click') from the
+  // SW so deep-links navigate via wouter without a full reload.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if ('Notification' in window) {
+      setNotificationPermission(window.Notification.permission as 'default' | 'granted' | 'denied');
+    } else {
+      setNotificationPermission('unsupported');
+    }
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker
+        .register('/service-worker.js')
+        .catch((err) => {
+          // SW failure is non-fatal — in-app notifications still work via the bell.
+          console.warn('Service worker registration failed:', err);
+        });
+      const handler = (event: MessageEvent) => {
+        const data = event.data;
+        if (data && data.type === 'notification-click' && typeof data.path === 'string') {
+          setLocation(data.path);
+        }
+      };
+      navigator.serviceWorker.addEventListener('message', handler);
+      return () => navigator.serviceWorker.removeEventListener('message', handler);
+    }
+  }, [setNotificationPermission, setLocation]);
 
   useEffect(() => {
     const root = window.document.documentElement;
