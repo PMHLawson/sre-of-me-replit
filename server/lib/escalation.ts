@@ -8,7 +8,10 @@ import {
   filterSessionsInWindow,
   type ServiceState,
   type PolicyEngineOptions,
+  type ActiveDeviation,
 } from "./policy-engine";
+
+export type { ActiveDeviation } from "./policy-engine";
 
 /**
  * Escalation Stitch Model — derives per-domain incident & escalation state
@@ -137,10 +140,24 @@ export function consecutiveLowDays<T extends Pick<Session, "timestamp" | "durati
 /**
  * Compute the error budget for a service.
  * Allowed deficit = 60% of targetMinutes (red bucket starts when actual_minutes < 0.4*target).
+ *
+ * Recovery-clock semantics: if the service is under an active deviation
+ * (`isDeviated=true`), the error-budget drawdown is held at zero for the
+ * deviation window — under-target minutes during the deviation do not
+ * consume budget. The service is treated as fully funded until the
+ * deviation ends.
  */
-export function computeErrorBudget(svc: ServiceState): ErrorBudget {
+export function computeErrorBudget(svc: ServiceState, isDeviated: boolean = false): ErrorBudget {
   const target = svc.policy.targetMinutes;
   const allowedMinutes = Math.round(target * 0.6);
+  if (isDeviated) {
+    return {
+      consumedMinutes: 0,
+      allowedMinutes,
+      remainingMinutes: allowedMinutes,
+      percentRemaining: 100,
+    };
+  }
   const consumedMinutes = Math.max(0, target - svc.actual_minutes);
   const remainingMinutes = allowedMinutes - consumedMinutes;
   const percentRemaining = allowedMinutes > 0
@@ -223,8 +240,9 @@ export function computeDomainEscalation<T extends Session>(
   const inWindow = filterSessionsInWindow(domainSessions, window, opts);
 
   const lowDays = consecutiveLowDays(inWindow, window, policy.sessionFloor, opts);
+  const isDeviated = svc.is_deviated === true;
   const tier = classifyTier(svc, lowDays);
-  const errorBudget = computeErrorBudget(svc);
+  const errorBudget = computeErrorBudget(svc, isDeviated);
   const burnRate = policy.dailyProRate > 0 && window.length > 0
     ? Math.round((svc.actual_minutes / window.length) / policy.dailyProRate * 100) / 100
     : 0;
