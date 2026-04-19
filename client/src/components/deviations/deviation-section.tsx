@@ -1,6 +1,12 @@
 import { useMemo, useState } from 'react';
 import { Plus, CalendarOff, CalendarClock, Pencil, X, Trash2 } from 'lucide-react';
-import { useAppStore, type Deviation, type Domain } from '@/store';
+import {
+  useAppStore,
+  type Deviation,
+  type Domain,
+  type DeviationDraft,
+  type DeviationPatch,
+} from '@/store';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -86,16 +92,15 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
         >
           <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
         </Button>
-        {variant === 'active' && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => onEnd(deviation)}
-            data-testid={`button-end-deviation-${deviation.id}`}
-          >
-            <X className="w-3.5 h-3.5 mr-1" /> End now
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onEnd(deviation)}
+          data-testid={`button-end-deviation-${deviation.id}`}
+        >
+          <X className="w-3.5 h-3.5 mr-1" />
+          {variant === 'planned' ? 'Cancel' : 'End now'}
+        </Button>
         <Button
           size="sm"
           variant="ghost"
@@ -150,11 +155,13 @@ export function DeviationSection() {
     setFormOpen(true);
   };
 
-  const handleSubmit = async (draftOrPatch: any) => {
+  const handleSubmit = async (
+    draftOrPatch: DeviationDraft | DeviationPatch,
+  ): Promise<Deviation | null> => {
     if (editing) {
-      return await updateDeviation(editing.id, draftOrPatch);
+      return updateDeviation(editing.id, draftOrPatch as DeviationPatch);
     }
-    return await createDeviation(draftOrPatch);
+    return createDeviation(draftOrPatch as DeviationDraft);
   };
 
   return (
