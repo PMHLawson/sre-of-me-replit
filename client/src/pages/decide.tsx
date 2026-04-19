@@ -19,6 +19,14 @@ export default function Decide() {
   const { domain: weakestDomain } = getWeakestDomain();
   const weakestStatus = getDomainStatus(weakestDomain);
 
+  // B3.3 — During the post-signup ramp-up window the SLO model isn't yet
+  // meaningful, so escalation tier mapping (BREACH/WARNING/ADVISORY) would
+  // produce misleading recommendations. We force systemState to NOMINAL so
+  // the P2/P3 decision logic falls through cleanly, and override the
+  // rationale copy below to explain the runway model instead of citing
+  // tier language.
+  const isRampUp = escalationState?.isRampUp ?? false;
+
   const domains: ('martial-arts' | 'meditation' | 'fitness' | 'music')[] = ['martial-arts', 'meditation', 'fitness', 'music'];
   const allStatuses = domains.map(d => ({ domain: d, ...getDomainStatus(d) }));
 
@@ -47,15 +55,17 @@ export default function Decide() {
   const tierToSystemState = (tier: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' | 'PAGE'): 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' =>
     tier === 'PAGE' ? 'BREACH' : tier;
 
-  const systemState: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' = escalationState
-    ? tierToSystemState(escalationState.highestTier)
-    : (localCritical.length > 0
-        ? 'BREACH'
-        : localDegraded.length > 0
-          ? 'WARNING'
-          : localTrendingDown.length > 1
-            ? 'ADVISORY'
-            : 'NOMINAL');
+  const systemState: 'NOMINAL' | 'ADVISORY' | 'WARNING' | 'BREACH' = isRampUp
+    ? 'NOMINAL'
+    : escalationState
+      ? tierToSystemState(escalationState.highestTier)
+      : (localCritical.length > 0
+          ? 'BREACH'
+          : localDegraded.length > 0
+            ? 'WARNING'
+            : localTrendingDown.length > 1
+              ? 'ADVISORY'
+              : 'NOMINAL');
 
   const isSystemBreach = systemState === 'BREACH';
   const isSystemWarning = systemState === 'WARNING';
@@ -79,9 +89,36 @@ export default function Decide() {
         recommendation: 'Accept',
         action: 'Execute immediately. P1 is non-negotiable.',
         state: 'P1 Override',
-        reason: `All P1 demands bypass system state — by definition, immediate harm occurs if you do not act, you are the only person who can, and it is irreversible within 24 hours. Accept regardless of current escalation state (${systemState}). Note: this consumes recovery capacity. Log the session cost.`,
+        reason: isRampUp
+          ? 'All P1 demands bypass system state — by definition, immediate harm occurs if you do not act, you are the only person who can, and it is irreversible within 24 hours. Accept regardless. Note: this still consumes recovery capacity, even during ramp-up. Log the session cost.'
+          : `All P1 demands bypass system state — by definition, immediate harm occurs if you do not act, you are the only person who can, and it is irreversible within 24 hours. Accept regardless of current escalation state (${systemState}). Note: this consumes recovery capacity. Log the session cost.`,
         color: 'text-status-critical',
         bg: 'bg-status-critical/10'
+      };
+    }
+
+    // B3.3 — Ramp-up branch for P2/P3. systemState is already forced to
+    // NOMINAL above, but we replace the rationale copy entirely so no
+    // BREACH/WARNING/ADVISORY language leaks into ramp-up output.
+    if (isRampUp) {
+      if (priority === 'P2') {
+        return {
+          recommendation: 'Accept',
+          action: 'Execute normally. Use this to seed real cadence data.',
+          state: 'RAMP-UP — System Calibrating',
+          reason: 'You are inside the 7-day post-signup runway window. Escalation tiers are suppressed because the SLO model needs more history to make meaningful judgements. P2 demands are accepted normally during ramp-up — taking action now also helps the system learn your real cadence. Once the runway completes, P2 evaluation will follow normal escalation logic.',
+          color: 'text-primary',
+          bg: 'bg-primary/10'
+        };
+      }
+      // P3
+      return {
+        recommendation: 'Evaluate',
+        action: 'Only accept if it provides genuine high value or strategic leverage.',
+        state: 'RAMP-UP — System Calibrating',
+        reason: 'You are inside the 7-day post-signup runway window. The system is still calibrating, so evaluate this P3 on its own merits — accept only if it provides real value, joy, or strategic alignment, not out of obligation or social pressure. Normal P3 evaluation rules resume once the runway completes.',
+        color: 'text-primary',
+        bg: 'bg-primary/10'
       };
     }
 
@@ -181,24 +218,41 @@ export default function Decide() {
 
       <main className="px-4 py-6 space-y-8">
 
-        {/* Current System State Banner */}
-        <div className={`rounded-2xl p-4 border flex items-center justify-between ${
-          systemState === 'BREACH' ? 'bg-status-critical/10 border-status-critical/20 text-status-critical' :
-          systemState === 'WARNING' ? 'bg-status-degraded/10 border-status-degraded/20 text-status-degraded' :
-          systemState === 'ADVISORY' ? 'bg-status-advisory/10 border-status-advisory/20 text-status-advisory' :
-          'bg-status-healthy/10 border-status-healthy/20 text-status-healthy'
-        }`}>
-          <div>
-            <div className="text-[10px] font-bold uppercase tracking-widest opacity-70 mb-0.5">Current System State</div>
-            <div className="font-bold text-lg tracking-tight">{systemState}</div>
+        {/* Current System State Banner — ramp-up gets a distinct teal
+            treatment so the user understands escalation tier mapping is
+            paused, even though P2/P3 fall through NOMINAL logic (B3.3). */}
+        {isRampUp ? (
+          <div
+            className="rounded-2xl p-4 border flex items-center justify-between bg-primary/10 border-primary/30 text-primary"
+            data-testid="banner-decide-rampup"
+          >
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest opacity-70 mb-0.5">Current System State</div>
+              <div className="font-bold text-lg tracking-tight">RAMP-UP</div>
+            </div>
+            <div className="text-right text-xs opacity-70 font-medium">
+              7-day runway active. Escalation suppressed.
+            </div>
           </div>
-          <div className="text-right text-xs opacity-70 font-medium">
-            {systemState === 'BREACH' && 'Cultivation = P1. Emergencies only.'}
-            {systemState === 'WARNING' && 'Decline P3. Time-box P2.'}
-            {systemState === 'ADVISORY' && 'Note & monitor. No action change.'}
-            {systemState === 'NOMINAL' && 'Full flex capacity.'}
+        ) : (
+          <div className={`rounded-2xl p-4 border flex items-center justify-between ${
+            systemState === 'BREACH' ? 'bg-status-critical/10 border-status-critical/20 text-status-critical' :
+            systemState === 'WARNING' ? 'bg-status-degraded/10 border-status-degraded/20 text-status-degraded' :
+            systemState === 'ADVISORY' ? 'bg-status-advisory/10 border-status-advisory/20 text-status-advisory' :
+            'bg-status-healthy/10 border-status-healthy/20 text-status-healthy'
+          }`}>
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest opacity-70 mb-0.5">Current System State</div>
+              <div className="font-bold text-lg tracking-tight">{systemState}</div>
+            </div>
+            <div className="text-right text-xs opacity-70 font-medium">
+              {systemState === 'BREACH' && 'Cultivation = P1. Emergencies only.'}
+              {systemState === 'WARNING' && 'Decline P3. Time-box P2.'}
+              {systemState === 'ADVISORY' && 'Note & monitor. No action change.'}
+              {systemState === 'NOMINAL' && 'Full flex capacity.'}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Context */}
         <div className="bg-muted/50 rounded-2xl p-4 border border-border/50 flex gap-3 text-sm text-muted-foreground">
