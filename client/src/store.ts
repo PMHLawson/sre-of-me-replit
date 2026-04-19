@@ -381,8 +381,9 @@ export const useAppStore = create<AppState>()(
       deletedSessionsError: null,
 
       fetchDeletedSessions: async () => {
-        // Clear any prior error so a retry shows the loading state again.
-        set({ deletedSessionsError: null });
+        // Reset loaded + error so the panel returns to its loading state on
+        // the initial fetch and on every explicit retry.
+        set({ deletedSessionsLoaded: false, deletedSessionsError: null });
         try {
           const res = await fetch('/api/sessions/deleted');
           if (!res.ok) throw new Error('Failed to fetch deleted sessions');

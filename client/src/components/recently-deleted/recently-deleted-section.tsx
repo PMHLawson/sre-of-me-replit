@@ -121,7 +121,7 @@ export function RecentlyDeletedSection() {
             </div>
           )}
 
-          {deletedSessionsLoaded &&
+          {deletedSessionsLoaded && !deletedSessionsError &&
             sortedDeleted.map((session) => {
               const dom = session.domain as Domain;
               const isRestoring = restoringId === session.id;
