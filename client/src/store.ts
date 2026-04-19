@@ -333,11 +333,11 @@ export const useAppStore = create<AppState>()(
           });
           if (!res.ok) throw new Error('Failed to update session');
           const saved: Session = await res.json();
-          set((state) => ({
-            sessions: state.sessions.map((s) => (s.id === id ? saved : s)),
-          }));
-          // Refresh derived API state so policy/escalation reflect the edit.
+          // Refresh server-authoritative session list + derived state so the
+          // dashboard, policy, and escalation surfaces all reflect the edit
+          // (ordering, filters, and computed fields stay consistent).
           await Promise.all([
+            get().fetchSessions(),
             get().fetchPolicyState(),
             get().fetchEscalationState(),
           ]);
@@ -352,8 +352,8 @@ export const useAppStore = create<AppState>()(
         try {
           const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
           if (!res.ok) throw new Error('Failed to delete session');
-          set((state) => ({ sessions: state.sessions.filter((s) => s.id !== id) }));
           await Promise.all([
+            get().fetchSessions(),
             get().fetchPolicyState(),
             get().fetchEscalationState(),
           ]);
