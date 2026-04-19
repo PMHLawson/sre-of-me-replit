@@ -8,7 +8,8 @@ import {
   updateDeviationSchema,
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
-import { computeCompositeState } from "./lib/policy-engine";
+import { authStorage } from "./replit_integrations/auth/storage";
+import { computeCompositeState, isInRampUp } from "./lib/policy-engine";
 import { computeEscalationState } from "./lib/escalation";
 
 export async function registerRoutes(
@@ -32,12 +33,16 @@ export async function registerRoutes(
   app.get("/api/policy-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const [sessions, activeDeviations] = await Promise.all([
+      const [sessions, activeDeviations, user] = await Promise.all([
         storage.getSessions(userId),
         storage.getActiveDeviations(userId),
+        authStorage.getUser(userId),
       ]);
-      const state = computeCompositeState(sessions, { deviations: activeDeviations });
-      res.json(state);
+      const userCreatedAt = user?.createdAt ?? undefined;
+      const state = computeCompositeState(sessions, { deviations: activeDeviations, userCreatedAt });
+      // B3.1 — Surface ramp-up flag on policy-state too so Dashboard surfaces
+      // can branch without making a second API call to /api/escalation-state.
+      res.json({ ...state, isRampUp: isInRampUp(userCreatedAt) });
     } catch {
       res.status(500).json({ message: "Failed to compute policy state" });
     }
@@ -48,11 +53,15 @@ export async function registerRoutes(
   app.get("/api/escalation-state", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const [sessions, activeDeviations] = await Promise.all([
+      const [sessions, activeDeviations, user] = await Promise.all([
         storage.getSessions(userId),
         storage.getActiveDeviations(userId),
+        authStorage.getUser(userId),
       ]);
-      const state = computeEscalationState(sessions, { deviations: activeDeviations });
+      const state = computeEscalationState(sessions, {
+        deviations: activeDeviations,
+        userCreatedAt: user?.createdAt ?? undefined,
+      });
       res.json(state);
     } catch {
       res.status(500).json({ message: "Failed to compute escalation state" });

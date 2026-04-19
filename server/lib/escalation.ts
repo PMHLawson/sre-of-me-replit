@@ -6,6 +6,7 @@ import {
   logicalDay,
   groupByLogicalDay,
   filterSessionsInWindow,
+  isInRampUp,
   type ServiceState,
   type PolicyEngineOptions,
   type ActiveDeviation,
@@ -106,6 +107,12 @@ export interface EscalationStateResponse {
   composite: CompositeEscalation;
   /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
   history: EscalationHistoryEntry[];
+  /**
+   * True when the requesting user is inside the post-signup ramp-up window
+   * (B3.1). When true, all per-domain tiers and `highestTier` are forced to
+   * NOMINAL; surfaces should display ramp-up copy instead of escalation copy.
+   */
+  isRampUp: boolean;
 }
 
 /** Default number of days included in escalation history responses. */
@@ -332,9 +339,31 @@ export function computeEscalationState<T extends Session>(
     perDomain[d] = esc;
     if (TIER_RANK[esc.tier] > TIER_RANK[highestTier]) highestTier = esc.tier;
   }
+
+  // B3.1 — Ramp-up suppression. During the post-signup runway window, scores
+  // still compute normally (they remain on `perDomain[d].errorBudget` and
+  // ServiceState), but tier surfacing is forced to NOMINAL across the board
+  // so a brand-new user doesn't see BREACH/WARNING banners before they've
+  // had a chance to log meaningful activity. History is intentionally NOT
+  // rewritten — it represents the authentic per-day classification.
+  const rampUp = isInRampUp(opts.userCreatedAt, now);
+  if (rampUp) {
+    const nominalRationale = "System calibrating — within the 7-day ramp-up window. Escalation tiers are suppressed until enough activity is logged for SLOs to be meaningful.";
+    const nominalAction = "Log sessions normally. Escalation will resume once the ramp-up window completes.";
+    for (const d of domainEnum) {
+      perDomain[d] = {
+        ...perDomain[d],
+        tier: "NOMINAL",
+        rationale: nominalRationale,
+        recommendedAction: nominalAction,
+      };
+    }
+    highestTier = "NOMINAL";
+  }
+
   const composite = computeComposite(perDomain, highestTier);
   const history = computeEscalationHistory(allSessions, opts, historyDays);
-  return { logical_day: todayKey, perDomain, highestTier, composite, history };
+  return { logical_day: todayKey, perDomain, highestTier, composite, history, isRampUp: rampUp };
 }
 
 /**

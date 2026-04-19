@@ -102,6 +102,12 @@ export const policyStateResponseSchema = z.object({
   composite_color: z.enum(complianceColorEnum),
   /** Domains excluded from the composite weighted average due to active deviation. */
   excluded_domains: z.array(z.enum(domainEnum)).optional(),
+  /**
+   * True when the requesting user is inside the post-signup ramp-up window
+   * (B3.1). Surfaces use this to suppress escalation copy and apply the
+   * teal/cyan "system calibrating" treatment.
+   */
+  isRampUp: z.boolean(),
 });
 
 export type ServiceState = z.infer<typeof serviceStateSchema>;
@@ -172,6 +178,12 @@ export const escalationStateResponseSchema = z.object({
   composite: compositeEscalationSchema,
   /** Per-day escalation tier history (oldest → newest), one entry per logical day. */
   history: z.array(escalationHistoryEntrySchema),
+  /**
+   * True when the requesting user is inside the post-signup ramp-up window
+   * (B3.1). When true, all per-domain tiers and `highestTier` are forced to
+   * NOMINAL; surfaces should display ramp-up copy instead of escalation copy.
+   */
+  isRampUp: z.boolean(),
 });
 
 export type ErrorBudget = z.infer<typeof errorBudgetSchema>;

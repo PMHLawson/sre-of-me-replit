@@ -26,6 +26,24 @@ export const DEFAULT_COMPLIANCE_WINDOW_DAYS = 7;
 /** Default timezone for logical-day boundary evaluation. */
 export const DEFAULT_TIMEZONE = "America/New_York";
 
+/**
+ * Number of days from account creation during which the system is in
+ * "ramp-up" mode: scores still compute normally, but escalation tiers are
+ * suppressed to NOMINAL so a brand-new user doesn't see BREACH/WARNING
+ * banners before they've had a chance to log meaningful activity.
+ */
+export const RAMP_UP_DAYS = 7;
+const RAMP_UP_MS = RAMP_UP_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * True when `now` is strictly less than `RAMP_UP_DAYS` after `createdAt`.
+ * Pure function — safe to call from anywhere with no I/O.
+ */
+export function isInRampUp(createdAt: Date | null | undefined, now: Date = new Date()): boolean {
+  if (!createdAt) return false;
+  return now.getTime() - createdAt.getTime() < RAMP_UP_MS;
+}
+
 export interface DomainPolicySpec {
   /** Cumulative minutes target across the compliance window. */
   targetMinutes: number;
@@ -74,6 +92,13 @@ export interface PolicyEngineOptions {
    * pulled down by under-target activity during the deviation window).
    */
   deviations?: ActiveDeviation[];
+  /**
+   * Account creation timestamp for the requesting user. When provided and
+   * `now - userCreatedAt < RAMP_UP_DAYS`, escalation tiers are suppressed
+   * (forced to NOMINAL) by `computeEscalationState`. Score computation is
+   * unaffected — only tier surfacing is suppressed.
+   */
+  userCreatedAt?: Date;
 }
 
 /** True if the deviation is currently active at `now`. */
