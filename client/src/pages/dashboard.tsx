@@ -15,7 +15,7 @@ import {
 import { useAppStore, Domain } from '@/store';
 import { Card, CardContent } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { EscalationStrip } from '@/components/escalation-surface';
+import { EscalationStrip, EscalationTimeline } from '@/components/escalation-surface';
 import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useAuth } from '@/hooks/use-auth';
 
@@ -330,6 +330,9 @@ export default function Dashboard() {
               perDomain={escalationState.perDomain}
               onSelect={(d) => setLocation(`/domain/${d}`)}
             />
+            {escalationState.history && escalationState.history.length > 0 && (
+              <EscalationTimeline history={escalationState.history} />
+            )}
           </section>
         )}
         {escalationState && isRampUp && (
