@@ -147,6 +147,8 @@ export default function Dashboard() {
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
   const sessionsLoaded = useAppStore(state => state.sessionsLoaded);
+  const escalationStateLoaded = useAppStore(state => state.escalationStateLoaded);
+  const dataReady = sessionsLoaded && escalationStateLoaded;
   // Re-render when API-backed policy state arrives or refreshes.
   const policyState = useAppStore(state => state.policyState);
   const escalationState = useAppStore(state => state.escalationState);
@@ -320,7 +322,7 @@ export default function Dashboard() {
                     <ChevronRight className="w-3 h-3" />
                   </div>
                   <div className="flex items-center gap-3">
-                    {!sessionsLoaded ? (
+                    {!dataReady ? (
                       <span className="text-5xl font-extrabold tracking-tighter text-muted-foreground/30">—</span>
                     ) : (
                       <span className={`text-5xl font-extrabold tracking-tighter ${systemHealth.color}`}>
@@ -329,7 +331,7 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
-                {!sessionsLoaded ? (
+                {!dataReady ? (
                   <div className="px-4 py-2 rounded-2xl text-sm font-bold tracking-wide bg-muted text-muted-foreground/50">
                     Loading…
                   </div>
@@ -342,7 +344,7 @@ export default function Dashboard() {
               
               <div className="pt-4 border-t border-border/40">
                 <p className="text-sm text-foreground/80 leading-relaxed font-medium">
-                  {!sessionsLoaded ? 'Syncing session data…' : systemHealth.rationale}
+                  {!dataReady ? 'Syncing session data…' : systemHealth.rationale}
                 </p>
               </div>
             </div>
