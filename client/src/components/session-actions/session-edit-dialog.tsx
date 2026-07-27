@@ -18,6 +18,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { AlertTriangle } from 'lucide-react';
+import type { AnomalyCheckResponse } from '@shared/schema';
 import type { Session, SessionPatch, Domain } from '@/store';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -43,6 +45,9 @@ function fromLocalInputValue(local: string): string {
   return new Date(local).toISOString();
 }
 
+/** Multi-step flow within the dialog. */
+type Stage = 'idle' | 'checking' | 'anomaly' | 'saving';
+
 interface SessionEditDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -58,8 +63,12 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
   const [timestampLocal, setTimestampLocal] = useState('');
   const [notes, setNotes] = useState('');
   const [reason, setReason] = useState('');
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Anomaly preflight state (C1.1 — mirrors log-session).
+  const [stage, setStage] = useState<Stage>('idle');
+  const [anomalyResult, setAnomalyResult] = useState<AnomalyCheckResponse | null>(null);
+  const [anomalyNote, setAnomalyNote] = useState('');
 
   useEffect(() => {
     if (!open || !session) return;
@@ -69,45 +78,158 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
     setNotes(session.notes ?? '');
     setReason('');
     setError(null);
+    setStage('idle');
+    setAnomalyResult(null);
+    setAnomalyNote('');
   }, [open, session]);
 
-  const handleSubmit = async () => {
-    if (!session) return;
-    setError(null);
-    if (!reason.trim()) {
-      setError('Reason for edit is required.');
-      return;
-    }
+  /** Validate form fields; returns parsed durationNum or null on failure. */
+  function validateForm(): number | null {
+    if (!reason.trim()) { setError('Reason for edit is required.'); return null; }
     const durationNum = Number(duration);
     if (!Number.isFinite(durationNum) || durationNum <= 0 || !Number.isInteger(durationNum)) {
       setError('Duration must be a positive whole number of minutes.');
-      return;
+      return null;
     }
-    if (!timestampLocal) {
-      setError('Timestamp is required.');
-      return;
-    }
+    if (!timestampLocal) { setError('Timestamp is required.'); return null; }
+    return durationNum;
+  }
 
+  /** Final PATCH — called after any anomaly decision is resolved. */
+  const doSubmit = async (durationNum: number, isAnomaly: boolean, anomalyNoteValue: string | null) => {
+    if (!session) return;
     const patch: SessionPatch = {
       domain,
       durationMinutes: durationNum,
       timestamp: fromLocalInputValue(timestampLocal),
       notes: notes.trim() ? notes.trim() : null,
+      isAnomaly,
+      anomalyNote: isAnomaly ? anomalyNoteValue : null,
     };
-
-    setSubmitting(true);
+    setStage('saving');
     try {
       const result = await onSubmit(patch, reason.trim());
       if (!result) {
         setError('Could not save changes. Please try again.');
+        setStage('idle');
         return;
       }
       onOpenChange(false);
-    } finally {
-      setSubmitting(false);
+    } catch {
+      setError('Could not save changes. Please try again.');
+      setStage('idle');
     }
   };
 
+  /** Primary save button handler: validate → anomaly preflight → submit. */
+  const handleSubmit = async () => {
+    if (!session) return;
+    setError(null);
+    const durationNum = validateForm();
+    if (durationNum === null) return;
+
+    setStage('checking');
+
+    // Anomaly preflight — fail-open on network/server error (mirrors log-session).
+    try {
+      const res = await fetch('/api/sessions/anomaly-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, durationMinutes: durationNum }),
+      });
+      if (res.ok) {
+        const result: AnomalyCheckResponse = await res.json();
+        if (result.isAnomaly) {
+          setAnomalyResult(result);
+          setAnomalyNote('');
+          setStage('anomaly');
+          return;
+        }
+      }
+    } catch {
+      // fail-open: proceed without anomaly flag
+    }
+
+    await doSubmit(durationNum, false, null);
+  };
+
+  /** Confirm the anomaly prompt and proceed to save. */
+  const handleAnomalyConfirm = async () => {
+    if (!anomalyNote.trim()) return;
+    const durationNum = Number(duration);
+    await doSubmit(durationNum, true, anomalyNote.trim());
+  };
+
+  /** Cancel the anomaly prompt and return to the edit form. */
+  const handleAnomalyCancel = () => {
+    setStage('idle');
+    setAnomalyResult(null);
+    setAnomalyNote('');
+  };
+
+  const busy = stage === 'checking' || stage === 'saving';
+
+  // ── Anomaly confirmation screen ───────────────────────────────────────────
+  if (stage === 'anomaly' && anomalyResult) {
+    const durationNum = Number(duration);
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent data-testid="dialog-session-edit-anomaly">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-status-advisory" />
+              Unusual session length
+            </DialogTitle>
+            <DialogDescription>
+              This duration is outside your typical range for {domain.replace('-', ' ')}.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <p className="text-sm text-foreground">
+              <span className="font-mono font-bold">{durationNum} min</span> is well outside your
+              typical {domain.replace('-', ' ')} session length
+              {' '}(<span className="font-mono">avg {anomalyResult.mean} min</span>,
+              {' '}<span className="font-mono">σ {anomalyResult.stdDev} min</span>,
+              {' '}z = <span className="font-mono">{anomalyResult.zScore}</span>).
+            </p>
+            <p className="text-sm text-muted-foreground">Add a note to confirm this is intentional:</p>
+            <div className="space-y-2">
+              <Label htmlFor="session-edit-anomaly-note">Anomaly note</Label>
+              <Textarea
+                id="session-edit-anomaly-note"
+                placeholder="What made this session different?"
+                value={anomalyNote}
+                onChange={(e) => setAnomalyNote(e.target.value)}
+                rows={3}
+                autoFocus
+                data-testid="input-session-edit-anomaly-note"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={handleAnomalyCancel}
+              data-testid="button-session-edit-anomaly-cancel"
+            >
+              Back
+            </Button>
+            <Button
+              onClick={handleAnomalyConfirm}
+              disabled={!anomalyNote.trim()}
+              data-testid="button-session-edit-anomaly-confirm"
+            >
+              Confirm &amp; save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  // ── Normal edit form ──────────────────────────────────────────────────────
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="dialog-session-edit">
@@ -198,17 +320,17 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
           <Button
             variant="ghost"
             onClick={() => onOpenChange(false)}
-            disabled={submitting}
+            disabled={busy}
             data-testid="button-session-edit-cancel"
           >
             Cancel
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={busy}
             data-testid="button-session-edit-submit"
           >
-            {submitting ? 'Saving…' : 'Save changes'}
+            {stage === 'checking' ? 'Checking…' : stage === 'saving' ? 'Saving…' : 'Save changes'}
           </Button>
         </DialogFooter>
       </DialogContent>

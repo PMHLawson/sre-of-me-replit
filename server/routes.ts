@@ -225,10 +225,14 @@ export async function registerRoutes(
 
   // PATCH /api/sessions/:id — edit a non-deleted session. Body must include
   // `reason` so every change is captured in the edit-history audit table.
+  // C1.1 — Mirrors the POST guard: isAnomaly=true requires a non-empty note.
   app.patch("/api/sessions/:id", isAuthenticated, async (req: any, res) => {
     const parsed = updateSessionSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Invalid session patch", errors: parsed.error.flatten() });
+    }
+    if (parsed.data.isAnomaly && !parsed.data.anomalyNote?.trim()) {
+      return res.status(400).json({ message: "Anomaly note is required when isAnomaly is true" });
     }
     try {
       const userId: string = req.user.claims.sub;

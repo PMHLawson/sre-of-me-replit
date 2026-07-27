@@ -31,6 +31,9 @@ export interface SessionPatch {
   durationMinutes?: number;
   timestamp?: string;
   notes?: string | null;
+  // C1.1 — Anomaly fields so the edit path can persist a re-evaluated flag.
+  isAnomaly?: boolean;
+  anomalyNote?: string | null;
 }
 
 export interface DomainPolicy {

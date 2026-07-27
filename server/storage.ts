@@ -127,6 +127,18 @@ export class DatabaseStorage implements IStorage {
         update.notes = patch.notes ?? null;
         prior.notes = current.notes;
       }
+      // C1.1 — Persist the re-evaluated anomaly flag when the edit path sends it.
+      // anomalyNote is cleared automatically when isAnomaly becomes false so the
+      // row stays consistent (mirrors the POST /api/sessions create guard).
+      if (patch.isAnomaly !== undefined && patch.isAnomaly !== current.isAnomaly) {
+        update.isAnomaly = patch.isAnomaly;
+        prior.isAnomaly = current.isAnomaly;
+      }
+      const resolvedAnomalyNote = (patch.isAnomaly ?? current.isAnomaly) ? (patch.anomalyNote ?? current.anomalyNote ?? null) : null;
+      if (resolvedAnomalyNote !== (current.anomalyNote ?? null)) {
+        update.anomalyNote = resolvedAnomalyNote;
+        prior.anomalyNote = current.anomalyNote;
+      }
 
       // No-op edits still record an audit row so the reason note is preserved.
       await tx.insert(sessionEdits).values({

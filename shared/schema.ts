@@ -72,6 +72,10 @@ export const updateSessionSchema = z.object({
   timestamp: z.string().datetime({ offset: true }).optional(),
   notes: z.string().nullable().optional(),
   reason: z.string().min(1).max(500),
+  // C1.1 — Anomaly fields mirror insertSessionSchema so the edit path can
+  // persist a re-evaluated flag when the duration changes.
+  isAnomaly: z.boolean().optional(),
+  anomalyNote: z.string().nullable().optional(),
 });
 
 export type InsertSession = z.infer<typeof insertSessionSchema>;
