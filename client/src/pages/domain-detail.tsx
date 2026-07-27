@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, subDays, parseISO, isSameDay } from 'date-fns';
 import { ArrowLeft, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
@@ -139,82 +139,86 @@ function AnomalyMarker({ x, y, width, payload }: AnomalyMarkerProps): React.Reac
   );
 }
 
-function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity }: ChartBarsProps) {
+export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity }: ChartBarsProps) {
   const runs = deviationRuns(data);
-  const internals = (
-    <>
-      <XAxis
-        dataKey="dateKey"
-        axisLine={false}
-        tickLine={false}
-        tick={{ fontSize: 9, fill: '#A9BBC2', fontWeight: 500 }}
-        tickFormatter={(_v: string, idx: number) => data[idx]?.dayLabel ?? ''}
-        dy={8}
-        interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
+  const internals = [
+    <XAxis
+      key="x-axis"
+      dataKey="dateKey"
+      axisLine={false}
+      tickLine={false}
+      tick={{ fontSize: 9, fill: '#A9BBC2', fontWeight: 500 }}
+      tickFormatter={(_v: string, idx: number) => data[idx]?.dayLabel ?? ''}
+      dy={8}
+      interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
+    />,
+    <YAxis
+      key="y-axis"
+      axisLine={false}
+      tickLine={false}
+      tick={{ fontSize: 10, fill: '#A9BBC2', fontWeight: 500 }}
+      width={32}
+    />,
+    <Tooltip
+      key="tooltip"
+      cursor={{ fill: 'rgba(169,187,194,0.08)' }}
+      content={(props: any) => (
+        <TooltipContent {...props} accentHex={accentHex} sessionFloor={policySessionFloor} />
+      )}
+    />,
+    // Deviation bands — render before bars so they sit underneath.
+    ...runs.map((r, i) => (
+      <ReferenceArea
+        key={`ref-area-${i}`}
+        x1={r.x1}
+        x2={r.x2}
+        fill={DEVIATION_BAND_COLOR}
+        fillOpacity={0.18}
+        stroke={DEVIATION_BAND_COLOR}
+        strokeOpacity={0.25}
+        ifOverflow="extendDomain"
       />
-      <YAxis
-        axisLine={false}
-        tickLine={false}
-        tick={{ fontSize: 10, fill: '#A9BBC2', fontWeight: 500 }}
-        width={32}
-      />
-      <Tooltip
-        cursor={{ fill: 'rgba(169,187,194,0.08)' }}
-        content={(props: any) => (
-          <TooltipContent {...props} accentHex={accentHex} sessionFloor={policySessionFloor} />
-        )}
-      />
-      {/* Deviation bands — render before bars so they sit underneath. */}
-      {runs.map((r, i) => (
-        <ReferenceArea
-          key={`dev-${i}-${r.x1}-${r.x2}`}
-          x1={r.x1}
-          x2={r.x2}
-          fill={DEVIATION_BAND_COLOR}
-          fillOpacity={0.18}
-          stroke={DEVIATION_BAND_COLOR}
-          strokeOpacity={0.25}
-          ifOverflow="extendDomain"
-        />
-      ))}
-      {/* Threshold annotations: session floor (lower) and daily pro-rate (target). */}
-      <ReferenceLine
-        y={policySessionFloor}
-        stroke="#A9BBC2"
-        strokeOpacity={0.45}
-        strokeDasharray="2 4"
-        label={{ value: `floor ${policySessionFloor}m`, position: 'insideBottomLeft', fontSize: 9, fill: '#A9BBC2', fillOpacity: 0.7, dy: -2 }}
-      />
-      <ReferenceLine
-        y={policyDailyProRate}
-        stroke={accentHex}
-        strokeOpacity={0.35}
-        strokeDasharray="3 3"
-        label={{ value: `${policyDailyProRate}m/d`, position: 'insideTopLeft', fontSize: 9, fill: accentHex, fillOpacity: 0.6, dy: -2 }}
-      />
-      <Bar
-        dataKey="minutes"
-        radius={[4, 4, 0, 0]}
-        maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}
-        label={AnomalyMarker}
-        isAnimationActive={false}
-      >
-        {data.map((entry, idx) => {
-          const strokeColor = entry.hasAnomaly ? ANOMALY_COLOR : entry.isToday ? accentHex : 'none';
-          const strokeWidth = entry.hasAnomaly ? 1.5 : entry.isToday ? 1.5 : 0;
-          return (
-            <Cell
-              key={`cell-${idx}`}
-              fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
-              fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.18}
-              stroke={strokeColor}
-              strokeWidth={strokeWidth}
-            />
-          );
-        })}
-      </Bar>
-    </>
-  );
+    )),
+    // Threshold annotations: session floor (lower) and daily pro-rate (target).
+    <ReferenceLine
+      key="ref-floor"
+      y={policySessionFloor}
+      stroke="#A9BBC2"
+      strokeOpacity={0.45}
+      strokeDasharray="2 4"
+      label={{ value: `floor ${policySessionFloor}m`, position: 'insideBottomLeft', fontSize: 9, fill: '#A9BBC2', fillOpacity: 0.7, dy: -2 }}
+    />,
+    <ReferenceLine
+      key="ref-target"
+      y={policyDailyProRate}
+      stroke={accentHex}
+      strokeOpacity={0.35}
+      strokeDasharray="3 3"
+      label={{ value: `${policyDailyProRate}m/d`, position: 'insideTopLeft', fontSize: 9, fill: accentHex, fillOpacity: 0.6, dy: -2 }}
+    />,
+    <Bar
+      key="bar"
+      dataKey="minutes"
+      radius={[4, 4, 0, 0]}
+      maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}
+      label={AnomalyMarker}
+      isAnimationActive={false}
+    >
+      {data.map((entry, idx) => {
+        const strokeColor = entry.hasAnomaly ? ANOMALY_COLOR : entry.isToday ? accentHex : 'none';
+        const strokeWidth = entry.hasAnomaly ? 1.5 : entry.isToday ? 1.5 : 0;
+        return (
+          <Cell
+            key={`cell-${idx}`}
+            fill={entry.minutes > 0 ? accentHex : '#AAB8BC'}
+            fillOpacity={entry.minutes > 0 ? getBarOpacity(entry.tier) : 0.18}
+            stroke={strokeColor}
+            strokeWidth={strokeWidth}
+          />
+        );
+      })}
+    </Bar>,
+  ];
 
   if (needsScroll) {
     return (
