@@ -14,8 +14,9 @@ import { describe, it, expect } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ChartBars } from './domain-detail';
+import type { ChartDatum } from '@/lib/domain-detail-aggregation';
 
-const SAMPLE_DATA = [
+const SAMPLE_DATA: ChartDatum[] = [
   {
     dateKey: '2026-07-20',
     dayLabel: 'M1',
@@ -41,7 +42,7 @@ const SAMPLE_DATA = [
     dayLabel: 'S3',
     fullDate: 'Jul 26',
     minutes: 0,
-    isToday: true,
+    isToday: false,
     tier: 'current' as const,
     hasAnomaly: false,
     hasDeviation: false,

@@ -171,6 +171,46 @@ export const policyStateResponseSchema = z.object({
    * notification triggers (e.g. fire when consecutiveDays >= N for tier T).
    */
   sustainedOverachievement: z.record(z.enum(domainEnum), sustainedOverachievementEntrySchema),
+  /**
+   * SOMR-327 — Server-authoritative logical-day key sets for all chart ranges
+   * and the fixed Current/Previous 7-day summary windows. The client uses
+   * these to bucket sessions without mirroring the logical-day algorithm.
+   *
+   *   w7    — 7 most-recent completed logical days (oldest→newest)
+   *   w14   — 14 completed logical days
+   *   w28   — 28 completed logical days
+   *   w42   — 42 completed logical days (full chart backing store)
+   *   prev7 — 7 days immediately preceding w7; no gap, no overlap
+   */
+  windowSets: z.object({
+    w7:    z.array(z.string()),
+    w14:   z.array(z.string()),
+    w28:   z.array(z.string()),
+    w42:   z.array(z.string()),
+    prev7: z.array(z.string()),
+    /**
+     * SOMR-327 — Maps each active deviation's id to the subset of w42 logical-day
+     * keys it overlaps, computed from the authoritative logical-day boundaries
+     * (timezone + dayStartHour).  The client uses this to render deviation bands
+     * without any client-side timezone arithmetic or UTC-midnight approximation.
+     */
+    deviationDayMap: z.record(z.string(), z.array(z.string())).optional(),
+    /**
+     * SOMR-327 — The server-computed logical-day key for the *current* (in-progress)
+     * day, using the same timezone + dayStartHour as the window sets.  Lets the
+     * client identify today's sessions without any client-side TZ arithmetic.
+     * Today is NOT included in any window set (w7 … w42) — it is strictly live
+     * operational context, excluded from all SLO and trend calculations.
+     */
+    todayKey: z.string().optional(),
+  }).optional(),
+  /**
+   * SOMR-327 — Maps each session's id to its server-computed logical-day key
+   * (YYYY-MM-DD, in the user's configured timezone + day-start hour). Lets
+   * the client bucket sessions into windows without a client-side
+   * logical-day implementation.
+   */
+  sessionDays: z.record(z.string(), z.string()).optional(),
 });
 
 export type ServiceState = z.infer<typeof serviceStateSchema>;

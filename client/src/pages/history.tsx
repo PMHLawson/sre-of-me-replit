@@ -196,13 +196,14 @@ export default function History() {
           </section>
         ))}
 
-        {/* Trend audit note between first and second week */}
+        {/* Calendar-week context note */}
         {visibleWeekBuckets.length >= 2 && (
           <div className="bg-primary/5 border border-primary/20 rounded-2xl p-4 text-sm text-muted-foreground">
-            <span className="font-bold text-foreground">Trend audit: </span>
-            Compare the totals in the week headers above to verify the dashboard trend
-            arrows. Current 7-day window = week at top. Previous 7-day window = week
-            below it.
+            <span className="font-bold text-foreground">Week totals: </span>
+            Each header shows minutes logged per domain for that calendar week
+            (Mon–Sun). Dashboard trend arrows use rolling 7-day windows anchored
+            to your configured timezone and day-start hour — they will not always
+            align exactly with the calendar weeks shown here.
           </div>
         )}
 

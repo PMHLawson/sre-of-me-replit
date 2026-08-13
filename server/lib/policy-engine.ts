@@ -202,6 +202,37 @@ export function completedWindowDays(opts: PolicyEngineOptions = {}): string[] {
 }
 
 /**
+ * Compute the UTC timestamp at which logical day `dayKey` (YYYY-MM-DD) begins —
+ * i.e. the moment the user's clock hits `dayStartHour` on that calendar date.
+ *
+ * Used by the policy-state route to determine authoritative deviation-day overlap
+ * without any client-side timezone arithmetic.
+ *
+ * Accuracy: partsInTimezone omits sub-hour components, so the result is precise
+ * to the nearest hour — sufficient for dayStartHour (an integer) in all supported
+ * timezones.  For fractional-offset zones (India +5:30, Nepal +5:45) the boundary
+ * shifts by the fractional-minute portion but never by a whole hour.
+ */
+export function logicalDayStartUtc(dayKey: string, opts: PolicyEngineOptions = {}): Date {
+  const tz = opts.timezone ?? DEFAULT_TIMEZONE;
+  const startHour = opts.dayStartHour ?? DEFAULT_DAY_START_HOUR;
+  const [yr, mo, dy] = dayKey.split("-").map(Number);
+  // Probe at noon UTC — safely within the correct calendar date in every timezone
+  // on Earth (UTC−12 to UTC+14).
+  const noonUtc = new Date(Date.UTC(yr, mo - 1, dy, 12, 0, 0));
+  const local = partsInTimezone(noonUtc, tz);
+  // UTC offset: positive means the zone is behind UTC (e.g. America/New_York = +4h in EDT).
+  // Derivation: noonUtcMs = Date.UTC(local.year, local.month-1, local.day, local.hour, 0, 0) + utcOffsetMs
+  const utcOffsetMs =
+    noonUtc.getTime() -
+    Date.UTC(local.year, local.month - 1, local.day, local.hour, 0, 0);
+  // Local midnight of dayKey expressed as a UTC millisecond count:
+  const localMidnightUtc = Date.UTC(yr, mo - 1, dy, 0, 0, 0) + utcOffsetMs;
+  // The logical day starts at dayStartHour in local time:
+  return new Date(localMidnightUtc + startHour * 3_600_000);
+}
+
+/**
  * Filter sessions to those whose logical day falls within `windowDays`.
  */
 export function filterSessionsInWindow<T extends Pick<Session, "timestamp">>(
