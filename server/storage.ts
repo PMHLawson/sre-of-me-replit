@@ -12,6 +12,7 @@ import {
   type UpdateDeviation,
   type UserSettings,
   type InsertUserSettings,
+  normalizeComplianceWindowDays,
 } from "@shared/schema";
 import { eq, desc, gte, and, isNull, lte, lt, or, asc, gt, isNotNull } from "drizzle-orm";
 
@@ -352,7 +353,31 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(userSettings)
       .where(eq(userSettings.userId, userId));
-    if (existing) return existing;
+    if (existing) {
+      const normalizedWindowDays = normalizeComplianceWindowDays(existing.windowDays);
+      if (normalizedWindowDays === existing.windowDays) return existing;
+
+      // SOMR-328 — Persist the compatibility conversion on first read so
+      // legacy 21/30-day selections cannot remain active but invisible in UI.
+      const [migrated] = await db
+        .update(userSettings)
+        .set({ windowDays: normalizedWindowDays, updatedAt: new Date() })
+        .where(and(
+          eq(userSettings.userId, userId),
+          eq(userSettings.windowDays, existing.windowDays),
+        ))
+        .returning();
+      if (migrated) return migrated;
+
+      // A concurrent PATCH replaced the legacy value after our read. Return
+      // that newer row instead of overwriting the user's canonical selection.
+      const [current] = await db
+        .select()
+        .from(userSettings)
+        .where(eq(userSettings.userId, userId));
+      if (!current) throw new Error("User settings disappeared during migration");
+      return current;
+    }
     // First read for this user — insert defaults so subsequent reads + the
     // PATCH endpoint always have a row to update. onConflictDoNothing makes
     // this safe under concurrent first reads.
@@ -374,6 +399,10 @@ export class DatabaseStorage implements IStorage {
     userId: string,
     patch: InsertUserSettings,
   ): Promise<UserSettings> {
+    // Normalize any legacy stored window before applying a partial patch. This
+    // also auto-creates the default row for a first-time user.
+    await this.getUserSettings(userId);
+
     const update: Partial<typeof userSettings.$inferInsert> = { updatedAt: new Date() };
     if (patch.dayStartHour !== undefined) update.dayStartHour = patch.dayStartHour;
     if (patch.timezone !== undefined) update.timezone = patch.timezone;

@@ -345,6 +345,29 @@ export type Deviation = typeof deviations.$inferSelect;
 export const notificationTierEnum = ["ADVISORY", "WARNING", "BREACH", "PAGE"] as const;
 export type NotificationTier = typeof notificationTierEnum[number];
 
+export const complianceWindowDayOptions = [7, 14, 28, 42] as const;
+export type ComplianceWindowDays = typeof complianceWindowDayOptions[number];
+
+export const complianceWindowDaysSchema = z.union([
+  z.literal(7),
+  z.literal(14),
+  z.literal(28),
+  z.literal(42),
+]);
+
+/**
+ * Convert legacy compliance-window selections to the accepted weekly standard.
+ * 21 and 30 were previously selectable; both resolve to the canonical 28-day
+ * window. Unexpected database values fall back to the unchanged 7-day default.
+ */
+export function normalizeComplianceWindowDays(windowDays: number): ComplianceWindowDays {
+  if (windowDays === 21 || windowDays === 30) return 28;
+  if (complianceWindowDayOptions.includes(windowDays as ComplianceWindowDays)) {
+    return windowDays as ComplianceWindowDays;
+  }
+  return 7;
+}
+
 export const userSettings = pgTable("user_settings", {
   userId: text("user_id").primaryKey(),
   dayStartHour: integer("day_start_hour").notNull().default(4),
@@ -360,7 +383,7 @@ export const insertUserSettingsSchema = createInsertSchema(userSettings)
   .extend({
     dayStartHour: z.coerce.number().int().min(0).max(23).optional(),
     timezone: z.string().min(1).max(64).optional(),
-    windowDays: z.coerce.number().int().min(7).max(42).optional(),
+    windowDays: z.coerce.number().pipe(complianceWindowDaysSchema).optional(),
     notificationsEnabled: z.coerce.boolean().optional(),
     notificationTier: z.enum(notificationTierEnum).optional(),
   })
@@ -370,7 +393,7 @@ export const selectUserSettingsSchema = z.object({
   userId: z.string(),
   dayStartHour: z.number().int().min(0).max(23),
   timezone: z.string().min(1).max(64),
-  windowDays: z.number().int().min(7).max(42),
+  windowDays: complianceWindowDaysSchema,
   notificationsEnabled: z.boolean(),
   notificationTier: z.enum(notificationTierEnum),
   updatedAt: z.date(),
