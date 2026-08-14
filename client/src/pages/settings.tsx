@@ -21,7 +21,7 @@ const TIMEZONE_OPTIONS = [
   'Australia/Sydney',
 ];
 
-const WINDOW_DAY_CHOICES = [7, 14, 21, 30];
+const WINDOW_DAY_CHOICES = [7, 14, 28, 42];
 
 const NOTIFICATION_TIERS = ['ADVISORY', 'WARNING', 'BREACH', 'PAGE'] as const;
 
