@@ -362,9 +362,21 @@ export class DatabaseStorage implements IStorage {
       const [migrated] = await db
         .update(userSettings)
         .set({ windowDays: normalizedWindowDays, updatedAt: new Date() })
-        .where(eq(userSettings.userId, userId))
+        .where(and(
+          eq(userSettings.userId, userId),
+          eq(userSettings.windowDays, existing.windowDays),
+        ))
         .returning();
-      return migrated;
+      if (migrated) return migrated;
+
+      // A concurrent PATCH replaced the legacy value after our read. Return
+      // that newer row instead of overwriting the user's canonical selection.
+      const [current] = await db
+        .select()
+        .from(userSettings)
+        .where(eq(userSettings.userId, userId));
+      if (!current) throw new Error("User settings disappeared during migration");
+      return current;
     }
     // First read for this user — insert defaults so subsequent reads + the
     // PATCH endpoint always have a row to update. onConflictDoNothing makes
