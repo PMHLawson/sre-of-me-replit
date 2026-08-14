@@ -1,3 +1,4 @@
+import React from 'react';
 import { AlertTriangle, AlertOctagon, Bell, Eye, ShieldCheck } from 'lucide-react';
 import type { DomainEscalation, EscalationHistoryEntry, EscalationTier } from '@shared/schema';
 import type { Domain } from '@/store';

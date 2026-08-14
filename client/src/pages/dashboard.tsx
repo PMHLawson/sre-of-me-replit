@@ -17,7 +17,7 @@ import {
 import { useAppStore, Domain, DomainStatus } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { NotificationBell } from '@/components/NotificationBell';
-import { TIER_STYLE, TIER_RANK } from '@/components/escalation-surface';
+import { TIER_STYLE, TIER_RANK, EscalationTimeline } from '@/components/escalation-surface';
 import { OverachievementBadge } from '@/components/overachievement-badge';
 import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useAuth } from '@/hooks/use-auth';
@@ -552,6 +552,16 @@ export default function Dashboard() {
             <ConnectedDomainCard key={domain} domain={domain} />
           ))}
         </div>
+
+        {/* Composite tier-history timeline — read-only historical reference.
+            Shown only when escalation data is loaded, ramp-up is not active,
+            and there is at least one day of history to display.
+            No domain prop → composite (highest-tier-per-day) view. */}
+        {escalationState && !isRampUp && escalationState.history.length > 0 && (
+          <div data-testid="dashboard-tier-timeline">
+            <EscalationTimeline history={escalationState.history} />
+          </div>
+        )}
 
         <DeviationSection />
 
