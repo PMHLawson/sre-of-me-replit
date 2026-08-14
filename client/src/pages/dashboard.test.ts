@@ -432,20 +432,17 @@ describe('Dashboard — composite EscalationTimeline present', () => {
   });
 });
 
+// Shared source read — used by the structural guard groups below.
+// All groups reference the live dashboard.tsx so any accidental revert is caught.
+const dashboardSource = fs.readFileSync(
+  path.resolve(__dirname, 'dashboard.tsx'),
+  'utf8',
+);
+
 // ─── Dashboard — EscalationStrip absent ──────────────────────────────────────
-// Regression guard: the old duplicate domain-button list must not reappear.
-// Checked via source text so the assertion survives future component refactors
-// that might accidentally re-import the orphaned EscalationStrip.
 
 describe('Dashboard — EscalationStrip absent', () => {
-  const dashboardSource = fs.readFileSync(
-    path.resolve(__dirname, 'dashboard.tsx'),
-    'utf8',
-  );
-
   it('dashboard.tsx does not render EscalationStrip', () => {
-    // Allow the identifier to appear in comments but not as a JSX element
-    // or component invocation. A bare import is also a violation signal.
     expect(dashboardSource).not.toMatch(/<EscalationStrip[\s/>]/);
   });
 
@@ -459,5 +456,112 @@ describe('Dashboard — EscalationStrip absent', () => {
 
   it('dashboard.tsx contains the dashboard-tier-timeline testid wrapper', () => {
     expect(dashboardSource).toContain('data-testid="dashboard-tier-timeline"');
+  });
+});
+
+// ─── Dashboard source — demo data selector absent ────────────────────────────
+// The validation/demo data dropdown (Standard / Healthy / Degraded / Mixed)
+// was a developer tool that should not appear in the user-facing dashboard.
+
+describe('Dashboard source — demo data selector absent', () => {
+  it('does not use setDemoState in the render tree', () => {
+    // setDemoState should not be called from JSX or event handlers in dashboard
+    expect(dashboardSource).not.toContain('setDemoState');
+  });
+
+  it('does not subscribe to demoState in the Dashboard component', () => {
+    // The Dashboard no longer reads demoState from the store
+    expect(dashboardSource).not.toContain("state.demoState");
+  });
+
+  it('does not contain the demo select element', () => {
+    // None of the demo option labels should appear
+    expect(dashboardSource).not.toContain('Data: Standard');
+    expect(dashboardSource).not.toContain('Data: Healthy');
+    expect(dashboardSource).not.toContain('Data: Degraded');
+    expect(dashboardSource).not.toContain('Data: Mixed');
+  });
+});
+
+// ─── Dashboard source — Tier History precedes Domains ────────────────────────
+// The composite timeline must appear before the Domains section so it provides
+// historical context immediately after System Health.
+
+describe('Dashboard source — Tier History precedes Domains in render order', () => {
+  it('dashboard-tier-timeline testid appears before domains-grid testid', () => {
+    const timelinePos = dashboardSource.indexOf('data-testid="dashboard-tier-timeline"');
+    const domainsPos  = dashboardSource.indexOf('data-testid="domains-grid"');
+    expect(timelinePos).toBeGreaterThan(-1);
+    expect(domainsPos).toBeGreaterThan(-1);
+    expect(timelinePos).toBeLessThan(domainsPos);
+  });
+
+  it('dashboard-tier-timeline testid appears before the Domains heading text', () => {
+    const timelinePos = dashboardSource.indexOf('data-testid="dashboard-tier-timeline"');
+    const headingPos  = dashboardSource.indexOf('>Domains<');
+    expect(timelinePos).toBeGreaterThan(-1);
+    expect(headingPos).toBeGreaterThan(-1);
+    expect(timelinePos).toBeLessThan(headingPos);
+  });
+});
+
+// ─── Dashboard narrow layout — no forced horizontal scroll ───────────────────
+// Structural guards that the layout survives common Android/PWA widths
+// (~360 px and ~412 px CSS pixels) without horizontal clipping.
+
+describe('Dashboard narrow layout — no forced horizontal scroll', () => {
+  it('header button row uses flex-wrap so icons can reflow below the title', () => {
+    expect(dashboardSource).toContain('flex-wrap justify-end');
+  });
+
+  it('Decide button label is hidden on extra-small viewports (hidden sm:inline)', () => {
+    expect(dashboardSource).toContain('hidden sm:inline');
+  });
+
+  it('Decide button uses responsive padding (px-3 sm:px-5) to stay compact on narrow screens', () => {
+    expect(dashboardSource).toContain('px-3 sm:px-5');
+  });
+
+  it('Decide button has an aria-label so it is accessible when the visible text is hidden', () => {
+    expect(dashboardSource).toContain('aria-label="Decide"');
+  });
+
+  it('Decide button visible text span is aria-hidden so screen readers use the button aria-label instead', () => {
+    // The hidden sm:inline span should be marked aria-hidden="true" to avoid
+    // double-announcing "Decide Decide" on viewports where the label is visible.
+    expect(dashboardSource).toContain('aria-hidden="true"');
+  });
+
+  it('domain cards use flex-wrap to prevent right-side badge overflow', () => {
+    // ConsolidatedDomainCard already has flex-wrap — verify it is still present
+    const cardHtml = renderToStaticMarkup(
+      React.createElement(ConsolidatedDomainCard, {
+        domain: 'martial-arts',
+        domainStatus: makeDomainStatus(),
+        esc: makeEsc('martial-arts', 'NOMINAL'),
+        isRampUp: false,
+        onClick: () => {},
+      }),
+    );
+    expect(cardHtml).toContain('flex-wrap');
+  });
+
+  it('domain cards use min-w-0 so text truncates before causing overflow', () => {
+    const cardHtml = renderToStaticMarkup(
+      React.createElement(ConsolidatedDomainCard, {
+        domain: 'fitness',
+        domainStatus: makeDomainStatus(),
+        esc: makeEsc('fitness', 'ADVISORY'),
+        isRampUp: false,
+        onClick: () => {},
+      }),
+    );
+    expect(cardHtml).toContain('min-w-0');
+  });
+
+  it('dashboard source contains no inline pixel widths wide enough to force scroll at 360 px', () => {
+    // style="width: NNNpx" with 3+ digits would force a minimum page width
+    const forcedWidths = dashboardSource.match(/style={{[^}]*width:\s*['"]?\d{3,}px/g) ?? [];
+    expect(forcedWidths).toHaveLength(0);
   });
 });

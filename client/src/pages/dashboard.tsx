@@ -335,9 +335,6 @@ export default function Dashboard() {
     return { score: average, status, color, bg, rationale };
   }, [sessions, policyState, escalationState, getDomainStatus]);
 
-  const demoState = useAppStore(state => state.demoState);
-  const setDemoState = useAppStore(state => state.setDemoState);
-
   // Sort domains most-severe-first; configured order is the stable tie-breaker.
   const orderedDomains = useMemo(
     () => sortedDomains(CONFIGURED_DOMAIN_ORDER, escalationState?.perDomain),
@@ -358,7 +355,7 @@ export default function Dashboard() {
               Capacity is built, not found.
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
             <NotificationBell />
             <button
               onClick={() => setLocation('/settings')}
@@ -371,11 +368,12 @@ export default function Dashboard() {
             <ThemeToggle />
             <button
               onClick={() => setLocation('/decide')}
-              className="h-10 px-5 rounded-full bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 active:scale-95 transition-transform shadow-md shadow-primary/20"
+              className="h-10 px-3 sm:px-5 rounded-full bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 active:scale-95 transition-transform shadow-md shadow-primary/20"
               data-testid="button-decide"
+              aria-label="Decide"
             >
               <GitPullRequestDraft className="w-4 h-4" />
-              Decide
+              <span className="hidden sm:inline" aria-hidden="true">Decide</span>
             </button>
             {/* User avatar + dropdown */}
             <div className="relative" ref={menuRef}>
@@ -503,26 +501,18 @@ export default function Dashboard() {
       </header>
 
       <main className="px-4 space-y-4">
-        {/* Single consolidated Domains section — replaces the separate
-            Escalation list and duplicate Domain list. Each card combines live
-            domain progress with the server-computed escalation tier and
-            error-budget from /api/escalation-state. Cards are sorted
-            most-severe-first; configured display order is the stable tie-breaker. */}
-        <div className="px-2 mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Domains</h2>
-          {/* Validation Data Control */}
-          <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg border border-border/50">
-            <select
-              value={demoState}
-              onChange={(e) => setDemoState(e.target.value as any)}
-              className="text-[10px] font-mono uppercase bg-transparent text-muted-foreground font-bold focus:outline-none cursor-pointer py-1 px-2"
-            >
-              <option value="default">Data: Standard</option>
-              <option value="overperforming">Data: Healthy</option>
-              <option value="degraded">Data: Degraded</option>
-              <option value="mixed">Data: Mixed</option>
-            </select>
+        {/* Composite tier-history timeline — positioned immediately after System
+            Health to give historical context before per-domain cards. Visibility:
+            escalation data loaded, ramp-up not active, at least one history day. */}
+        {escalationState && !isRampUp && escalationState.history.length > 0 && (
+          <div data-testid="dashboard-tier-timeline">
+            <EscalationTimeline history={escalationState.history} />
           </div>
+        )}
+
+        {/* Domains section — urgency-sorted per-domain consolidated cards. */}
+        <div className="px-2 mb-2">
+          <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Domains</h2>
         </div>
 
         {/* Ramp-up info callout — tiers are NOMINAL by server override; cards
@@ -552,16 +542,6 @@ export default function Dashboard() {
             <ConnectedDomainCard key={domain} domain={domain} />
           ))}
         </div>
-
-        {/* Composite tier-history timeline — read-only historical reference.
-            Shown only when escalation data is loaded, ramp-up is not active,
-            and there is at least one day of history to display.
-            No domain prop → composite (highest-tier-per-day) view. */}
-        {escalationState && !isRampUp && escalationState.history.length > 0 && (
-          <div data-testid="dashboard-tier-timeline">
-            <EscalationTimeline history={escalationState.history} />
-          </div>
-        )}
 
         <DeviationSection />
 
