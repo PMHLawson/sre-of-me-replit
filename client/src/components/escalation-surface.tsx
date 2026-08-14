@@ -2,7 +2,7 @@ import { AlertTriangle, AlertOctagon, Bell, Eye, ShieldCheck } from 'lucide-reac
 import type { DomainEscalation, EscalationHistoryEntry, EscalationTier } from '@shared/schema';
 import type { Domain } from '@/store';
 
-const TIER_STYLE: Record<EscalationTier, { text: string; bg: string; border: string; ring: string; Icon: typeof AlertTriangle }> = {
+export const TIER_STYLE: Record<EscalationTier, { text: string; bg: string; border: string; ring: string; Icon: typeof AlertTriangle }> = {
   NOMINAL:  { text: 'text-status-healthy',  bg: 'bg-status-healthy/10',  border: 'border-status-healthy/20',  ring: 'ring-status-healthy/20',  Icon: ShieldCheck   },
   ADVISORY: { text: 'text-status-advisory', bg: 'bg-status-advisory/10', border: 'border-status-advisory/20', ring: 'ring-status-advisory/20', Icon: Eye           },
   WARNING:  { text: 'text-status-degraded', bg: 'bg-status-degraded/10', border: 'border-status-degraded/20', ring: 'ring-status-degraded/20', Icon: AlertTriangle },
@@ -93,7 +93,7 @@ interface EscalationStripProps {
   onSelect?: (domain: Domain) => void;
 }
 
-const TIER_RANK: Record<EscalationTier, number> = {
+export const TIER_RANK: Record<EscalationTier, number> = {
   NOMINAL: 0, ADVISORY: 1, WARNING: 2, BREACH: 3, PAGE: 4,
 };
 
