@@ -370,9 +370,10 @@ export default function Dashboard() {
               onClick={() => setLocation('/decide')}
               className="h-10 px-3 sm:px-5 rounded-full bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 active:scale-95 transition-transform shadow-md shadow-primary/20"
               data-testid="button-decide"
+              aria-label="Decide"
             >
               <GitPullRequestDraft className="w-4 h-4" />
-              <span className="hidden sm:inline">Decide</span>
+              <span className="hidden sm:inline" aria-hidden="true">Decide</span>
             </button>
             {/* User avatar + dropdown */}
             <div className="relative" ref={menuRef}>

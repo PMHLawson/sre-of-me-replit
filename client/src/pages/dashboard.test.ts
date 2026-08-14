@@ -522,6 +522,16 @@ describe('Dashboard narrow layout — no forced horizontal scroll', () => {
     expect(dashboardSource).toContain('px-3 sm:px-5');
   });
 
+  it('Decide button has an aria-label so it is accessible when the visible text is hidden', () => {
+    expect(dashboardSource).toContain('aria-label="Decide"');
+  });
+
+  it('Decide button visible text span is aria-hidden so screen readers use the button aria-label instead', () => {
+    // The hidden sm:inline span should be marked aria-hidden="true" to avoid
+    // double-announcing "Decide Decide" on viewports where the label is visible.
+    expect(dashboardSource).toContain('aria-hidden="true"');
+  });
+
   it('domain cards use flex-wrap to prevent right-side badge overflow', () => {
     // ConsolidatedDomainCard already has flex-wrap — verify it is still present
     const cardHtml = renderToStaticMarkup(
