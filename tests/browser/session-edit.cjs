@@ -1,4 +1,4 @@
-// Run from candidate: node tests/browser/session-edit.cjs <evidence-directory>
+// Run from candidate: node tests/browser/session-edit.cjs <evidence-directory> [fresh-build-public-directory]
 // Existing Chromium through owned private pipes; no provider login or live DB.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -6,7 +6,7 @@ const http = require('node:http');
 const assert = require('node:assert/strict');
 const { startOwnedBrowser } = require('./owned-browser.cjs');
 const { fixture } = require('./session-edit-fixtures.cjs');
-const root = path.resolve(__dirname, '../../dist/public');
+const root = process.argv[3] ? path.resolve(process.argv[3]) : path.resolve(__dirname, '../../dist/public');
 const evidence = path.resolve(process.argv[2] || path.join(__dirname, '../../.local/review/somr326'));
 fs.mkdirSync(evidence, { recursive: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -131,9 +131,15 @@ async function main() {
       assert.equal(write.body.domain, 'music');
       assert.equal(write.body.durationMinutes, duration);
       const expectedMetadata = { isAnomaly: anomaly, anomalyNote: anomaly ? 'intentional synthetic practice' : null };
-      // Validate real request keys independently of synthetic "persistence".
-      assert.deepEqual({ isAnomaly: write.body.isAnomaly, anomalyNote: write.body.anomalyNote }, expectedMetadata,
-        'Save payload omitted or corrupted resolved anomaly metadata');
+      // Unavailable edits must leave authoritative metadata to the server;
+      // only a successful classification resolves explicit anomaly fields.
+      if (mode.startsWith('fail-open')) {
+        assert.equal(Object.hasOwn(write.body, 'isAnomaly'), false);
+        assert.equal(Object.hasOwn(write.body, 'anomalyNote'), false);
+      } else {
+        assert.deepEqual({ isAnomaly: write.body.isAnomaly, anomalyNote: write.body.anomalyNote }, expectedMetadata,
+          'Save payload omitted or corrupted resolved anomaly metadata');
+      }
       if (create) {
         assert.equal(write.body.notes, undefined, 'Create empty-note behavior changed');
         assert.equal(write.body.reason, undefined, 'Create gained edit reason');

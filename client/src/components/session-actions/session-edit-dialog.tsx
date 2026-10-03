@@ -21,6 +21,7 @@ import {
 import { AlertTriangle } from 'lucide-react';
 import type { AnomalyCheckResponse } from '@shared/schema';
 import type { Session, SessionPatch, Domain } from '@/store';
+import { checkAnomaly, anomalyFieldsForSave, type AnomalySaveDecision } from '@/lib/anomaly-preflight';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
   'martial-arts': 'Martial Arts',
@@ -96,15 +97,14 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
   }
 
   /** Final PATCH — called after any anomaly decision is resolved. */
-  const doSubmit = async (durationNum: number, isAnomaly: boolean, anomalyNoteValue: string | null) => {
+  const doSubmit = async (durationNum: number, decision: AnomalySaveDecision) => {
     if (!session) return;
     const patch: SessionPatch = {
       domain,
       durationMinutes: durationNum,
       timestamp: fromLocalInputValue(timestampLocal),
       notes: notes.trim() ? notes.trim() : null,
-      isAnomaly,
-      anomalyNote: isAnomaly ? anomalyNoteValue : null,
+      ...anomalyFieldsForSave(decision, true),
     };
     setStage('saving');
     try {
@@ -130,34 +130,24 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
 
     setStage('checking');
 
-    // Anomaly preflight — fail-open on network/server error (mirrors log-session).
-    try {
-      const res = await fetch('/api/sessions/anomaly-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain, durationMinutes: durationNum }),
-      });
-      if (res.ok) {
-        const result: AnomalyCheckResponse = await res.json();
-        if (result.isAnomaly) {
-          setAnomalyResult(result);
-          setAnomalyNote('');
-          setStage('anomaly');
-          return;
-        }
-      }
-    } catch {
-      // fail-open: proceed without anomaly flag
+    const check = await checkAnomaly({
+      domain, durationMinutes: durationNum, excludeSessionId: session.id,
+    });
+    if (check.kind === 'outlier') {
+      setAnomalyResult(check.result);
+      setAnomalyNote('');
+      setStage('anomaly');
+      return;
     }
 
-    await doSubmit(durationNum, false, null);
+    await doSubmit(durationNum, check);
   };
 
   /** Confirm the anomaly prompt and proceed to save. */
   const handleAnomalyConfirm = async () => {
     if (!anomalyNote.trim()) return;
     const durationNum = Number(duration);
-    await doSubmit(durationNum, true, anomalyNote.trim());
+    await doSubmit(durationNum, { kind: 'confirmed-outlier', note: anomalyNote.trim() });
   };
 
   /** Cancel the anomaly prompt and return to the edit form. */

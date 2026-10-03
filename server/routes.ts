@@ -245,7 +245,12 @@ export async function registerRoutes(
       // with long histories.
       const cutoff = new Date(Date.now() - BASELINE_DAYS * 24 * 60 * 60 * 1000);
       const sessions = await storage.getSessionsSince(userId, cutoff);
-      const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, sessions);
+      // The edited row is not one of its own historical peers. Exclusion is
+      // applied only to this already user-scoped, active history collection.
+      const peers = parsed.data.excludeSessionId
+        ? sessions.filter(session => session.id !== parsed.data.excludeSessionId)
+        : sessions;
+      const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, peers);
       // JSON cannot serialize Infinity; coerce to a large finite sentinel.
       const zScore = Number.isFinite(result.zScore) ? result.zScore : 9999;
       res.json({ ...result, zScore });

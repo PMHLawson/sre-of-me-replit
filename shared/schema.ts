@@ -47,6 +47,8 @@ export const insertSessionSchema = createInsertSchema(sessions)
 export const anomalyCheckRequestSchema = z.object({
   domain: z.enum(domainEnum),
   durationMinutes: z.number().int().positive(),
+  // Opaque session IDs (including generated UUIDs), not ownership claims.
+  excludeSessionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
 });
 
 /** POST /api/sessions/anomaly-check response payload. */

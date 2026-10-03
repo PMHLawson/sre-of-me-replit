@@ -4,6 +4,7 @@ import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Re
 import { useAppStore, Domain, DOMAIN_POLICY, type Session } from '@/store';
 import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
+import { checkAnomaly, anomalyFieldsForSave, type AnomalySaveDecision } from '@/lib/anomaly-preflight';
 
 type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving' | 'saved';
 
@@ -71,7 +72,7 @@ export default function LogSession() {
   // Decisions accumulated across modal prompts; passed explicitly to avoid
   // stale-closure reads when handlers re-invoke runSaveFlow.
   interface SaveDecisions {
-    anomaly: { isAnomaly: boolean; note: string | null } | null;
+    anomaly: AnomalySaveDecision | null;
     belowFloorAck: boolean;
     frequencyAck: boolean;
   }
@@ -79,31 +80,20 @@ export default function LogSession() {
   const runSaveFlow = async (decisions: SaveDecisions) => {
     setStage('saving');
 
-    // Step 1: anomaly check (fail-open on network/server error).
+    // Step 1: unavailable checks fail open without clearing stored metadata.
     let anomalyDecision = decisions.anomaly;
     if (!anomalyDecision) {
-      try {
-        const res = await fetch('/api/sessions/anomaly-check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ domain, durationMinutes: duration }),
-        });
-        if (res.ok) {
-          const result: AnomalyCheckResponse = await res.json();
-          if (result.isAnomaly) {
-            setAnomalyResult(result);
-            setAnomalyNote('');
-            setStage('anomaly');
-            return;
-          }
-        } else {
-          console.warn('anomaly-check returned non-OK status; proceeding without anomaly flag');
-        }
-        anomalyDecision = { isAnomaly: false, note: null };
-      } catch (err) {
-        console.warn('anomaly-check failed; proceeding without anomaly flag', err);
-        anomalyDecision = { isAnomaly: false, note: null };
+      const check = await checkAnomaly({
+        domain, durationMinutes: duration,
+        ...(editingSessionId ? { excludeSessionId: editingSessionId } : {}),
+      });
+      if (check.kind === 'outlier') {
+        setAnomalyResult(check.result);
+        setAnomalyNote('');
+        setStage('anomaly');
+        return;
       }
+      anomalyDecision = check;
     }
 
     // Step 2: below-floor advisory.
@@ -146,8 +136,7 @@ export default function LogSession() {
           durationMinutes: duration,
           timestamp: isoTimestamp,
           notes: trimmedNotes || null,
-          isAnomaly: anomalyDecision.isAnomaly,
-          anomalyNote: anomalyDecision.isAnomaly ? anomalyDecision.note : null,
+          ...anomalyFieldsForSave(anomalyDecision, true),
         },
         'Post-save edit',
       );
@@ -161,8 +150,7 @@ export default function LogSession() {
       durationMinutes: duration,
       timestamp: isoTimestamp,
       notes: trimmedNotes || undefined,
-      isAnomaly: anomalyDecision.isAnomaly,
-      anomalyNote: anomalyDecision.isAnomaly ? anomalyDecision.note : null,
+      ...anomalyFieldsForSave(anomalyDecision, false),
     });
 
     if (saved) {
@@ -196,7 +184,7 @@ export default function LogSession() {
     if (!trimmed) return;
     const next: SaveDecisions = {
       ...pendingDecisionsRef.current,
-      anomaly: { isAnomaly: true, note: trimmed },
+      anomaly: { kind: 'confirmed-outlier', note: trimmed },
     };
     pendingDecisionsRef.current = next;
     setAnomalyResult(null);

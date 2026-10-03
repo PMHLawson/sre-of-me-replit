@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import { createServer } from "node:http";
 
@@ -163,4 +163,67 @@ describe("mature anomaly-check HTTP serialization", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("edited-session anomaly baseline exclusion", () => {
+  const now = new Date("2026-10-03T12:00:00Z");
+  const peers = Array.from({ length: 8 }, (_, i) => ({
+    ...existing, id: `peer-${i}`, durationMinutes: i % 2 ? 40 : 20,
+    timestamp: new Date(`2026-09-${21 + i}T12:00:00Z`),
+  }));
+  const flagged = { ...existing, durationMinutes: 51, isAnomaly: true, anomalyNote: "intentional practice" };
+
+  async function preview(extra: Record<string, unknown> = {}) {
+    const response = await fetch(`${base}/api/sessions/anomaly-check`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: "music", durationMinutes: 51, ...extra }),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const rows = [
+      ...peers, flagged,
+      { ...existing, id: "other-owner-session", userId: "another-synthetic-user", durationMinutes: 900 },
+      { ...existing, id: "deleted", durationMinutes: 900, deletedAt: now },
+      { ...existing, id: "old", durationMinutes: 900, timestamp: new Date("2026-08-01") },
+      { ...existing, id: "future", durationMinutes: 900, timestamp: new Date("2026-10-04") },
+      { ...existing, id: "other-domain", domain: "fitness", durationMinutes: 900 },
+    ];
+    // Synthetic storage obeys the real history query's user/deletion/cutoff contract.
+    mocks.getSessionsSince.mockImplementation(async (userId: string, cutoff: Date) =>
+      rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= cutoff));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("classifies the flagged51m edit against its eight20/40m peers, not itself", async () => {
+    expect(await preview({ excludeSessionId: flagged.id, userId: "forged-user" })).toEqual({
+      status: 200, body: { isAnomaly: true, coldStart: false, sampleCount: 8, mean: 30, stdDev: 10, zScore: 2.1 },
+    });
+    expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+  });
+  it.each([undefined, "unmatched-session", "other-owner-session"])(
+    "preserves existing create behavior for missing/unmatched/other-owner exclusion %s", async excludeSessionId => {
+      expect(await preview({ excludeSessionId })).toEqual({
+        status: 200, body: detectAnomaly("music", 51, [...peers, flagged], { now }),
+      });
+      expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+    },
+  );
+  it("independently demonstrates the original self-dilution from2.10 to1.62", () => {
+    expect(detectAnomaly("music", 51, peers, { now })).toEqual({
+      isAnomaly: true, coldStart: false, sampleCount: 8, mean: 30, stdDev: 10, zScore: 2.1,
+    });
+    expect(detectAnomaly("music", 51, [...peers, flagged], { now }).zScore).toBe(1.62);
+    expect(detectAnomaly("music", 51, [...peers, flagged], { now }).isAnomaly).toBe(false);
+  });
+  it.each([null, "", " ", " padded ", "line\nbreak", {}, [], 123, true, "x".repeat(129), "a/b"])(
+    "rejects unusable exclusion identifiers %# before history access", async excludeSessionId => {
+      const result = await preview({ excludeSessionId });
+      expect(result.status).toBe(400);
+      expect(result.body.message).toBe("Invalid anomaly-check request");
+      expect(mocks.getSessionsSince).not.toHaveBeenCalled();
+    },
+  );
 });
