@@ -68,12 +68,19 @@ export type AnomalyCheckResponse = z.infer<typeof anomalyCheckResponseSchema>;
  * PATCH /api/sessions/:id payload. All session fields are optional, but
  * `reason` (the edit-history note) is required so every change is audited.
  */
+// Check content without transforming the supplied explanation. In particular,
+// max(500) applies to the original text, including intentional padding.
+const explanationSchema = z.string().min(1).max(500).refine(
+  value => value.trim().length > 0,
+  { message: "Explanation must contain non-whitespace text" },
+);
+
 export const updateSessionSchema = z.object({
   domain: z.enum(domainEnum).optional(),
   durationMinutes: z.number().int().positive().optional(),
   timestamp: z.string().datetime({ offset: true }).optional(),
   notes: z.string().nullable().optional(),
-  reason: z.string().min(1).max(500),
+  reason: explanationSchema,
   // C1.1 — Anomaly fields mirror insertSessionSchema so the edit path can
   // persist a re-evaluated flag when the duration changes.
   isAnomaly: z.boolean().optional(),
@@ -322,14 +329,14 @@ export const insertDeviationSchema = createInsertSchema(deviations)
   .omit({ id: true, userId: true, endedAt: true, deletedAt: true })
   .extend({
     domain: z.enum(domainEnum),
-    reason: z.string().min(1).max(500),
+    reason: explanationSchema,
     startAt: z.string().datetime({ offset: true }),
     endAt: z.string().datetime({ offset: true }).nullable().optional(),
     excludeFromComposite: z.boolean().optional(),
   });
 
 export const updateDeviationSchema = z.object({
-  reason: z.string().min(1).max(500).optional(),
+  reason: explanationSchema.optional(),
   startAt: z.string().datetime({ offset: true }).optional(),
   endAt: z.string().datetime({ offset: true }).nullable().optional(),
   excludeFromComposite: z.boolean().optional(),
