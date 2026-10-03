@@ -146,6 +146,8 @@ export default function LogSession() {
           durationMinutes: duration,
           timestamp: isoTimestamp,
           notes: trimmedNotes || null,
+          isAnomaly: anomalyDecision.isAnomaly,
+          anomalyNote: anomalyDecision.isAnomaly ? anomalyDecision.note : null,
         },
         'Post-save edit',
       );
