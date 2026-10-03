@@ -6,16 +6,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { storage } from "./storage";
-
-/**
- * Soft-deleted sessions older than this window are hard-deleted at startup.
- * Aligned with .250 Security Design Document checklist item #10
- * (42-day retention). The user-facing "Recently Deleted" copy in B2.3
- * does not name a specific number, so widening the window from 30d to
- * 42d only extends the recovery promise; nothing in the UI breaks.
- */
-const SESSION_RETENTION_DAYS = 42;
-const SESSION_RETENTION_MS = SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+import { runStartupRetention } from "./startup-retention";
 
 const app = express();
 const httpServer = createServer(app);
@@ -176,22 +167,13 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
 
-      // Fire-and-forget retention purge so a transient DB hiccup never blocks
-      // startup. The query is idempotent (predicate-gated to expired rows only)
-      // so re-running on the next restart is safe.
-      const cutoff = new Date(Date.now() - SESSION_RETENTION_MS);
-      storage
-        .purgeExpiredDeletedSessions(cutoff)
-        .then((count) => {
-          log(
-            `purged ${count} soft-deleted session${count === 1 ? "" : "s"} ` +
-              `older than ${SESSION_RETENTION_DAYS}d`,
-            "retention",
-          );
-        })
-        .catch((err) => {
-          console.error("[retention] purgeExpiredDeletedSessions failed:", err);
-        });
+      // Preserve activity by default. Only the exact documented opt-in permits
+      // the existing fire-and-forget 42-day purge; keep it off during recovery.
+      void runStartupRetention({
+        optIn: process.env.SESSION_RETENTION_PURGE_ENABLED,
+        storage,
+        log,
+      });
     },
   );
 })();
