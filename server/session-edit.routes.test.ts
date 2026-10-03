@@ -218,7 +218,29 @@ describe("edited-session anomaly baseline exclusion", () => {
     expect(detectAnomaly("music", 51, [...peers, flagged], { now }).zScore).toBe(1.62);
     expect(detectAnomaly("music", 51, [...peers, flagged], { now }).isAnomaly).toBe(false);
   });
-  it.each([null, "", " ", " padded ", "line\nbreak", {}, [], 123, true, "x".repeat(129), "a/b"])(
+  it.each(["session:/part?#% '\"; --", "x".repeat(512), " padded ", "line\nbreak", " "])(
+    "excludes an exact matching opaque identifier %# without an alphabet or length policy", async id => {
+      const rows = [...peers, { ...flagged, id },
+        { ...flagged, id, userId: "another-synthetic-user", durationMinutes: 900 }];
+      mocks.getSessionsSince.mockImplementation(async (userId: string, cutoff: Date) =>
+        rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= cutoff));
+      expect(await preview({ excludeSessionId: id, userId: "forged-user" })).toEqual({
+        status: 200, body: { isAnomaly: true, coldStart: false, sampleCount: 8, mean: 30, stdDev: 10, zScore: 2.1 },
+      });
+      // Only the existing scoped history query runs; the ID is not a query
+      // argument, an ownership lookup, or interpolated SQL.
+      expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+      expect(mocks.updateSession).not.toHaveBeenCalled();
+    },
+  );
+  it("treats an unmatched SQL-looking identifier as inert exact-match data", async () => {
+    expect(await preview({ excludeSessionId: "'); DROP TABLE sessions; --" })).toEqual({
+      status: 200, body: detectAnomaly("music", 51, [...peers, flagged], { now }),
+    });
+    expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+  });
+  it.each([null, "", {}, [], 123, true])(
     "rejects unusable exclusion identifiers %# before history access", async excludeSessionId => {
       const result = await preview({ excludeSessionId });
       expect(result.status).toBe(400);

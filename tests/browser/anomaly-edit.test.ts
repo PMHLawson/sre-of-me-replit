@@ -92,6 +92,14 @@ it("drives both edit screens with real classification routes and owned synthetic
   });
   expect(result.runtimeExceptions).toEqual([]);
   expect(result.cleanup.errors).toEqual([]);
+  expect(result.validation.ok).toBe(true);
+  expect(result.validation.complete).toBe(true);
+  expect(result.validation.expectedCount).toBe(inject("reviewPhase") === "before" ? 40 : 109);
+  expect(result.results).toHaveLength(result.validation.expectedCount);
+  expect(result.harnessErrors).toEqual([]);
+  expect(result.unexpectedConsoleErrors).toEqual([]);
+  expect(result.cleanup.browser.processExitConfirmed).toBe(true);
+  expect(result.cleanup.browser.temporaryResourcesRemoved).toBe(true);
   expect(result.checks).toHaveLength(inject("reviewPhase") === "before" ? 10 : 25);
   expect(result.results.some((r: { id: string }) => r.id.endsWith("-harness"))).toBe(false);
   if (inject("reviewPhase") === "before") expect(result.failing).toBeGreaterThan(0);

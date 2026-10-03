@@ -1,23 +1,24 @@
 const fs=require('node:fs'),path=require('node:path'),{performance}=require('node:perf_hooks');
 const {startOwnedBrowser}=require('./owned-browser.cjs');
 const {fixture}=require('./session-edit-fixtures.cjs');
+const {modes,completeReview}=require('./anomaly-edit-report.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function runReview({origin,phase,evidence,reset,state}) {
+async function runReview({origin,phase,evidence,reset,state,startBrowser=startOwnedBrowser,writeFile=fs.writeFileSync}) {
   if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin))throw Error('Owned origin required');
   fs.mkdirSync(evidence,{recursive:true});
-  let browser,mode='setup',surface,synthetic;
-  const results=[],checks=[],exceptions=[],consoleErrors=[],responses=[],pendingBodies=[];
+  let browser,browserMetadata,mode='setup',surface,synthetic,stage='setup';
+  const results=[],checks=[],exceptions=[],consoleErrors=[],responses=[],pendingOperations=[],harnessErrors=[];
   const responseRequests=new Map();
   const record=(id,pass,expected,actual,screenshot)=>results.push({id,result:pass?'PASS':'FAIL',expected,actual,screenshot});
   try {
-    browser=await startOwnedBrowser();
+    browser=await startBrowser();
     const rpc=browser.rpc;
     browser.onEvent(m=>{
       if(m.method==='Runtime.exceptionThrown')exceptions.push(m.params.exceptionDetails.exception?.description||m.params.exceptionDetails.text);
       if(m.method==='Runtime.consoleAPICalled'&&m.params.type==='error')consoleErrors.push({mode,surface,message:m.params.args.map(a=>a.value||a.description).join(' ')});
       if(m.method!=='Fetch.requestPaused')return;
       const {request,requestId}=m.params;
-      (async()=>{
+      pendingOperations.push((async()=>{
         const u=new URL(request.url);
         if(u.origin!==origin)return rpc('Fetch.failRequest',{requestId,errorReason:'BlockedByClient'});
         if(u.pathname==='/api/sessions/anomaly-check') {
@@ -33,7 +34,7 @@ async function runReview({origin,phase,evidence,reset,state}) {
         if(u.pathname==='/api/sessions'||u.pathname.startsWith('/api/sessions/'))
           return rpc('Fetch.continueRequest',{requestId});
         return synthetic.respond(request,requestId,rpc);
-      })().catch(e=>exceptions.push(String(e)));
+      })().catch(e=>exceptions.push(String(e))));
     });
     await rpc('Page.enable');await rpc('Runtime.enable');await rpc('Network.enable');
     browser.onEvent(m=>{
@@ -43,10 +44,16 @@ async function runReview({origin,phase,evidence,reset,state}) {
       }
       if(m.method==='Network.loadingFinished'&&responseRequests.has(m.params.requestId)) {
         const response=responseRequests.get(m.params.requestId);
-        pendingBodies.push(rpc('Network.getResponseBody',{requestId:m.params.requestId}).then(r=>{
+        pendingOperations.push(rpc('Network.getResponseBody',{requestId:m.params.requestId}).then(r=>{
           try {response.body=JSON.parse(r.base64Encoded?Buffer.from(r.body,'base64').toString():r.body);}
-          catch {response.body='Deliberately invalid synthetic JSON';}
-        }).catch(e=>{response.bodyUnavailable=String(e);}));
+          catch(e) {
+            if(!response.mode.startsWith('parse'))throw e;
+            response.body='Deliberately invalid synthetic JSON';
+          }
+        }).catch(e=>{
+          response.bodyUnavailable=String(e);
+          harnessErrors.push({stage:'response-body',error:String(e)});
+        }));
       }
     });
     await rpc('Fetch.enable',{patterns:[{urlPattern:'*'}]});
@@ -78,11 +85,9 @@ async function runReview({origin,phase,evidence,reset,state}) {
       const r=await rpc('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
       const file=name+'.png';fs.writeFileSync(path.join(evidence,file),Buffer.from(r.data,'base64'));return file;
     }
-    for(const screen of ['full','dialog']) {
-      const modes=phase==='before'?['http','network','parse','unusable','outlier']:
-        screen==='full'?['http','network','parse','unusable','ordinary','outlier','cancel','save-failure','http-ack','network-ack','parse-ack','unusable-ack','ordinary-ack','outlier-ack','create-ordinary','create-outlier','create-http']:
-        ['http','network','parse','unusable','ordinary','outlier','cancel','save-failure'];
-      for(const nextMode of modes) {
+    stage='matrix';
+    for(const [screen,scenarios] of Object.entries(modes[phase])) {
+      for(const nextMode of scenarios) {
         surface=screen;mode=nextMode;reset(mode);synthetic=fixture('ordinary',origin);
         const startChecks=checks.length,id=screen+'-'+mode,create=mode.startsWith('create-');
         const duration=mode.includes('ack')?(mode==='outlier-ack'?5:10):mode==='ordinary'||mode==='create-ordinary'||mode==='create-http'?30:mode==='cancel'||mode==='save-failure'||mode==='create-outlier'?70:51;
@@ -145,20 +150,25 @@ async function runReview({origin,phase,evidence,reset,state}) {
             'Successful classification traverses actual registered route and detector, not canned response',st.trace,image);
           if(unavailable&&!create)record(id+'-no-stale-metadata-write',!('isAnomaly'in st.writes[0].patch)&&!('anomalyNote'in st.writes[0].patch),
             'Unavailable classification omits metadata so stored authoritative values survive',st.writes[0],image);
-        } catch(e) {record(id+'-harness',false,'Scenario completes in bounded time',{error:String(e),state:structuredClone(state()),checks:checks.slice(startChecks)},await shot(id+'-failure'));}
+        } catch(e) {
+          harnessErrors.push({stage:'scenario',scenario:id,error:String(e)});
+          const failure={id:id+'-harness',result:'FAIL',actual:{error:String(e)}};
+          results.push(failure);
+          try {failure.actual.state=structuredClone(state());}
+          catch(error){harnessErrors.push({stage:'failure-snapshot',scenario:id,error:String(error)});}
+          try {failure.screenshot=await shot(id+'-failure');}
+          catch(error){harnessErrors.push({stage:'failure-screenshot',scenario:id,error:String(error)});}
+        }
       }
     }
-  } finally {
-    await Promise.allSettled(pendingBodies);
-    const cleanup={errors:[]};
-    try {if(browser)await browser.close();}catch(e){cleanup.errors.push(String(e));}
-    cleanup.browser=browser?.metadata;
-    const report={source:'Actual registered anomaly/GET/PATCH/POST routes with synthetic in-memory owned rows; fake principal, not real provider auth',
-      phase,results,checks,responses,runtimeExceptions:exceptions,consoleErrors,cleanup,
-      passing:results.filter(x=>x.result==='PASS').length,failing:results.filter(x=>x.result==='FAIL').length};
-    fs.writeFileSync(path.join(evidence,'browser-results.json'),JSON.stringify(report,null,2));
-    fs.writeFileSync(path.join(evidence,'browser-cleanup.json'),JSON.stringify(cleanup,null,2));
-    return report;
+  } catch(error) {
+    harnessErrors.push({stage,error:String(error)});
+    browserMetadata=error.browserMetadata;
   }
+  return completeReview({
+    report:{source:'Actual registered anomaly/GET/PATCH/POST routes with synthetic in-memory owned rows; fake principal, not real provider auth',
+      phase,results,checks,responses,runtimeExceptions:exceptions,consoleErrors,harnessErrors},
+    browser,browserMetadata,evidence,pendingOperations,writeFile,
+  });
 }
 module.exports={runReview};
