@@ -4,7 +4,7 @@ import { format, parseISO } from 'date-fns';
 import { ArrowLeft, Plus, Activity, BrainCircuit, Dumbbell, Music, CalendarOff } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY, findActiveDeviationAt, type Session } from '@/store';
 import { buildChartData, buildTodayDatum, sumWindowMinutes, sumTodayMinutes, type ChartDatum } from '@/lib/domain-detail-aggregation';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, ReferenceArea, Cell, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, ReferenceArea, Cell, Rectangle, ResponsiveContainer } from 'recharts';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { EscalationCard, EscalationTimeline } from '@/components/escalation-surface';
 import { SessionEditDialog } from '@/components/session-actions/session-edit-dialog';
@@ -44,14 +44,25 @@ const BAR_SLOT_MED    = 30;  // 14d
 const BAR_SLOT_WIDE   = 24;  // 28d / 42d
 const CHART_HEIGHT    = 180;
 
-// Approximate Recharts plot-area geometry for the fixed 180px height.
-// Used to align the Today column bar height with the completed-day bars.
-//   margin.top = 8  (from the BarChart margin prop)
-//   XAxis area ≈ 22px (dy=8 offset + 9px font + internal padding)
-// Plot height = CHART_HEIGHT - top - xAxis ≈ 150px
-const CHART_TOP_MARGIN = 8;
-const X_AXIS_HEIGHT    = 22;
-const CHART_PLOT_H     = CHART_HEIGHT - CHART_TOP_MARGIN - X_AXIS_HEIGHT; // ≈ 150
+// Shared, explicit plot geometry for Recharts and the pinned Today column.
+// The top band reserves room for the above-bar anomaly marker.
+const CHART_TOP_MARGIN = 18;
+const CHART_BOTTOM_MARGIN = 0;
+const X_AXIS_HEIGHT = 22;
+const Y_AXIS_WIDTH = 40;
+const CHART_PLOT_H = CHART_HEIGHT - CHART_TOP_MARGIN - CHART_BOTTOM_MARGIN - X_AXIS_HEIGHT;
+const CHART_MARGIN = { top: CHART_TOP_MARGIN, right: 12, left: 0, bottom: CHART_BOTTOM_MARGIN };
+
+function chartTicks(max: number): number[] {
+  if (!(max > 0)) return [0];
+  const roughStep = max / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalized = roughStep / magnitude;
+  const step = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10) * magnitude;
+  const ticks: number[] = [];
+  for (let value = 0; value <= max; value += step) ticks.push(value);
+  return ticks;
+}
 
 // ChartDatum is defined in domain-detail-aggregation.ts and re-exported here
 // for the ChartBars component and tooltip/marker helpers defined below.
@@ -65,6 +76,8 @@ type ChartBarsProps = {
   viewDays: number;
   policyDailyProRate: number;
   policySessionFloor: number;
+  yAxisTicks: number[];
+  yAxisWidth: number;
   getBarOpacity: (tier: string) => number;
   /** When provided, fixes the YAxis domain to [0, yDomainMax] so the scale
    *  matches the separately-rendered Today reference column exactly. */
@@ -148,12 +161,12 @@ function AnomalyMarker({ x, y, width, payload }: AnomalyMarkerProps): React.Reac
   const cy = y - 6;
   return (
     <g pointerEvents="none">
-      <circle cx={cx} cy={cy} r={3} fill={ANOMALY_COLOR} stroke="#FFFFFF" strokeWidth={0.5} />
+      <circle data-testid="chart-anomaly-marker" cx={cx} cy={cy} r={3} fill={ANOMALY_COLOR} stroke="#FFFFFF" strokeWidth={0.5} />
     </g>
   );
 }
 
-export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity, yDomainMax }: ChartBarsProps) {
+export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, viewDays, policyDailyProRate, policySessionFloor, getBarOpacity, yDomainMax, yAxisTicks, yAxisWidth }: ChartBarsProps) {
   const runs = deviationRuns(data);
   const internals = [
     <XAxis
@@ -165,13 +178,16 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
       tickFormatter={(_v: string, idx: number) => data[idx]?.dayLabel ?? ''}
       dy={8}
       interval={viewDays <= 7 ? 0 : viewDays <= 14 ? 1 : 6}
+      height={X_AXIS_HEIGHT}
     />,
     <YAxis
       key="y-axis"
       axisLine={false}
       tickLine={false}
-      tick={{ fontSize: 10, fill: '#A9BBC2', fontWeight: 500 }}
-      width={32}
+      width={yAxisWidth}
+      ticks={yAxisTicks}
+      interval={0}
+      tick={false}
       domain={yDomainMax !== undefined ? [0, yDomainMax] : [0, 'auto']}
     />,
     <Tooltip
@@ -198,6 +214,7 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
     <ReferenceLine
       key="ref-floor"
       y={policySessionFloor}
+      data-testid="chart-floor"
       stroke="#A9BBC2"
       strokeOpacity={0.45}
       strokeDasharray="2 4"
@@ -206,6 +223,7 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
     <ReferenceLine
       key="ref-target"
       y={policyDailyProRate}
+      data-testid="chart-target"
       stroke={accentHex}
       strokeOpacity={0.35}
       strokeDasharray="3 3"
@@ -216,7 +234,8 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
       dataKey="minutes"
       radius={[4, 4, 0, 0]}
       maxBarSize={viewDays <= 7 ? 52 : viewDays <= 14 ? 36 : 18}
-      label={AnomalyMarker}
+      shape={(props: any) => <Rectangle {...props} data-testid="chart-bar" />}
+      label={(props: any) => <AnomalyMarker {...props} payload={data[props.index]} />}
       isAnimationActive={false}
     >
       {data.map((entry, idx) => {
@@ -237,8 +256,8 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
 
   if (needsScroll) {
     return (
-      <div style={{ width: fixedWidth }}>
-        <BarChart width={fixedWidth} height={height} data={data} margin={{ top: 8, right: 12, left: -20, bottom: 0 }} barCategoryGap="18%">
+      <div style={{ width: fixedWidth, height }} data-testid="chart-plot">
+        <BarChart width={fixedWidth} height={height} data={data} margin={CHART_MARGIN} barCategoryGap="18%">
           {internals}
         </BarChart>
       </div>
@@ -246,11 +265,13 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
   }
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 12, left: -20, bottom: 0 }} barCategoryGap="18%">
-        {internals}
-      </BarChart>
-    </ResponsiveContainer>
+    <div style={{ width: '100%', height }} data-testid="chart-plot">
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart data={data} margin={CHART_MARGIN} barCategoryGap="18%">
+          {internals}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -265,8 +286,8 @@ export function ChartBars({ data, accentHex, needsScroll, fixedWidth, height, vi
 //
 // Geometry constants (see CHART_TOP_MARGIN / X_AXIS_HEIGHT at the top of file):
 //   Total column height = CHART_HEIGHT = 180px
-//     8px top-margin band  (mirrors Recharts margin.top — for minute label)
-//   150px plot area        (bar grows from bottom; floor line rendered here)
+//    18px top-margin band  (mirrors Recharts margin.top — reserves marker space)
+//   140px plot area        (bar grows from bottom; reference lines render here)
 //    22px x-axis band      (TODAY label + pulsing LIVE dot)
 
 type TodayColumnProps = {
@@ -274,14 +295,15 @@ type TodayColumnProps = {
   yDomainMax: number;
   accentHex: string;
   policySessionFloor: number;
+  policyDailyProRate: number;
   viewDays: number;
 };
 
-function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewDays }: TodayColumnProps) {
-  // Bar height in pixels, proportional to the shared Y scale.
-  // Minimum 2px so a zero-today shows a clear baseline rather than nothing.
-  const barPx   = yDomainMax > 0 ? Math.round((minutes          / yDomainMax) * CHART_PLOT_H) : 0;
-  const floorPx = yDomainMax > 0 ? Math.round((policySessionFloor / yDomainMax) * CHART_PLOT_H) : 0;
+function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, policyDailyProRate, viewDays }: TodayColumnProps) {
+  // Fractional pixels preserve the completed chart's exact shared Y scale.
+  const barPx = yDomainMax > 0 ? (minutes / yDomainMax) * CHART_PLOT_H : 0;
+  const floorPx = yDomainMax > 0 ? (policySessionFloor / yDomainMax) * CHART_PLOT_H : 0;
+  const targetPx = yDomainMax > 0 ? (policyDailyProRate / yDomainMax) * CHART_PLOT_H : 0;
   const isZero  = minutes === 0;
 
   // Match the bar width to the current view's bar-size tier.
@@ -291,10 +313,7 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
 
   return (
     <div
-      className="flex shrink-0 items-end self-end"
-      // Align bottom of Today column with bottom of the chart SVG.
-      // `self-end` on this element inside `items-end` flex parent is redundant
-      // but explicit for clarity.
+      className="flex shrink-0 items-start"
       style={{ height: CHART_HEIGHT }}
       data-testid="col-today-reference"
     >
@@ -303,7 +322,8 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
         className="shrink-0 self-stretch mx-2"
         style={{
           width: 1,
-          marginBottom: X_AXIS_HEIGHT,
+          marginTop: CHART_TOP_MARGIN,
+          marginBottom: X_AXIS_HEIGHT + CHART_BOTTOM_MARGIN,
           borderLeft: `1.5px dashed`,
           borderColor: `${accentHex}55`,
         }}
@@ -315,7 +335,7 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
         className="flex flex-col"
         style={{ width: colWidthPx, height: CHART_HEIGHT }}
       >
-        {/* ── Top margin band (8px) — minute value label ── */}
+        {/* ── Top margin band — minute value label ── */}
         <div
           className="flex items-center justify-center shrink-0"
           style={{ height: CHART_TOP_MARGIN }}
@@ -323,10 +343,11 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
           {/* intentionally empty — minute label is absolutely positioned in plot area */}
         </div>
 
-        {/* ── Plot area (150px) — bar + floor line + minute label ── */}
+        {/* ── Plot area (140px) — bar + reference lines + minute label ── */}
         <div
-          className="relative flex items-end justify-center flex-1"
-          style={{ minHeight: 0 }}
+          className="relative flex items-end justify-center shrink-0"
+          style={{ height: CHART_PLOT_H }}
+          data-testid="plot-today-reference"
         >
           {/* Session-floor reference line — same height calculation as ChartBars */}
           {floorPx > 0 && (
@@ -336,9 +357,16 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
                 bottom: floorPx,
                 borderTop: '1px dashed rgba(169,187,194,0.45)',
               }}
+              data-testid="line-today-floor"
               aria-hidden="true"
             />
           )}
+          <div
+            className="absolute left-0 right-0 pointer-events-none"
+            style={{ bottom: targetPx, borderTop: `1px dashed ${accentHex}88` }}
+            data-testid="line-today-target"
+            aria-hidden="true"
+          />
 
           {/* Minute value — floated above the bar */}
           <div
@@ -357,13 +385,14 @@ function TodayColumn({ minutes, yDomainMax, accentHex, policySessionFloor, viewD
             className="rounded-t-sm"
             style={{
               width: '70%',
-              height: Math.max(barPx, 2),
+               height: isZero ? 2 : barPx,
               backgroundColor: isZero ? 'transparent' : accentHex,
               opacity: isZero ? 1 : 0.85,
               border: `1.5px dashed ${accentHex}`,
               borderBottom: isZero ? `1.5px dashed ${accentHex}` : 'none',
               boxSizing: 'border-box',
             }}
+            data-testid="bar-today-reference"
           />
         </div>
 
@@ -561,10 +590,15 @@ export default function DomainDetail() {
   // Include today's minutes so a large today session doesn't clip above the axis.
   const yDomainMax = useMemo(() => {
     const dataMax = chartData.reduce((m, d) => Math.max(m, d.minutes), 0);
-    const raw     = Math.max(policy.dailyProRate, dataMax, todayMinutes);
+    const raw = Math.max(policy.dailyProRate, policy.sessionFloor, dataMax, todayMinutes);
     // Round up to the nearest 5 and add 15% headroom so bars never touch the top.
     return Math.ceil(raw * 1.15 / 5) * 5;
-  }, [chartData, todayMinutes, policy.dailyProRate]);
+  }, [chartData, todayMinutes, policy.dailyProRate, policy.sessionFloor]);
+  const yAxisTicks = useMemo(() => chartTicks(yDomainMax), [yDomainMax]);
+  const yAxisWidth = Math.max(
+    Y_AXIS_WIDTH,
+    ...yAxisTicks.map((tick) => String(tick).length * 7 + 12),
+  );
 
   // Responsive vs. fixed-scroll strategy
   // ≤14d: fills full container width via ResponsiveContainer (no scroll needed)
@@ -860,7 +894,27 @@ export default function DomainDetail() {
                The Today column sits OUTSIDE the scroll container so it remains visible
                when the user pans through 28d / 42d history. Both share `yDomainMax` so
                bar heights are proportionally truthful on the same Y scale. */}
-          <div className="flex items-end pb-2">
+          <div className="flex items-start pb-2">
+
+            {/* Fixed Y-axis labels remain readable while the plot scrolls. */}
+            <div
+              className="relative shrink-0"
+              style={{ width: yAxisWidth, height: CHART_HEIGHT }}
+              data-testid="chart-y-axis"
+            >
+              {yAxisTicks.map((tick) => (
+                <span
+                  key={tick}
+                  className="absolute right-1 text-[10px] leading-3 font-medium text-[#A9BBC2] text-right"
+                  style={{
+                    top: CHART_TOP_MARGIN + CHART_PLOT_H * (1 - tick / yDomainMax) - 6,
+                    width: yAxisWidth - 8,
+                  }}
+                >
+                  {tick}
+                </span>
+              ))}
+            </div>
 
             {/* ── Completed-day bars (scrollable for >14d) ── */}
             <div
@@ -877,6 +931,8 @@ export default function DomainDetail() {
                 viewDays={viewDays}
                 policyDailyProRate={policy.dailyProRate}
                 policySessionFloor={policy.sessionFloor}
+                yAxisTicks={yAxisTicks}
+                yAxisWidth={yAxisWidth}
                 getBarOpacity={getBarOpacity}
                 yDomainMax={yDomainMax}
               />
@@ -889,6 +945,7 @@ export default function DomainDetail() {
                 yDomainMax={yDomainMax}
                 accentHex={accentHex}
                 policySessionFloor={policy.sessionFloor}
+                policyDailyProRate={policy.dailyProRate}
                 viewDays={viewDays}
               />
             )}
