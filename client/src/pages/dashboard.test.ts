@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { Router } from 'wouter';
 import {
   sortedDomains,
   CONFIGURED_DOMAIN_ORDER,
@@ -144,13 +145,18 @@ const renderCard = (
   isRampUp = false,
 ): string =>
   renderToStaticMarkup(
-    React.createElement(ConsolidatedDomainCard, {
-      domain,
-      domainStatus,
-      esc,
-      isRampUp,
-      onClick: () => {},
-    }),
+    React.createElement(
+      Router,
+      {
+        hook: () => ['/', () => {}] as [string, (to: string) => void],
+        children: React.createElement(ConsolidatedDomainCard, {
+          domain,
+          domainStatus,
+          esc,
+          isRampUp,
+        }),
+      },
+    ),
   );
 
 // ─── ConsolidatedDomainCard — one card per domain ────────────────────────────
@@ -300,17 +306,22 @@ describe('ConsolidatedDomainCard — live configured thresholds', () => {
 // ─── ConsolidatedDomainCard — navigation ─────────────────────────────────────
 
 describe('ConsolidatedDomainCard — navigation', () => {
-  it('card root element has the domain data-testid for click-target identification', () => {
+  it('card root is a semantic domain link with a descriptive name', () => {
     for (const domain of CONFIGURED_DOMAIN_ORDER) {
       const html = renderCard(domain, makeDomainStatus(), makeEsc(domain, 'NOMINAL'));
       expect(html).toContain(`data-testid="card-domain-${domain}"`);
+      expect(html).toContain(`href="/domain/${domain}"`);
+      expect(html).toContain(`aria-label="View ${domain === 'martial-arts' ? 'Martial Arts' : domain[0].toUpperCase() + domain.slice(1)}"`);
     }
   });
 
-  it('card is rendered as a clickable div (not a non-interactive element)', () => {
+  it('card link retains its block-sized pointer target and visible focus outline', () => {
     const html = renderCard('meditation', makeDomainStatus(), makeEsc('meditation', 'NOMINAL'));
-    // The outer element should be a div (not span or p) with cursor-pointer
+    expect(html).toMatch(/^<a\b/);
+    expect(html).toContain('block');
     expect(html).toContain('cursor-pointer');
+    expect(html).toContain('focus-visible:outline');
+    expect(html).toContain('focus-visible:outline-offset-');
   });
 });
 
@@ -534,28 +545,12 @@ describe('Dashboard narrow layout — no forced horizontal scroll', () => {
 
   it('domain cards use flex-wrap to prevent right-side badge overflow', () => {
     // ConsolidatedDomainCard already has flex-wrap — verify it is still present
-    const cardHtml = renderToStaticMarkup(
-      React.createElement(ConsolidatedDomainCard, {
-        domain: 'martial-arts',
-        domainStatus: makeDomainStatus(),
-        esc: makeEsc('martial-arts', 'NOMINAL'),
-        isRampUp: false,
-        onClick: () => {},
-      }),
-    );
+    const cardHtml = renderCard('martial-arts', makeDomainStatus(), makeEsc('martial-arts', 'NOMINAL'));
     expect(cardHtml).toContain('flex-wrap');
   });
 
   it('domain cards use min-w-0 so text truncates before causing overflow', () => {
-    const cardHtml = renderToStaticMarkup(
-      React.createElement(ConsolidatedDomainCard, {
-        domain: 'fitness',
-        domainStatus: makeDomainStatus(),
-        esc: makeEsc('fitness', 'ADVISORY'),
-        isRampUp: false,
-        onClick: () => {},
-      }),
-    );
+    const cardHtml = renderCard('fitness', makeDomainStatus(), makeEsc('fitness', 'ADVISORY'));
     expect(cardHtml).toContain('min-w-0');
   });
 
