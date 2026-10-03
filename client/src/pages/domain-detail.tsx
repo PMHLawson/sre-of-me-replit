@@ -613,7 +613,7 @@ export default function DomainDetail() {
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300 pb-24">
-      <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl z-10 border-b border-border/50">
+      <header className="px-4 py-5 flex items-center justify-between sticky top-0 bg-background/90 backdrop-blur-xl z-20 border-b border-border/50">
         <div className="flex items-center gap-4">
           <button
             onClick={() => {
