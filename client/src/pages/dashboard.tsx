@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { useLocation } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import {
   Activity,
   BrainCircuit,
@@ -106,13 +106,11 @@ export function ConsolidatedDomainCard({
   domainStatus,
   esc,
   isRampUp,
-  onClick,
 }: {
   domain: Domain;
   domainStatus: DomainStatus;
   esc: DomainEscalation | undefined;
   isRampUp: boolean;
-  onClick: () => void;
 }) {
   const tier: EscalationTier = esc?.tier ?? 'NOMINAL';
   const style = TIER_STYLE[tier];
@@ -135,11 +133,12 @@ export function ConsolidatedDomainCard({
   const showOverachievement = overachievementTier !== 'NONE';
 
   return (
-    <div
-      className={`rounded-2xl border shadow-sm overflow-hidden cursor-pointer transition-all active:scale-[0.99] ${
+    <Link
+      href={`/domain/${domain}`}
+      aria-label={`View ${title}`}
+      className={`block scroll-m-2 rounded-2xl border shadow-sm overflow-hidden cursor-pointer transition-all active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-foreground ${
         esc ? `${style.bg} ${style.border}` : 'bg-card border-border/50'
       }`}
-      onClick={onClick}
       data-testid={`card-domain-${domain}`}
     >
       <div className="p-4 space-y-3">
@@ -257,13 +256,12 @@ export function ConsolidatedDomainCard({
           </div>
         )}
       </div>
-    </div>
+    </Link>
   );
 }
 
 /** Store-connected wrapper — reads state, delegates all rendering to ConsolidatedDomainCard. */
 function ConnectedDomainCard({ domain }: { domain: Domain }) {
-  const [_, setLocation] = useLocation();
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   // Subscribe to policyState so the card re-renders when API data arrives.
   useAppStore(state => state.policyState);
@@ -278,7 +276,6 @@ function ConnectedDomainCard({ domain }: { domain: Domain }) {
       domainStatus={domainStatus}
       esc={esc}
       isRampUp={isRampUp}
-      onClick={() => setLocation(`/domain/${domain}`)}
     />
   );
 }
@@ -421,9 +418,10 @@ export default function Dashboard() {
             treatment so a brand-new user understands why their dashboard reads
             NOMINAL even with little or no logged activity (B3.2). */}
         {isRampUp ? (
-          <div
-            className="bg-primary/10 border border-primary/30 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-primary/15 transition-all active:scale-[0.98]"
-            onClick={() => setLocation('/system-health')}
+          <Link
+            href="/system-health"
+            aria-label="View System Health"
+            className="block scroll-m-2 bg-primary/10 border border-primary/30 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-primary/15 transition-all active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-foreground"
             data-testid="card-system-health-rampup"
           >
             <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/20 rounded-full blur-3xl" />
@@ -455,11 +453,12 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
-          </div>
+          </Link>
         ) : (
-          <div
-            className="bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-accent/30 transition-all active:scale-[0.98]"
-            onClick={() => setLocation('/system-health')}
+          <Link
+            href="/system-health"
+            aria-label="View System Health"
+            className="block scroll-m-2 bg-card border border-border/50 rounded-3xl p-6 shadow-sm relative overflow-hidden cursor-pointer hover:bg-accent/30 transition-all active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-foreground"
             data-testid="card-system-health"
           >
             <div className="absolute -right-6 -top-6 w-32 h-32 bg-primary/5 rounded-full blur-3xl" />
@@ -496,7 +495,7 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
-          </div>
+          </Link>
         )}
       </header>
 
