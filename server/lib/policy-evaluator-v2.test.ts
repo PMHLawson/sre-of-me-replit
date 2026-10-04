@@ -11,6 +11,8 @@ import {
   boundaryParamsSchema, prorationBasisSchema, rawEvaluationInputSchema,
   sourceBindingSchema, policyVersionSchema, invalidBackdateEvidenceSchema,
   scoredEvaluationSchema, trendEvidenceSchema, normalizeConditionBand, resolveAttention,
+  dimensionDefinitionSchema, dimensionDefinitionsSchema, dimensionUnitEnum, aggregationEnum,
+  conditionBandRecordSchema,
   type ScoredEvaluation,
 } from "@shared/policy-contract-v2";
 import {
@@ -58,6 +60,15 @@ describe("settled seed and input contracts", () => {
     expect(boundaryParamsSchema.parse({timezone:"America/New_York",dayStartHour:4}).includeCurrentDay).toBe(false);
     expect(DEFAULT_BOUNDARY.includeCurrentDay).toBe(false);
     expect(DEFAULT_CONDITION_BANDS.map(b=>b.minScore)).toEqual([90,70,50,0]);
+    expect(DEFAULT_CONDITION_BANDS.map(b=>b.attentionLevel)).toEqual([0,1,2,4]);
+    expect(DEFAULT_CONDITION_BANDS.map(b=>b.band)).toEqual([...conditionBandEnum]);
+    expect(DEFAULT_CONDITION_BANDS.map(b=>b.label)).toEqual(["Healthy","Needs Attention","Warning","Critical"]);
+    for (const band of DEFAULT_CONDITION_BANDS) {
+      expect(conditionBandRecordSchema.parse(band)).toEqual(band);
+      const {label,...missing}=band;
+      expect(conditionBandRecordSchema.safeParse(missing).success).toBe(false);
+      expect(conditionBandRecordSchema.safeParse({...band,label:""}).success).toBe(false);
+    }
     expect(DEFAULT_GUARDRAIL).toEqual({zeroMandatoryForcesCritical:true,mandatoryCapThreshold:0.5,mandatoryCapBand:"WARNING"});
   });
   it.each(conditionBandEnum)("canonical migration input %s is unchanged", band => expect(normalizeConditionBand(band)).toBe(band));
@@ -78,17 +89,67 @@ describe("settled seed and input contracts", () => {
     expect(UNRESOLVED_POLICY_QUESTIONS).toEqual(["OA 100<x<101","E=0 scoring"]);
     expect(scoredEvaluationSchema.safeParse({...declaredResult(COMPOUND),overachievementRaw:100.5}).success).toBe(false);
   });
-  it("rejects raw-input provenance fabrication and relaxed seed semantics", () => {
+  it("rejects raw-input provenance fabrication and incoherent seed measurement units", () => {
     const invented=structuredClone(COMPOUND.input);
     invented.provenance.observationIds.push("not-an-observation");
     expect(rawEvaluationInputSchema.safeParse(invented).success).toBe(false);
-    const relaxed=structuredClone(COMPOUND.input);
-    relaxed.policy.dimensions[1].mandatory=false;
-    expect(rawEvaluationInputSchema.safeParse(relaxed).success).toBe(false);
     const wrongUnit=structuredClone(COMPOUND.input);
     wrongUnit.policy.dimensions[1].unit="minutes";
     expect(rawEvaluationInputSchema.safeParse(wrongUnit).success).toBe(false);
     expect(rawEvaluationInputSchema.safeParse({...COMPOUND.input,provenance:ABSTRACT_CASES[0].provenance}).success).toBe(false);
+  });
+  it("accepts general stable dimension metadata without claiming new runtime support", () => {
+    expect(dimensionUnitEnum).toEqual(["minutes","sessions","ratio","logical-blocks"]);
+    expect(aggregationEnum).toEqual(["sum","count","mean","distinct-qualified-blocks"]);
+    const quality={id:"quality",unit:"ratio",aggregation:"mean",floor:0,weight:0.6,mandatory:false};
+    const occurrences={id:"occurrences",unit:"sessions",aggregation:"count",floor:1,weight:0.4,mandatory:true};
+    expect(dimensionDefinitionsSchema.parse([quality,occurrences])).toEqual([quality,occurrences]);
+    for (const id of [""," ","\t"]) expect(dimensionDefinitionSchema.safeParse({...quality,id}).success).toBe(false);
+    expect(dimensionDefinitionsSchema.safeParse([quality,{...occurrences,id:"quality"}]).success).toBe(false);
+    const unsupported=structuredClone(COMPOUND.input);
+    unsupported.policy.dimensions[0].id="quality";
+    expect(rawEvaluationInputSchema.safeParse(unsupported).success).toBe(false);
+  });
+  it("accepts adjustable weights and mandatory flags while keeping seed fixtures/defaults unchanged", () => {
+    const adjusted=structuredClone(COMPOUND.input);
+    adjusted.policy.dimensions[0].weight=0.75;
+    adjusted.policy.dimensions[1].weight=0.25;
+    adjusted.policy.dimensions[1].mandatory=false;
+    expect(rawEvaluationInputSchema.parse(adjusted).policy.dimensions).toEqual(adjusted.policy.dimensions);
+    expect(SEED_DIMENSIONS.duration.weight).toBe(0.5);
+    expect(SEED_DIMENSIONS.frequency.weight).toBe(0.5);
+    expect(SEED_DIMENSIONS.duration.mandatory).toBe(true);
+    expect(SEED_DIMENSIONS.frequency.mandatory).toBe(true);
+    for (const c of RAW_CASES) {
+      expect(c.input.policy.dimensions.map(d=>d.weight)).toEqual([0.5,0.5]);
+      expect(c.input.policy.dimensions.map(d=>d.mandatory)).toEqual([true,true]);
+    }
+    const duplicate=structuredClone(adjusted);
+    duplicate.policy.dimensions[1].id=duplicate.policy.dimensions[0].id;
+    expect(rawEvaluationInputSchema.safeParse(duplicate).success).toBe(false);
+    for (const weight of [-0.1,1.1,Infinity,NaN,0.5]) {
+      const invalid=structuredClone(adjusted);
+      invalid.policy.dimensions[0].weight=weight;
+      expect(rawEvaluationInputSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+  it("accepts truthful non-fixture source identity with exact invented observation evidence", () => {
+    // Synthetic shape only: no database call, owner record or credential.
+    const source={kind:"observations",sourceType:"sessions-db",sourceId:"synthetic-query-evidence",
+      observationIds:[...COMPOUND.input.provenance.observationIds],fetchedAt:"2026-08-08T16:00:00Z"};
+    expect(sourceBindingSchema.parse(source)).toEqual(source);
+    expect(source).not.toHaveProperty("fixtureId");
+    expect(rawEvaluationInputSchema.safeParse({...COMPOUND.input,provenance:source}).success).toBe(true);
+    expect(sourceBindingSchema.safeParse({...source,sourceType:"synthetic"}).success).toBe(true);
+    for (const invalid of [{...source,sourceId:undefined},{...source,sourceId:""},
+      {...source,fixtureId:"fabricated"},{...source,observationIds:["duplicate","duplicate"]},
+      {...source,observationIds:undefined},{...source,fetchedAt:undefined},{...source,fetchedAt:"invalid"}])
+      expect(sourceBindingSchema.safeParse(invalid).success).toBe(false);
+    expect(rawEvaluationInputSchema.safeParse({...COMPOUND.input,provenance:{...source,observationIds:["invented-mismatch"]}}).success).toBe(false);
+    const fixture=COMPOUND.input.provenance;
+    expect(sourceBindingSchema.safeParse({...fixture,fixtureId:undefined}).success).toBe(false);
+    expect(sourceBindingSchema.safeParse({...fixture,fixtureId:""}).success).toBe(false);
+    expect(sourceBindingSchema.safeParse({...fixture,sourceId:"not-a-fixture-identity"}).success).toBe(false);
   });
 });
 

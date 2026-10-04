@@ -34,12 +34,19 @@ export const TREND_STABILITY_EPSILON = 2;
 export const trendDirectionEnum = ["improving", "stable", "declining"] as const;
 // Includes joint and opposing component movement, not just a single dimension.
 export const trendDriverEnum = ["frequency", "duration", "both", "offsetting"] as const;
+export const conditionBandRecordSchema = z.object({
+  band: z.enum(conditionBandEnum),
+  label: z.string().min(1).refine(value => value.trim().length > 0),
+  minScore: z.number().finite().min(0).max(100),
+  attentionLevel: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(4)]),
+}).strict();
+export type ConditionBandRecord = z.infer<typeof conditionBandRecordSchema>;
 export const DEFAULT_CONDITION_BANDS = [
-  { band: "HEALTHY", minScore: 90, attentionLevel: 0 },
-  { band: "NEEDS_ATTENTION", minScore: 70, attentionLevel: 1 },
-  { band: "WARNING", minScore: 50, attentionLevel: 2 },
-  { band: "CRITICAL", minScore: 0, attentionLevel: 4 },
-] as const;
+  { band: "HEALTHY", label: "Healthy", minScore: 90, attentionLevel: 0 },
+  { band: "NEEDS_ATTENTION", label: "Needs Attention", minScore: 70, attentionLevel: 1 },
+  { band: "WARNING", label: "Warning", minScore: 50, attentionLevel: 2 },
+  { band: "CRITICAL", label: "Critical", minScore: 0, attentionLevel: 4 },
+] as const satisfies readonly ConditionBandRecord[];
 export const DEFAULT_GUARDRAIL = {
   zeroMandatoryForcesCritical: true,
   mandatoryCapThreshold: 0.5,
@@ -63,15 +70,28 @@ export type BoundaryParams = z.infer<typeof boundaryParamsSchema>;
 export const DEFAULT_BOUNDARY: BoundaryParams = {
   timezone: "America/New_York", dayStartHour: 4, includeCurrentDay: false,
 };
+// General template metadata, not a promise of arbitrary measurement runtime.
+// Existing generic metadata remains available; seed activity input below is narrower.
+export const dimensionUnitEnum = ["minutes", "sessions", "ratio", "logical-blocks"] as const;
+export type DimensionUnit = typeof dimensionUnitEnum[number];
+export const aggregationEnum = ["sum", "count", "mean", "distinct-qualified-blocks"] as const;
+export type Aggregation = typeof aggregationEnum[number];
+const stableIdentity = z.string().min(1).refine(value => value.trim() === value, "Nonblank stable identity required");
 export const dimensionDefinitionSchema = z.object({
-  id: z.enum(dimensionIds),
-  unit: z.enum(["minutes", "logical-blocks"]),
-  aggregation: z.enum(["sum", "distinct-qualified-blocks"]),
+  id: stableIdentity,
+  unit: z.enum(dimensionUnitEnum),
+  aggregation: z.enum(aggregationEnum),
   floor: z.number().finite().nonnegative(),
   weight: z.number().finite().min(0).max(1),
   mandatory: z.boolean(),
 }).strict();
 export type DimensionDefinition = z.infer<typeof dimensionDefinitionSchema>;
+export const dimensionDefinitionsSchema = z.array(dimensionDefinitionSchema).min(1).superRefine((dimensions, ctx) => {
+  if (new Set(dimensions.map(d => d.id)).size !== dimensions.length)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Dimension identities must be unique" });
+  if (Math.abs(dimensions.reduce((sum, d) => sum + d.weight, 0) - 1) > 1e-9)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Dimension weights must sum to one" });
+});
 export const SEED_DIMENSIONS = {
   // Sum ALL included minutes, even subfloor and deviation-time observations.
   duration: { id: "duration", unit: "minutes", aggregation: "sum", floor: 0, weight: 0.5, mandatory: true },
@@ -111,10 +131,20 @@ export const observationSchema = z.object({
 export const observationSourceBindingSchema = z.object({
   kind: z.literal("observations"),
   sourceType: z.enum(["fixture", "synthetic", "sessions-db"]),
-  fixtureId: z.string().min(1), observationIds: z.array(z.string()),
+  fixtureId: stableIdentity.optional(),
+  // Opaque non-fixture source identity, never a credential or invented fixture ID.
+  sourceId: stableIdentity.optional(),
+  observationIds: z.array(stableIdentity).refine(ids => new Set(ids).size === ids.length, "Unique observation IDs required"),
   fetchedAt: instant,
-}).strict();
-export const sourceBindingSchema = z.discriminatedUnion("kind", [
+}).strict().superRefine((source, ctx) => {
+  if (source.sourceType === "fixture") {
+    if (source.fixtureId === undefined || source.sourceId !== undefined)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Fixture source requires fixtureId only" });
+  } else if (source.sourceId === undefined || source.fixtureId !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Non-fixture source requires sourceId, not fixtureId" });
+  }
+});
+export const sourceBindingSchema = z.union([
   z.object({
     kind: z.literal("abstract"), sourceType: z.literal("fixture"),
     fixtureId: z.string().min(1),
@@ -130,12 +160,17 @@ export const policyInputSchema = z.object({
   sessionFloor: z.number().finite().positive(),
   dimensions: z.tuple([dimensionDefinitionSchema, dimensionDefinitionSchema]),
 }).strict().superRefine((p, ctx) => {
+  // This raw activity contract still supports only the two seed measurements.
+  // Weight and mandatory are adjustable template data, not immutable defaults.
+  const metadata = dimensionDefinitionsSchema.safeParse(p.dimensions);
+  if (!metadata.success)
+    for (const issue of metadata.error.issues)
+      ctx.addIssue({ ...issue, path: ["dimensions", ...issue.path] });
   dimensionIds.forEach((id, index) => {
     const d = p.dimensions[index], seed = SEED_DIMENSIONS[id];
     if (d.id !== id || d.unit !== seed.unit || d.aggregation !== seed.aggregation ||
-        d.weight !== seed.weight || d.mandatory !== seed.mandatory ||
         d.floor !== (id === "frequency" ? p.sessionFloor : 0))
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions", index], message: "Settled seed dimension semantics required" });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions", index], message: "Seed activity measurement identity/unit/aggregation/floor required" });
   });
 });
 /** Raw input has NO actuals, eligible total or prorated targets.
