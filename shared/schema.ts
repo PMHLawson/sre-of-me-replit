@@ -6,6 +6,10 @@ import { z } from "zod";
 // Auth models: users table + http session store (owned by Replit Auth)
 export * from "./models/auth";
 
+// GSLO Policy Contract v2 — type definitions and template constants (A1.1).
+// No table changes; exports only.
+export * from "./policy-contract-v2";
+
 export const domainEnum = ['martial-arts', 'meditation', 'fitness', 'music'] as const;
 export type Domain = typeof domainEnum[number];
 
