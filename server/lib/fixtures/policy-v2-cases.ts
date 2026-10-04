@@ -212,23 +212,39 @@ export const RAW_CASES:RawCase[]=[
 ];
 
 // X1 is pure contract evidence, NOT a demand that A1.2 select/stitch policies.
-export const EFFECTIVE_DATING = {
-  oldWindow: {startAt:"2026-08-01T08:00:00Z",endAt:"2026-08-04T08:00:00Z",version:SYNTHETIC_VERSION},
-  newWindow: {startAt:"2026-08-04T08:00:00Z",endAt:"2026-08-08T08:00:00Z",
-    version:{id:"fixture-only/settled-v2-new",effectiveDate:"2026-08-04",calculationVersion:2} satisfies PolicyVersion},
-  newVersionRequestedAt:"2026-08-03T16:00:00Z",
-  invalid: {kind:"invalid-backdate",reason:"EFFECTIVE_DATE_BEFORE_REQUEST",
-    requestedAt:"2026-08-10T16:00:00Z",proposedEffectiveDate:"2026-08-01",existingVersion:SYNTHETIC_VERSION} satisfies InvalidBackdateEvidence,
-};
-export const ZERO_ELIGIBLE_INPUT = {baseDays:7,windowDays:7,eligibleDays:0};
+function abstractEvidence<T>(id:string, value:T) {
+  return {id,provenance:{kind:"abstract",sourceType:"fixture",fixtureId:id} satisfies SourceBinding,value};
+}
+export const EFFECTIVE_DATING = abstractEvidence("X1-effective-dating", {
+  envelope: abstractEvidence("X1-fourteen-day-envelope", {startAt:"2026-08-01T08:00:00Z",endAt:"2026-08-15T08:00:00Z",windowDays:14}),
+  oldWindow: abstractEvidence("X1-old-version-segment", {startAt:"2026-08-01T08:00:00Z",endAt:"2026-08-08T08:00:00Z",version:SYNTHETIC_VERSION}),
+  newWindow: abstractEvidence("X1-new-version-segment", {startAt:"2026-08-08T08:00:00Z",endAt:"2026-08-15T08:00:00Z",
+    version:{id:"fixture-only/settled-v2-new",effectiveDate:"2026-08-08",calculationVersion:2} satisfies PolicyVersion}),
+  newVersionRequestedAt:"2026-08-07T16:00:00Z",
+  invalid: abstractEvidence("X1-invalid-backdate", {kind:"invalid-backdate",reason:"EFFECTIVE_DATE_BEFORE_REQUEST",
+    requestedAt:"2026-08-10T16:00:00Z",proposedEffectiveDate:"2026-08-01",existingVersion:SYNTHETIC_VERSION} satisfies InvalidBackdateEvidence),
+});
+export const ZERO_ELIGIBLE_INPUT = abstractEvidence("zero-eligible-proration-only", {baseDays:7,windowDays:7,eligibleDays:0});
 export const LADDER_CASES = [
-  {condition:"HEALTHY",persistence:"BREACH",resolved:3},
-  {condition:"WARNING",persistence:"ADVISORY",resolved:2},
-  {condition:"CRITICAL",persistence:"NOMINAL",resolved:4},
-  {condition:"NEEDS_ATTENTION",persistence:undefined,resolved:1},
+  abstractEvidence("ladder-breach-needs-attention", {condition:"NEEDS_ATTENTION",persistence:"BREACH",resolved:3} as const),
+  abstractEvidence("ladder-nominal-warning", {condition:"WARNING",persistence:"NOMINAL",resolved:2} as const),
+  abstractEvidence("ladder-breach-critical", {condition:"CRITICAL",persistence:"BREACH",resolved:4} as const),
+  abstractEvidence("ladder-warning-warning", {condition:"WARNING",persistence:"WARNING",resolved:2} as const),
+  abstractEvidence("ladder-absent-state", {condition:"NEEDS_ATTENTION",persistence:undefined,resolved:1} as const),
 ] as const;
 // X6: adjacent equal 7-block windows, frozen synthetic comparison expectations.
 // No trend classification implementation; no A1.2 integration dependency.
+const TREND_EXPLANATIONS:Record<string,string> = {
+  "stable-no-change":"Both components are unchanged; domain movement is 0pp and stable.",
+  "plus-two-inclusive":"Both components rise 2pp; the inclusive +2pp boundary remains stable.",
+  "minus-two-inclusive":"Both components fall 2pp; the inclusive -2pp boundary remains stable.",
+  "declining-both":"Both components fall 3pp; domain movement is -3pp and declining.",
+  "improving-both":"Both components rise 3pp; domain movement is +3pp and improving.",
+  "frequency-decline":"Frequency falls 10pp while duration is unchanged; domain movement is -5pp and declining.",
+  "duration-improvement":"Duration rises 10pp while frequency is unchanged; domain movement is +5pp and improving.",
+  "offsetting-stable":"Duration rises 10pp and frequency falls 10pp; offsetting movement leaves the domain stable at 0pp.",
+  "offsetting-decline":"Duration rises 4pp and frequency falls 10pp; offsetting movement leaves the domain declining at -3pp.",
+};
 export const TREND_CASES = [
   {id:"stable-no-change",previous:v(80,80),current:v(80,80),delta:0,direction:"stable",driver:"both"},
   {id:"plus-two-inclusive",previous:v(80,80),current:v(82,82),delta:2,direction:"stable",driver:"both"},
@@ -239,6 +255,7 @@ export const TREND_CASES = [
   {id:"duration-improvement",previous:v(80,80),current:v(90,80),delta:5,direction:"improving",driver:"duration"},
   {id:"offsetting-stable",previous:v(80,80),current:v(90,70),delta:0,direction:"stable",driver:"offsetting"},
   {id:"offsetting-decline",previous:v(80,80),current:v(84,70),delta:-3,direction:"declining",driver:"offsetting"},
-].map(c=>({...c,previousWindow:{startAt:"2026-07-25T08:00:00Z",endAt:"2026-08-01T08:00:00Z"},
+].map(c=>abstractEvidence(`X6-${c.id}`, {...c,explanation:TREND_EXPLANATIONS[c.id],
+  previousWindow:{startAt:"2026-07-25T08:00:00Z",endAt:"2026-08-01T08:00:00Z"},
   currentWindow:{startAt:"2026-08-01T08:00:00Z",endAt:"2026-08-08T08:00:00Z"},
   boundary:{...DEFAULT_BOUNDARY},policyVersion:SYNTHETIC_VERSION}));

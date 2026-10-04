@@ -65,13 +65,13 @@ describe("settled seed and input contracts", () => {
     expect(normalizeConditionBand("PAGE")).toBe("CRITICAL");
     expect(conditionBandEnum).not.toContain("PAGE");
   });
-  it.each([{baseDays:7,windowDays:14,eligibleDays:14},{baseDays:7,windowDays:7,eligibleDays:5.5},ZERO_ELIGIBLE_INPUT])(
+  it.each([{baseDays:7,windowDays:14,eligibleDays:14},{baseDays:7,windowDays:7,eligibleDays:5.5},ZERO_ELIGIBLE_INPUT.value])(
     "accepts valid B/W/E including E>B, fractions and zero input: %j", x => expect(prorationBasisSchema.safeParse(x).success).toBe(true));
   it.each([{baseDays:0,windowDays:7,eligibleDays:7},{baseDays:7,windowDays:0,eligibleDays:0},
     {baseDays:7,windowDays:7,eligibleDays:-1},{baseDays:7,windowDays:7,eligibleDays:8}])(
     "rejects invalid B/W/E %j", x=>expect(prorationBasisSchema.safeParse(x).success).toBe(false));
   it("E=0 establishes expected zero only, not any full scoring outcome", () => {
-    expect(70*ZERO_ELIGIBLE_INPUT.eligibleDays/ZERO_ELIGIBLE_INPUT.baseDays).toBe(0);
+    expect(70*ZERO_ELIGIBLE_INPUT.value.eligibleDays/ZERO_ELIGIBLE_INPUT.value.baseDays).toBe(0);
     expect(scoredEvaluationSchema.safeParse({...declaredResult(COMPOUND),eligibleWindowBasis:0}).success).toBe(false);
   });
   it("leaves OA 100<x<101 explicitly unresolved rather than assigning a tier", () => {
@@ -207,12 +207,23 @@ describe.each(RAW_CASES)("feasible raw fixture audit $id", c => {
 
 describe("X1–X7 contract ownership", () => {
   it("X1 labels old/new sub-windows and invalid backdate evidence without selecting a service policy", () => {
-    const x=EFFECTIVE_DATING;
+    const evidence=EFFECTIVE_DATING.value;
+    const x={oldWindow:evidence.oldWindow.value,newWindow:evidence.newWindow.value,
+      invalid:evidence.invalid.value,newVersionRequestedAt:evidence.newVersionRequestedAt};
+    const envelope=evidence.envelope.value, day=86400000;
+    expect(envelope.windowDays).toBe(14);
+    expect(Date.parse(envelope.endAt)-Date.parse(envelope.startAt)).toBe(14*day);
+    expect(x.oldWindow.startAt).toBe(envelope.startAt);
+    expect(x.newWindow.endAt).toBe(envelope.endAt);
+    expect(Date.parse(x.oldWindow.endAt)-Date.parse(x.oldWindow.startAt)).toBe(7*day);
+    expect(Date.parse(x.newWindow.endAt)-Date.parse(x.newWindow.startAt)).toBe(7*day);
     expect(policyVersionSchema.safeParse(x.oldWindow.version).success).toBe(true);
     expect(policyVersionSchema.safeParse(x.newWindow.version).success).toBe(true);
     expect(x.oldWindow.endAt).toBe(x.newWindow.startAt);
     expect(x.oldWindow.version.effectiveDate<=x.oldWindow.startAt.slice(0,10)).toBe(true);
     expect(x.newWindow.version.effectiveDate).toBe(x.newWindow.startAt.slice(0,10));
+    expect(x.oldWindow.version).toEqual({id:"fixture-only/settled-v2-old",effectiveDate:"2026-01-01",calculationVersion:1});
+    expect(x.newWindow.version).toEqual({id:"fixture-only/settled-v2-new",effectiveDate:"2026-08-08",calculationVersion:2});
     expect(Date.parse(x.newVersionRequestedAt)).toBeLessThan(Date.parse(x.newWindow.startAt));
     expect(x.oldWindow.version.id).not.toBe(x.newWindow.version.id);
     expect(x.newWindow.version.calculationVersion).toBeGreaterThan(x.oldWindow.version.calculationVersion);
@@ -232,7 +243,10 @@ describe("X1–X7 contract ownership", () => {
     expect(persistenceStateEnum).toEqual(["NOMINAL","ADVISORY","WARNING","BREACH","CRITICAL"]);
     expect(Object.values(ATTENTION_MAP)).toEqual([0,1,2,4]);
     expect(Object.values(PERSISTENCE_ATTENTION_MAP)).toEqual([0,1,2,3,4]);
-    for(const c of LADDER_CASES) expect(resolveAttention(c.condition,c.persistence)).toBe(c.resolved);
+    expect(LADDER_CASES.slice(0,4).map(c=>[c.value.persistence,c.value.condition,c.value.resolved])).toEqual([
+      ["BREACH","NEEDS_ATTENTION",3],["NOMINAL","WARNING",2],["BREACH","CRITICAL",4],["WARNING","WARNING",2],
+    ]);
+    for(const {value:c} of LADDER_CASES) expect(resolveAttention(c.condition,c.persistence)).toBe(c.resolved);
     for(const condition of conditionBandEnum) {
       expect(resolveAttention(condition)).toBe(ATTENTION_MAP[condition]);
       for(const persistence of persistenceStateEnum)
@@ -243,7 +257,7 @@ describe("X1–X7 contract ownership", () => {
     expect(RAW_CASES.find(c=>c.id==="X4-compound-UTC")!.expected.actual.duration).toBe(114);
     expect(RAW_CASES.find(c=>c.id==="X4-boundary-five-excludes-0405")!.expected.actual).toEqual({duration:100,frequency:4});
   });
-  it.each(TREND_CASES)("X6 $id: adjacent equal windows, inclusive ±2pp and truthful driver", c => {
+  it.each(TREND_CASES)("X6 $id: adjacent equal windows, inclusive ±2pp and truthful driver", ({value:c}) => {
     expect(TREND_STABILITY_EPSILON).toBe(2);
     expect(c.previousWindow.endAt).toBe(c.currentWindow.startAt);
     expect(Date.parse(c.previousWindow.endAt)-Date.parse(c.previousWindow.startAt))
@@ -253,8 +267,32 @@ describe("X1–X7 contract ownership", () => {
     const direction=Math.abs(c.delta)<=2?"stable":c.delta>0?"improving":"declining";
     const driver=d*f<0?"offsetting":d===0&&f!==0?"frequency":f===0&&d!==0?"duration":"both";
     expect(c.direction).toBe(direction); expect(c.driver).toBe(driver);
-    expect(trendEvidenceSchema.safeParse({direction:c.direction,driver:c.driver,
-      deltaPercentagePoints:c.delta,explanation:`Fixture: ${c.driver} movement, ${c.direction}`}).success).toBe(true);
+    const expected={direction:c.direction,driver:c.driver,deltaPercentagePoints:c.delta,explanation:c.explanation};
+    expect(trendEvidenceSchema.parse(expected).explanation).toBe(c.explanation);
+    expect(c.explanation.trim().length).toBeGreaterThan(0);
+    expect(c.explanation.toLowerCase()).toContain(c.direction);
+    expect(c.explanation.toLowerCase()).toContain(c.driver);
+    const {explanation,...missing}=expected;
+    expect(trendEvidenceSchema.safeParse(missing).success).toBe(false);
+    expect(trendEvidenceSchema.safeParse({...expected,explanation:""}).success).toBe(false);
+  });
+  it("X2 every auxiliary fixture/expected record has a stable matching abstract source binding", () => {
+    const x=EFFECTIVE_DATING.value;
+    const records=[EFFECTIVE_DATING,x.envelope,x.oldWindow,x.newWindow,x.invalid,
+      ZERO_ELIGIBLE_INPUT,...LADDER_CASES,...TREND_CASES];
+    expect(new Set(records.map(r=>r.id)).size).toBe(records.length);
+    for(const record of records) {
+      expect(record.id.trim().length).toBeGreaterThan(0);
+      expect(sourceBindingSchema.parse(record.provenance)).toEqual({
+        kind:"abstract",sourceType:"fixture",fixtureId:record.id,
+      });
+      expect(sourceBindingSchema.safeParse({...record.provenance,fixtureId:""}).success).toBe(false);
+      expect(sourceBindingSchema.safeParse(undefined).success).toBe(false);
+      expect(record.provenance).not.toHaveProperty("observationIds");
+    }
+    // Wrappers carry provenance; strict numeric/backdate payloads remain untouched.
+    expect(prorationBasisSchema.safeParse(ZERO_ELIGIBLE_INPUT.value).success).toBe(true);
+    expect(invalidBackdateEvidenceSchema.safeParse(x.invalid.value).success).toBe(true);
   });
   it("X7 frequency guardrail preserves score 70 but caps condition at WARNING", () => {
     const c=RAW_CASES.find(c=>c.id==="X7-frequency-40-duration-100")!;
