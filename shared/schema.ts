@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, numeric, timestamp, boolean, jsonb, primaryKey, unique, foreignKey, check, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { users } from "./models/auth";
+import type { DomainConfiguration, Observation, MeasurementDefinition } from "./domain-config";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -411,3 +413,108 @@ export const selectUserSettingsSchema = z.object({
 export type InsertUserSettings = z.infer<typeof insertUserSettingsSchema>;
 export type UserSettings = typeof userSettings.$inferSelect;
 export type SelectUserSettings = z.infer<typeof selectUserSettingsSchema>;
+
+// Additive storage only; full validation and immutable writes are future work.
+const instant = (name: string) => timestamp(name, { withTimezone: true });
+const identityMatch = (payload: AnyPgColumn, key: string, column: AnyPgColumn) =>
+  sql`(jsonb_typeof(${payload}->${sql.raw(`'${key}'`)}) = 'string' AND ${payload}->>${sql.raw(`'${key}'`)} = ${column}) IS TRUE`;
+export const organizations = pgTable("organizations", {
+  orgId: text("org_id").primaryKey(), displayName: text("display_name").notNull(),
+  rolloutMode: text("rollout_mode").notNull().default("legacy"),
+  createdAt: instant("created_at").notNull().defaultNow(), updatedAt: instant("updated_at").notNull().defaultNow(),
+}, t => [check("organizations_rollout", sql`${t.rolloutMode} IN ('legacy','shadow','v2')`)]);
+export const organizationMembers = pgTable("organization_members", {
+  orgId: text("org_id").notNull().references(() => organizations.orgId),
+  userId: text("user_id").notNull().references(() => users.id), role: text("role").notNull(),
+  createdAt: instant("created_at").notNull().defaultNow(), updatedAt: instant("updated_at").notNull().defaultNow(),
+}, t => [primaryKey({ columns: [t.orgId,t.userId] }), check("members_role", sql`${t.role} IN ('owner','member')`)]);
+export const domains = pgTable("domains", {
+  domainId: text("domain_id").primaryKey(), orgId: text("org_id").notNull().references(() => organizations.orgId),
+  ownerUserId: text("owner_user_id").notNull(), slug: text("slug").notNull(), displayName: text("display_name").notNull(),
+  deactivatedAt: instant("deactivated_at"), tombstonedAt: instant("tombstoned_at"),
+}, t => [
+  unique("domains_scope").on(t.orgId,t.ownerUserId,t.domainId), unique("domains_slug").on(t.orgId,t.slug),
+  foreignKey({ name:"domains_member",columns:[t.orgId,t.ownerUserId],foreignColumns:[organizationMembers.orgId,organizationMembers.userId] }),
+]);
+export const policyVersions = pgTable("policy_versions", {
+  policyVersionId:text("policy_version_id").primaryKey(), orgId:text("org_id").notNull().references(()=>organizations.orgId),
+  ownerUserId:text("owner_user_id").notNull(),domainId:text("domain_id").notNull(),
+  revision:integer("revision").notNull(),effectiveFrom:instant("effective_from").notNull(),previousVersionId:text("previous_version_id"),
+  configuration:jsonb("configuration").$type<DomainConfiguration>().notNull(),evaluationPolicy:jsonb("evaluation_policy").$type<Record<string,unknown>>(),
+},t=>[
+  unique("policy_scope").on(t.orgId,t.ownerUserId,t.domainId,t.policyVersionId),unique("policy_revision").on(t.orgId,t.domainId,t.revision),
+  foreignKey({name:"policy_domain",columns:[t.orgId,t.ownerUserId,t.domainId],foreignColumns:[domains.orgId,domains.ownerUserId,domains.domainId]}),
+  foreignKey({name:"policy_predecessor",columns:[t.orgId,t.ownerUserId,t.domainId,t.previousVersionId],foreignColumns:[t.orgId,t.ownerUserId,t.domainId,t.policyVersionId]}),
+  check("policy_revision_positive",sql`${t.revision}>0`),
+  check("policy_predecessor_rule",sql`(${t.revision}=1)=(${t.previousVersionId} IS NULL) AND (${t.previousVersionId} IS NULL OR ${t.previousVersionId}<>${t.policyVersionId})`),
+  check("policy_configuration_object",sql`jsonb_typeof(${t.configuration})='object'`),
+  check("policy_configuration_identity",sql`${identityMatch(t.configuration,"organizationId",t.orgId)} AND ${identityMatch(t.configuration,"ownerUserId",t.ownerUserId)} AND ${identityMatch(t.configuration,"domainId",t.domainId)} AND ${identityMatch(t.configuration,"policyVersionId",t.policyVersionId)}`),
+  check("policy_configuration_revision",sql`(jsonb_typeof(${t.configuration}->'revision')='number' AND ${t.configuration}->'revision'=to_jsonb(${t.revision})) IS TRUE`),
+  check("policy_configuration_predecessor",sql`(CASE WHEN ${t.previousVersionId} IS NULL THEN NOT (${t.configuration} ? 'previousVersionId') ELSE ${identityMatch(t.configuration,"previousVersionId",t.previousVersionId)} END) IS TRUE`),
+]);
+export const dimensionDefinitions=pgTable("dimension_definitions",{
+  orgId:text("org_id").notNull().references(()=>organizations.orgId),ownerUserId:text("owner_user_id").notNull(),domainId:text("domain_id").notNull(),
+  policyVersionId:text("policy_version_id").notNull(),measurementId:text("measurement_id").notNull(),definition:jsonb("definition").$type<MeasurementDefinition>().notNull(),
+},t=>[
+  primaryKey({columns:[t.policyVersionId,t.measurementId]}),
+  foreignKey({name:"dimension_policy",columns:[t.orgId,t.ownerUserId,t.domainId,t.policyVersionId],foreignColumns:[policyVersions.orgId,policyVersions.ownerUserId,policyVersions.domainId,policyVersions.policyVersionId]}),
+  check("dimension_object",sql`jsonb_typeof(${t.definition})='object'`),check("dimension_identity",identityMatch(t.definition,"measurementId",t.measurementId)),
+]);
+export const observations=pgTable("observations",{
+  observationId:text("observation_id").primaryKey(),orgId:text("org_id").notNull().references(()=>organizations.orgId),
+  ownerUserId:text("owner_user_id").notNull(),domainId:text("domain_id").notNull(),policyVersionId:text("policy_version_id").notNull(),
+  idempotencyKey:text("idempotency_key").notNull(),observedAt:instant("observed_at").notNull(),observation:jsonb("observation").$type<Observation>().notNull(),
+  isAnomaly:boolean("is_anomaly").notNull().default(false),anomalyNote:text("anomaly_note"),deletedAt:instant("deleted_at"),
+  legacySourceType:text("legacy_source_type"),legacySourceId:text("legacy_source_id"),
+},t=>[
+  unique("observation_idempotency").on(t.idempotencyKey),unique("observation_legacy_source").on(t.orgId,t.ownerUserId,t.domainId,t.legacySourceType,t.legacySourceId),
+  foreignKey({name:"observation_policy",columns:[t.orgId,t.ownerUserId,t.domainId,t.policyVersionId],foreignColumns:[policyVersions.orgId,policyVersions.ownerUserId,policyVersions.domainId,policyVersions.policyVersionId]}),
+  check("observation_legacy_pair",sql`(${t.legacySourceType} IS NULL)=(${t.legacySourceId} IS NULL)`),
+  check("observation_object",sql`jsonb_typeof(${t.observation})='object'`),
+  check("observation_identity",sql`${identityMatch(t.observation,"organizationId",t.orgId)} AND ${identityMatch(t.observation,"ownerUserId",t.ownerUserId)} AND ${identityMatch(t.observation,"domainId",t.domainId)} AND ${identityMatch(t.observation,"policyVersionId",t.policyVersionId)} AND ${identityMatch(t.observation,"observationId",t.observationId)}`),
+]);
+export const evaluationResults=pgTable("evaluation_results",{
+  resultId:text("result_id").primaryKey(),orgId:text("org_id").notNull().references(()=>organizations.orgId),
+  ownerUserId:text("owner_user_id").notNull(),domainId:text("domain_id").notNull(),policyVersionId:text("policy_version_id").notNull(),
+  windowStart:instant("window_start").notNull(),windowEnd:instant("window_end").notNull(),timezone:text("timezone").notNull(),dayStartHour:integer("day_start_hour").notNull(),
+  calculatedAt:instant("calculated_at").notNull(),calculationVersion:text("calculation_version").notNull(),inputFingerprint:text("input_fingerprint").notNull(),
+  eligibleDays:numeric("eligible_days").notNull(),result:jsonb("result").notNull(),components:jsonb("components").notNull(),explanation:jsonb("explanation").notNull(),
+  budgetSnapshot:jsonb("budget_snapshot"),budgetEnabledSnapshot:boolean("budget_enabled_snapshot").notNull().default(false),
+},t=>[
+  unique("evaluation_window").on(t.orgId,t.domainId,t.windowStart,t.windowEnd,t.policyVersionId,t.calculationVersion),
+  foreignKey({name:"evaluation_policy",columns:[t.orgId,t.ownerUserId,t.domainId,t.policyVersionId],foreignColumns:[policyVersions.orgId,policyVersions.ownerUserId,policyVersions.domainId,policyVersions.policyVersionId]}),
+  check("evaluation_order",sql`${t.windowEnd}>${t.windowStart}`),check("evaluation_day_boundary",sql`${t.dayStartHour} BETWEEN 0 AND 23`),
+  check("evaluation_eligible",sql`${t.eligibleDays}>=0 AND ${t.eligibleDays}::text NOT IN ('NaN','Infinity','-Infinity')`),check("evaluation_budget",sql`${t.budgetEnabledSnapshot} OR ${t.budgetSnapshot} IS NULL`),
+]);
+export const deviationsV2=pgTable("deviations_v2",{
+  deviationId:text("deviation_id").primaryKey(),orgId:text("org_id").notNull().references(()=>organizations.orgId),ownerUserId:text("owner_user_id").notNull(),
+  startAt:instant("start_at").notNull(),endAt:instant("end_at"),endedAt:instant("ended_at"),deletedAt:instant("deleted_at"),
+  scope:text("scope").notNull(),type:text("type").notNull(),reason:text("reason").notNull(),policy:jsonb("policy").notNull(),provenance:jsonb("provenance").notNull(),
+},t=>[
+  unique("deviation_scope").on(t.orgId,t.ownerUserId,t.deviationId),
+  foreignKey({name:"deviation_member",columns:[t.orgId,t.ownerUserId],foreignColumns:[organizationMembers.orgId,organizationMembers.userId]}),
+  check("deviation_interval",sql`(${t.endAt} IS NULL OR ${t.endAt}>${t.startAt}) AND (${t.endedAt} IS NULL OR ${t.endedAt}>=${t.startAt})`),
+  check("deviation_scope_kind",sql`${t.scope} IN ('all','selected')`),check("deviation_type",sql`${t.type} IN ('stitch','substitute_target')`),
+]);
+export const deviationDomains=pgTable("deviation_domains",{
+  orgId:text("org_id").notNull().references(()=>organizations.orgId),ownerUserId:text("owner_user_id").notNull(),deviationId:text("deviation_id").notNull(),domainId:text("domain_id").notNull(),
+},t=>[
+  primaryKey({columns:[t.deviationId,t.domainId]}),
+  foreignKey({name:"deviation_domain_deviation",columns:[t.orgId,t.ownerUserId,t.deviationId],foreignColumns:[deviationsV2.orgId,deviationsV2.ownerUserId,deviationsV2.deviationId]}),
+  foreignKey({name:"deviation_domain_domain",columns:[t.orgId,t.ownerUserId,t.domainId],foreignColumns:[domains.orgId,domains.ownerUserId,domains.domainId]}),
+]);
+export const auditEvents=pgTable("audit_events",{
+  auditEventId:text("audit_event_id").primaryKey(),orgId:text("org_id").notNull().references(()=>organizations.orgId),
+  actorKind:text("actor_kind").notNull(),actorUserId:text("actor_user_id"),entityType:text("entity_type").notNull(),entityId:text("entity_id").notNull(),
+  action:text("action").notNull(),occurredAt:instant("occurred_at").notNull(),reason:text("reason"),before:jsonb("before"),after:jsonb("after"),
+},t=>[
+  foreignKey({name:"audit_actor",columns:[t.orgId,t.actorUserId],foreignColumns:[organizationMembers.orgId,organizationMembers.userId]}),
+  check("audit_actor_kind",sql`${t.actorKind} IN ('user','system')`),check("audit_actor_required",sql`${t.actorKind}<>'user' OR ${t.actorUserId} IS NOT NULL`),
+]);
+export const sourceBindings=pgTable("source_bindings",{
+  bindingId:text("binding_id").primaryKey(),orgId:text("org_id").notNull().references(()=>organizations.orgId),
+  ownerUserId:text("owner_user_id").notNull(),domainId:text("domain_id").notNull(),sourceKind:text("source_kind").notNull(),externalId:text("external_id").notNull(),metadata:jsonb("metadata"),
+},t=>[
+  unique("binding_external").on(t.orgId,t.sourceKind,t.externalId),
+  foreignKey({name:"binding_domain",columns:[t.orgId,t.ownerUserId,t.domainId],foreignColumns:[domains.orgId,domains.ownerUserId,domains.domainId]}),
+]);
