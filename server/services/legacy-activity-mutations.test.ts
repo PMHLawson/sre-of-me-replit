@@ -60,7 +60,7 @@ it("edits imported history without rewriting provenance; domain/time/note/flags 
  expect(row.domain).toBe("fitness");expect(row.timestamp).toContain(".654321");expect(row.anomaly_note).toBeNull();
  const edits=await raw("session_edits","session_id=$1 AND id NOT LIKE '%-old-edit'",[key]);expect(edits).toHaveLength(1);
  const prior=JSON.parse(edits[0].changed_fields);expect(prior).toMatchObject({domain:"music",durationMinutes:1,notes:null,anomalyNote:"historical inconsistent note"});
- expect(prior.timestamp).toContain(".123456");expect(edits[0].reason).toBe("synthetic change");
+ expect(prior.timestamp).toContain(".123456");expect(edits[0].reason).toBe(" synthetic change ");
  expect(await raw("audit_events","entity_type IN ('legacy_session_import','legacy_edit_import')")).toEqual(imports);
  expect(await raw("session_edits","id LIKE '%-old-edit'")).toEqual(oldEdits);expect(await service.verify(request("mutation-a"),key)).toEqual({clean:true,mutations:1});
  await service.edit(request("mutation-a"),key,{reason:"No-op explanation"});
@@ -104,6 +104,7 @@ it("rejects early mapping errors after a legacy insert, invalid reasons and anom
  const before=await snapshot();for(const p of [{...payload,timestamp:"1900-01-01T00:00:00Z"},{...payload,isAnomaly:true,anomalyNote:" "},
   {...payload,durationMinutes:0},{...payload,organizationId:"fake"}])await expect(service.create(request("mutation-a"),p)).rejects.toMatchObject({status:400});
  await expect(service.edit(request("mutation-a"),"mutation-a-martial-arts",{reason:"   "})).rejects.toMatchObject({status:400});
+ await expect(service.edit(request("mutation-a"),"mutation-a-martial-arts",{reason:" ".repeat(500)+"x"})).rejects.toMatchObject({status:400});
  expect(await snapshot()).toBe(before);
 });
 it("serializes concurrent changes to one owner without losing either field or sequence; other owners remain separate",async()=>{

@@ -13,11 +13,10 @@ type State = { legacy: Row; canonical: Row };
 const version = "legacy-activity-mutation-v1";
 const entity = "legacy_session_mutation";
 const id = z.string().min(1).max(200).refine(x => x.trim() === x && !/[\u0000-\u001f\u007f]/.test(x) && x !== "__proto__");
-const reasonSchema = z.string().trim().min(1).max(500);
 const createSchema = z.object({ domain: z.enum(domainEnum), durationMinutes: z.number().int().positive(),
   timestamp: z.string().datetime({offset:true}), notes: z.string().optional(),
   isAnomaly: z.boolean().optional(), anomalyNote: z.string().nullable().optional() }).strict();
-const editSchema = updateSessionSchema.strict().extend({reason:reasonSchema});
+const editSchema = updateSessionSchema.strict();
 function parse<T>(schema:z.ZodType<T>,input:unknown):T {
   const r=schema.safeParse(input);if(!r.success)throw new BoundaryError(400);return r.data;
 }
