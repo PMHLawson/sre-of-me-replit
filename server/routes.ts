@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { createLegacySessionAdapter, readLegacyWriteThroughConfig, type LegacySessionAdapter } from "./services/legacy-session-adapter";
 import {
   insertSessionSchema,
   updateSessionSchema,
@@ -25,7 +26,11 @@ import { domainEnum } from "@shared/schema";
 
 export async function registerRoutes(
   httpServer: Server,
-  app: Express
+  app: Express,
+  sessionMutations: LegacySessionAdapter = createLegacySessionAdapter({
+    config: readLegacyWriteThroughConfig(process.env),
+    getPool: async () => (await import("./db")).pool,
+  }),
 ): Promise<Server> {
 
   // GET /api/sessions — return sessions for the authenticated user (most recent first)
@@ -217,6 +222,13 @@ export async function registerRoutes(
     }
     try {
       const userId: string = req.user.claims.sub;
+      const synchronized = await sessionMutations.create(req, {
+        domain: parsed.data.domain, durationMinutes: parsed.data.durationMinutes,
+        timestamp: parsed.data.timestamp, ...(parsed.data.notes === undefined ? {} : { notes: parsed.data.notes }),
+        ...(parsed.data.isAnomaly === undefined ? {} : { isAnomaly: parsed.data.isAnomaly }),
+        ...(parsed.data.anomalyNote === undefined ? {} : { anomalyNote: parsed.data.anomalyNote }),
+      });
+      if (synchronized !== undefined) return res.status(201).json(synchronized);
       const session = await storage.createSession({
         ...parsed.data,
         userId,
@@ -224,7 +236,8 @@ export async function registerRoutes(
         anomalyNote: parsed.data.isAnomaly ? (parsed.data.anomalyNote ?? null) : null,
       });
       res.status(201).json(serializeSession(session));
-    } catch {
+    } catch (error) {
+      if (sessionMutations.respondError(error, res, "create")) return;
       res.status(500).json({ message: "Failed to create session" });
     }
   });
@@ -308,10 +321,13 @@ export async function registerRoutes(
     }
     try {
       const userId: string = req.user.claims.sub;
+      const synchronized = await sessionMutations.edit(req, req.params.id, parsed.data);
+      if (synchronized !== undefined) return res.json(synchronized);
       const row = await storage.updateSession(userId, req.params.id, parsed.data);
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
-    } catch {
+    } catch (error) {
+      if (sessionMutations.respondError(error, res, "edit")) return;
       res.status(500).json({ message: "Failed to update session" });
     }
   });
@@ -320,10 +336,13 @@ export async function registerRoutes(
   app.delete("/api/sessions/:id", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
+      const synchronized = await sessionMutations.softDelete(req, req.params.id);
+      if (synchronized !== undefined) return res.json(synchronized);
       const row = await storage.softDeleteSession(userId, req.params.id);
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
-    } catch {
+    } catch (error) {
+      if (sessionMutations.respondError(error, res, "softDelete")) return;
       res.status(500).json({ message: "Failed to delete session" });
     }
   });
@@ -332,10 +351,13 @@ export async function registerRoutes(
   app.post("/api/sessions/:id/restore", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
+      const synchronized = await sessionMutations.restore(req, req.params.id);
+      if (synchronized !== undefined) return res.json(synchronized);
       const row = await storage.restoreSession(userId, req.params.id);
       if (!row) return res.status(404).json({ message: "Deleted session not found" });
       res.json(serializeSession(row));
-    } catch {
+    } catch (error) {
+      if (sessionMutations.respondError(error, res, "restore")) return;
       res.status(500).json({ message: "Failed to restore session" });
     }
   });
