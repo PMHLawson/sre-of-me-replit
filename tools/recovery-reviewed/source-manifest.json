@@ -1,0 +1,55 @@
+{
+  "purpose": "Exact reviewed disabled recovery source archive; private execution evidence excluded.",
+  "sources": [
+    {
+      "path": "source/capture.cjs",
+      "bytes": 9993,
+      "sha256": "35e22eb256c6698c2172dde3539ed9f515c45c2182c70632c9f9e140817ea2f9"
+    },
+    {
+      "path": "source/config.cjs",
+      "bytes": 2585,
+      "sha256": "2bfc5a2165d93c4ac4643fa9cb5e8beba0ee37f219aadf5341c754ef2a35511b"
+    },
+    {
+      "path": "source/catalog.cjs",
+      "bytes": 11867,
+      "sha256": "d62328782b6157c40060b429097c61f6d856a7e0db5518464922dd4cea5b38a1"
+    },
+    {
+      "path": "source/gates.cjs",
+      "bytes": 5965,
+      "sha256": "9542f0e1a6c98147dc2310310292d88ebf1f6de5b4688de5b586712cd7e7dacb"
+    },
+    {
+      "path": "source/preflight.cjs",
+      "bytes": 2088,
+      "sha256": "8305f21946ccb2248600b8b30b4ced96fc1b6fabd0aba14fd434b17aeb6a8b38"
+    },
+    {
+      "path": "source/stream.cjs",
+      "bytes": 4759,
+      "sha256": "01470cbeebba251b7cfb7f2ba71ef3a1378e5140b0f7d7670ad6e22c5234b7f7"
+    },
+    {
+      "path": "source/common.cjs",
+      "bytes": 2429,
+      "sha256": "8b081707185c457ad3a3be14b8265b55ca7e22664a976a62fdbcc9ef39553fe3"
+    },
+    {
+      "path": "source/test-receipt.cjs",
+      "bytes": 3724,
+      "sha256": "acaa538600eb25be0e26b9170b0d1f8c710232960c284d7ed6a9840f71b4536b"
+    },
+    {
+      "path": "source/layout-tests.cjs",
+      "bytes": 5825,
+      "sha256": "273b385206ddbcb72a3c045680e4e7ef45b55053156ec84032b9a673d6b03bb1"
+    },
+    {
+      "path": "source/keyed-fingerprints.cjs",
+      "bytes": 3200,
+      "sha256": "5495a0c213b33c500ab2b6292783c3d71f231828ff8e516eeeb74ba21bc0b5a1"
+    }
+  ]
+}
