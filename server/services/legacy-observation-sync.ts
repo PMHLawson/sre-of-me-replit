@@ -294,3 +294,37 @@ export async function importLegacyObservations(db: OwnershipDatabase,request: Re
 export async function reconcileLegacyObservations(db: OwnershipDatabase,request: Request) {
   return (await run(db,request,false)).reconciliation;
 }
+/**
+ * Private, read-only provenance gate. Reconstruct only the immutable import-time
+ * set, so later legitimate mutations cannot rewrite the meaning of the import.
+ * Call inside the same quiet collection transaction; never seed or repair here.
+ */
+export async function verifyLegacyImportProvenance(db: OwnershipDatabase, request: Request) {
+  authenticate(request);
+  return bounded(() => db.transaction(async tx => {
+    await tx.query("SELECT set_config('TimeZone','UTC',true)");
+    const context = await createOrgContextResolver(db)(request);
+    const current = await read(tx,db,context);
+    const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+      const r = a.after?.sourceSnapshot?.row;
+      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+        current.sessions.some(s => s.id === r.id));
+      return {...r,timestamp:new Date(r.timestamp),deleted_at:r.deleted_at === null ? null : new Date(r.deleted_at),raw:r};
+    });
+    const edits = current.audits.filter(a => a.entity_type === types[1]).map(a => {
+      const r = a.before?.sourceEdit;
+      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+        current.edits.some(e => e.id === r.id && equal(e.raw,r)));
+      return {...r,edited_at:new Date(r.edited_at),raw:r};
+    });
+    requireValid(new Set(sessions.map(s => s.id)).size === sessions.length &&
+      new Set(edits.map(e => e.id)).size === edits.length);
+    const observations = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+      const r = a.after?.importedObservation; requireValid(r && typeof r.observation_id === "string");
+      return {...r,raw:r};
+    });
+    const preserved = {...current,sessions,edits,observations};
+    requireValid(report(preserved,plan(preserved)).clean);
+    return {importedSessions:sessions.length,importedEdits:edits.length};
+  }));
+}

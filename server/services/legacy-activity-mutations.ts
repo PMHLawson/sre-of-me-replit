@@ -5,6 +5,7 @@ import { domainEnum, updateSessionSchema } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, revalidate } from "../lib/org-context";
 import { createAuditService } from "../lib/audit-service";
+import { verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
 
 type Request = Parameters<ReturnType<typeof createPinnedOwnershipUnit>["run"]>[0];
@@ -98,6 +99,26 @@ async function lineage(u:OwnershipUnit,current:State):Promise<number> {
       equal(await mapping(u,next.state.legacy),next.state.canonical));
     if(next.operation==="create")requireValid(i===0&&previous===null&&imports.length===0&&a.action==="create");
     else requireValid(previous!==null&&a.action==="update");
+    if(next.operation==="create")requireValid(next.state.legacy.deleted_at===null);
+    else {
+      const expected={...previous!.legacy},prior:Row={};
+      if(next.operation==="edit"){
+        requireValid(previous!.legacy.deleted_at===null&&next.state.legacy.deleted_at===null&&updateSessionSchema.shape.reason.safeParse(a.reason).success);
+        for(const [field,column]of [["domain","domain"],["durationMinutes","duration_minutes"],["timestamp","timestamp"],
+          ["notes","notes"],["isAnomaly","is_anomaly"],["anomalyNote","anomaly_note"]]as const){
+          const value=next.state.legacy[column],old=previous!.legacy[column];
+          const same=field==="timestamp"?ticks(value)===ticks(old):equal(value,old);
+          if(!same){expected[column]=value;prior[field]=old;}
+        }
+        let delta:unknown;try{delta=JSON.parse(next.legacyEdit?.changed_fields);}catch{throw new BoundaryError(400);}
+        requireValid(equal(delta,prior));
+      }else{
+        const after=next.state.legacy.deleted_at,before=previous!.legacy.deleted_at;
+        requireValid(next.operation==="restore"?before!==null&&after===null:before===null&&after!==null);
+        expected.deleted_at=after;
+      }
+      requireValid(equal(expected,next.state.legacy));
+    }
     if(next.operation==="edit"){
       const e=next.legacyEdit;requireValid(e?.session_id===sourceId&&e.user_id===actor&&e.reason===a.reason&&typeof e.changed_fields==="string");
       const edits=(await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE id=$1 AND session_id=$2 AND user_id=$3 FOR SHARE",[e.id,sourceId,actor])).rows;
@@ -177,6 +198,59 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
     }),
     softDelete:(request:Request,key:unknown)=>transition(request,key,false),
     restore:(request:Request,key:unknown)=>transition(request,key,true),
+    /** Quiet, server-only collection gate. Locks prevent phantoms; no row is written or repaired. */
+    reconcile:(request:Request)=>{
+      try {
+        const actor = (request?.user as {claims?:{sub?:unknown}} | undefined)?.claims?.sub;
+        if (typeof request?.isAuthenticated !== "function" || request.isAuthenticated() !== true || !id.safeParse(actor).success)
+          throw new BoundaryError(401);
+      } catch { throw new BoundaryError(401); }
+      for (const key of ["body","query","params"]) {
+        const v = (request as any)[key];
+        requireValid(v == null || (typeof v === "object" && !Array.isArray(v) && Reflect.ownKeys(v).length === 0));
+      }
+      return run(request,async u=>{
+        // This is a bounded maintenance gate, not a request-path background task.
+        await u.tx.query("LOCK TABLE public.sessions, public.session_edits, public.observations, public.audit_events IN SHARE MODE");
+        const provenance = await verifyLegacyImportProvenance(u.db,request);
+        const {orgId:org,actorUserId:actor} = u.context;
+        const sessions = (await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE user_id=$1 ORDER BY id FOR SHARE",[actor])).rows.map(r=>r.raw as Row);
+        const observations = (await u.tx.query("SELECT to_jsonb(o) raw FROM public.observations o WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id FOR SHARE",[org,actor])).rows.map(r=>r.raw as Row);
+        const edits = (await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE user_id=$1 OR session_id IN (SELECT id FROM public.sessions WHERE user_id=$1) ORDER BY id FOR SHARE",[actor])).rows.map(r=>r.raw as Row);
+        const audits = (await u.tx.query("SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 ORDER BY audit_event_id FOR SHARE",[org])).rows.map(r=>r.raw as Row);
+        const relevant = audits.filter(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) ||
+          [version,"legacy-history-import-v1"].includes(a.after?.version) || [version,"legacy-history-import-v1"].includes(a.before?.version));
+        requireValid(relevant.every(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) &&
+          a.actor_kind === "user" && a.actor_user_id === actor));
+        const mutations = relevant.filter(a=>a.entity_type === entity);
+        requireValid(mutations.every(a=>sessions.some(s=>s.id === a.after?.state?.legacy?.id) &&
+          a.entity_id === JSON.stringify([a.after.state.legacy.id])));
+        const editIds = relevant.filter(a=>a.entity_type === "legacy_edit_import").map(a=>a.before?.sourceEdit?.id);
+        editIds.push(...mutations.filter(a=>a.after?.operation === "edit").map(a=>a.after?.legacyEdit?.id));
+        requireValid(editIds.every(x=>typeof x === "string") && new Set(editIds).size === editIds.length &&
+          edits.length === editIds.length && edits.every(e=>e.user_id === actor && editIds.includes(e.id) && sessions.some(s=>s.id === e.session_id)));
+        let totalMutations = 0; const canonicalIds = new Set<string>();
+        for (const s of sessions) {
+          const state = await get(u,parse(id,s.id));
+          requireValid(equal(state.legacy,s)); totalMutations += await lineage(u,state);
+          canonicalIds.add(state.canonical.observation_id);
+        }
+        requireValid(canonicalIds.size === sessions.length && observations.length === sessions.length &&
+          observations.every(o=>canonicalIds.has(o.observation_id)) && totalMutations === mutations.length);
+        const domains = (await u.tx.query("SELECT domain_id,slug FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY slug FOR SHARE",[org,actor])).rows;
+        const summaries = domains.map(d=>{
+          const legacy = sessions.filter(s=>s.domain === d.slug), canonical = observations.filter(o=>o.domain_id === d.domain_id);
+          const count = (rows:Row[],old:boolean)=>({total:rows.length,active:rows.filter(r=>r.deleted_at === null).length,
+            deleted:rows.filter(r=>r.deleted_at !== null).length,anomaly:rows.filter(r=>r.is_anomaly).length,
+            durationMinutes:rows.reduce((n,r)=>n+(old?r.duration_minutes:Object.values(r.observation.values).reduce((m:number,v:any)=>m+v.value,0)),0)});
+          const a=count(legacy,true), b=count(canonical,false); requireValid(equal(a,b));
+          return {slug:d.slug,legacy:a,canonical:b};
+        });
+        const unowned = Number((await u.tx.query("SELECT count(*)::int n FROM public.sessions WHERE user_id IS NULL")).rows[0].n);
+        return {clean:true,counts:{ownedSessions:sessions.length,canonicalSessions:observations.length,legacyEdits:edits.length,
+          ...provenance,mutationEvents:totalMutations,unownedSessions:unowned},domains:summaries};
+      });
+    },
     verify:(request:Request,input:unknown)=>run(request,async u=>{
       const state=await get(u,parse(id,input));return {clean:true,mutations:await lineage(u,state)};
     }),
