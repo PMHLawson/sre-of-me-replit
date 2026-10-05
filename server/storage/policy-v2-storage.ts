@@ -106,6 +106,23 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     await get(tx,"domain",[domainId],true);
     return (await list(tx,"policy"," AND domain_id=$3",[domainId])).sort((a,b)=>a.revision-b.revision);
   }
+  async function appendPolicy(tx:Transaction,input:unknown,reason:unknown) {
+    const c=parse(DomainConfigurationSchema,input),r=parse(reasonSchema,reason);owned(c);
+    const previous=await history(tx,c.domainId),last=previous.at(-1);
+    // Capture actual server time only AFTER acquiring domain/history locks.
+    const now=clock();
+    if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
+    if(Date.parse(c.effectiveFrom)<now.getTime())throw new BoundaryError(400);
+    if(last?!validateProspectiveRevision(last.configuration,c,c.effectiveFrom).success:c.revision!==1)throw new BoundaryError(400);
+    const persisted=await list(tx,"observation"," AND domain_id=$3",[c.domainId]);
+    if(!ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:[...previous.map(p=>p.configuration),c],observations:persisted.map(o=>o.observation)}).success)
+    throw new BoundaryError(400);
+    const result=await insert(tx,"policy",{policy_version_id:c.policyVersionId,domain_id:c.domainId,revision:c.revision,
+    effective_from:c.effectiveFrom,previous_version_id:c.previousVersionId??null,configuration:c},r);
+    for(const m of c.measurements)await insert(tx,"dimension",{domain_id:c.domainId,policy_version_id:c.policyVersionId,measurement_id:m.measurementId,definition:m},r);
+    return result;
+  }
+
   // Read-only entity surfaces share one strictly constrained implementation.
   const reads = <K extends Kind>(kind:K) => Object.freeze({
     get: (keys:unknown) => run(tx=>get(tx,kind,identity(kind,keys))),
@@ -125,6 +142,24 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       create:(input:unknown,reason:unknown)=>run(tx=>{
         const p=parse(domainInput,input);return insert(tx,"domain",{domain_id:p.domainId,slug:p.slug,display_name:p.displayName},parse(reasonSchema,reason));
       }),
+      // One transaction covers the domain, its first version, dimensions and all audits.
+      // Used by the management service only after injecting authenticated identities.
+      createWithPolicy:(input:unknown,configuration:unknown,reason:unknown)=>run(async tx=>{
+        const p=parse(domainInput,input),c=parse(DomainConfigurationSchema,configuration),r=parse(reasonSchema,reason);owned(c);
+        if(c.domainId!==p.domainId||c.displayName!==p.displayName||c.revision!==1||c.previousVersionId!==undefined)
+          throw new BoundaryError(400);
+        let domain;
+        try { domain=await insert(tx,"domain",{domain_id:p.domainId,slug:p.slug,display_name:p.displayName},r); }
+        catch(error) {
+          // Do not expose another owner's row or PostgreSQL error details.
+          // A reused org slug is a caller validation failure, including races.
+          if((error as {code?:unknown;constraint?:unknown})?.code==="23505"&&
+            (error as {constraint?:unknown}).constraint==="domains_slug")throw new BoundaryError(400);
+          throw error;
+        }
+        const policy=await appendPolicy(tx,c,r);
+        return {domain,policy};
+      }),
       update:(keys:unknown,input:unknown,reason:unknown)=>run(tx=>{
         const p=parse(domainPatch,input),v:Record<string,unknown>={};
         if(p.displayName!==undefined)v.display_name=p.displayName;
@@ -134,22 +169,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       }),
     }),
     policies:Object.freeze({...reads("policy"),
-      append:(input:unknown,reason:unknown)=>run(async tx=>{
-        const c=parse(DomainConfigurationSchema,input),r=parse(reasonSchema,reason);owned(c);
-        const previous=await history(tx,c.domainId),last=previous.at(-1);
-        // Capture actual server time only AFTER acquiring domain/history locks.
-        const now=clock();
-        if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
-        if(Date.parse(c.effectiveFrom)<now.getTime())throw new BoundaryError(400);
-        if(last?!validateProspectiveRevision(last.configuration,c,c.effectiveFrom).success:c.revision!==1)throw new BoundaryError(400);
-        const persisted=await list(tx,"observation"," AND domain_id=$3",[c.domainId]);
-        if(!ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:[...previous.map(p=>p.configuration),c],observations:persisted.map(o=>o.observation)}).success)
-          throw new BoundaryError(400);
-        const result=await insert(tx,"policy",{policy_version_id:c.policyVersionId,domain_id:c.domainId,revision:c.revision,
-          effective_from:c.effectiveFrom,previous_version_id:c.previousVersionId??null,configuration:c},r);
-        for(const m of c.measurements)await insert(tx,"dimension",{domain_id:c.domainId,policy_version_id:c.policyVersionId,measurement_id:m.measurementId,definition:m},r);
-        return result;
-      }),
+      append:(input:unknown,reason:unknown)=>run(tx=>appendPolicy(tx,input,reason)),
     }),
     dimensions:reads("dimension"),
     observations:Object.freeze({...reads("observation"),

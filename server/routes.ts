@@ -12,6 +12,9 @@ import {
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
+import { createPolicyV2Router } from "./routes/policy-v2";
+import { createDomainServiceV2 } from "./services/domain-service-v2";
+import { createPinnedOwnershipUnit } from "./lib/pinned-ownership-unit";
 import {
   computeCompositeState,
   isInRampUp,
@@ -32,6 +35,14 @@ export async function registerRoutes(
     getPool: async () => (await import("./db")).pool,
   }),
 ): Promise<Server> {
+  // Original Passport authentication runs before the lazy pool connection.
+  // Management uses the existing ownership transaction; no caller supplies authority.
+  app.use("/api/v2/domains", createPolicyV2Router({
+    authenticate: isAuthenticated,
+    service: createDomainServiceV2(createPinnedOwnershipUnit({
+      connect: async () => (await import("./db")).pool.connect(),
+    })),
+  }));
 
   // GET /api/sessions — return sessions for the authenticated user (most recent first)
   app.get("/api/sessions", isAuthenticated, async (req: any, res) => {
