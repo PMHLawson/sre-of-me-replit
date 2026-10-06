@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ActivityCreateInputSchema, ActivityTimestampSchema, ActivityViewSchema, ActivityListInputSchema,
-  ActivityEligibilitySchema, validatePracticeValues } from "./activity";
+  ActivityEligibilitySchema,ActivityCreateResultSchema,ActivitySubmissionResultSchema, ActivityEditInputSchema,ActivityLifecycleInputSchema,ActivityMutationResultSchema, validatePracticeValues } from "./activity";
 import { configurationFor, MEASUREMENTS, FREQUENCY_CASES } from "./fixtures/domain-config-cases";
 
 const configuration = configurationFor("raw", MEASUREMENTS[2], 12);
@@ -73,11 +73,35 @@ describe("typed personal practice HTTP contract", () => {
   it("binds a read DTO to its exact owned configuration and never permits calculated scores", () => {
     const view = { activityId: "saved", ownerUserId: configuration.ownerUserId, domainId: configuration.domainId,
       policyVersionId: configuration.policyVersionId, practiceEvent: true, observedAt: input.observedAt, values: input.values,
-      deletedAt: null, configuration, scoreAvailability: "not_calculated", attainmentAvailability: "not_calculated" };
+      deletedAt: null, stateFingerprint:"a".repeat(64),configuration, scoreAvailability: "not_calculated", attainmentAvailability: "not_calculated" };
     expect(ActivityViewSchema.safeParse(view).success).toBe(true);
     for (const patch of [{ ownerUserId: "other" }, { domainId: "foreign" }, { policyVersionId: "foreign" },
       { scoreAvailability: "calculated" }, { idempotencyKey: "storage-key" }])
       expect(ActivityViewSchema.safeParse({ ...view, ...patch }).success).toBe(false);
+  });
+  it("acknowledgements require explicit logical keys without leaking raw persistence authority",()=>{
+    const activity={activityId:"saved",ownerUserId:configuration.ownerUserId,domainId:configuration.domainId,policyVersionId:configuration.policyVersionId,
+      practiceEvent:true,observedAt:input.observedAt,values:input.values,deletedAt:null,stateFingerprint:"a".repeat(64),configuration,
+      scoreAvailability:"not_calculated",attainmentAvailability:"not_calculated"};
+    expect(ActivityCreateResultSchema.safeParse({created:false,submissionKey:input.submissionKey,activity}).success).toBe(true);
+    expect(ActivitySubmissionResultSchema.safeParse({submissionKey:input.submissionKey,activity}).success).toBe(true);
+    expect(ActivityMutationResultSchema.safeParse({changed:false,operation:"edit",mutationKey:"known-mutation",activity,appliedStateFingerprint:"b".repeat(64)}).success).toBe(true);
+    for(const envelope of [{created:false,activity},{created:false,submissionKey:input.submissionKey,activity,idempotencyKey:"raw-storage-authority"}])
+      expect(ActivityCreateResultSchema.safeParse(envelope).success).toBe(false);
+    expect(ActivitySubmissionResultSchema.safeParse({activity}).success).toBe(false);
+    expect(ActivityMutationResultSchema.safeParse({changed:false,operation:"edit",activity,appliedStateFingerprint:"b".repeat(64)}).success).toBe(false);
+  });
+  it("requires reasoned fingerprinted strict correction/lifecycle requests without accepting mutable authority",()=>{
+    const lifecycle={mutationKey:"deliberate-change",expectedStateFingerprint:"b".repeat(64),reason:"  Clarify the original entry  "};
+    expect(ActivityLifecycleInputSchema.parse(lifecycle).reason).toBe("Clarify the original entry");
+    const edit={...lifecycle,policyVersionId:input.policyVersionId,practiceEvent:true,observedAt:input.observedAt,values:input.values};
+    expect(ActivityEditInputSchema.safeParse(edit).success).toBe(true);
+    for(const patch of [{reason:" "},{expectedStateFingerprint:"stale-text"},{mutationKey:"__proto__"},{deletedAt:null},{ownerUserId:"foreign"},
+      {domainId:"new-domain"},{submissionKey:"new-submission"},{isAnomaly:true},{operation:"restore"}]) {
+      expect(ActivityLifecycleInputSchema.safeParse({...lifecycle,...patch}).success).toBe(false);
+      expect(ActivityEditInputSchema.safeParse({...edit,...patch}).success).toBe(false);
+    }
+    expect(ActivityMutationResultSchema.safeParse({changed:false,operation:"delete",activity:{},appliedStateFingerprint:"a".repeat(64)}).success).toBe(false);
   });
   it("bounds paging without coercing authority or accepting contradictory eligibility", () => {
     expect(ActivityListInputSchema.parse({})).toEqual({ limit: 50 });

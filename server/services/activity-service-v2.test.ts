@@ -7,7 +7,7 @@ import { createPolicyV2Storage } from "../storage/policy-v2-storage";
 import { createActivityServiceV2 } from "./activity-service-v2";
 import { configurationFor, MEASUREMENTS, FREQUENCY_CASES, conditionFor } from "../../shared/fixtures/domain-config-cases";
 import type { DomainConfiguration, MeasurementDefinition } from "../../shared/domain-config";
-import type { ActivityCreateInput } from "../../shared/activity";
+import type { ActivityCreateInput, ActivityView, ActivityEditInput, ActivityLifecycleInput } from "../../shared/activity";
 
 const request = (actor: string) => ({ isAuthenticated: () => true, user: { claims: { sub: actor } } });
 const now = () => new Date("2026-03-01T00:00:00Z");
@@ -43,6 +43,14 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
     return { submissionKey: key, domainId: c.domainId, policyVersionId: c.policyVersionId, practiceEvent: true,
       observedAt: "2026-01-10T12:00:00.000Z", values: { [m.measurementId]: { ...supplied, ...(m.taskVariantId ? { taskVariantId: m.taskVariantId } : {}) } } };
   }
+  function correction(activity:ActivityView,key:string,amount=9):ActivityEditInput {
+    return {mutationKey:key,expectedStateFingerprint:activity.stateFingerprint,reason:"Correct a synthetic transcription",
+      policyVersionId:activity.policyVersionId,practiceEvent:true,observedAt:activity.observedAt,
+      values:Object.fromEntries(Object.entries(activity.values).map(([id,value])=>{if(value.valueType!=="integer")throw Error("Synthetic count correction requires its declared integer unit");return [id,{...value,value:amount}];}))};
+  }
+  const lifecycle=(activity:ActivityView,key:string):ActivityLifecycleInput=>({mutationKey:key,
+    expectedStateFingerprint:activity.stateFingerprint,reason:"Synthetic lifecycle reason"});
+  async function updates(id:string){return (await f.client.query("SELECT * FROM audit_events WHERE entity_type='observations' AND action='update' AND entity_id::jsonb->>0=$1 ORDER BY occurred_at,audit_event_id",[id])).rows;}
   beforeAll(async () => {
     f = await startFixture("activity-service-v2"); verifyFixture(f.root);
     await f.client.query(`INSERT INTO users(id) VALUES ('practice-a'),('practice-b'),('practice-c'),('practice-none');
@@ -62,7 +70,7 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
     const bad = createActivityServiceV2(createPinnedOwnershipUnit({ connect: async () => { connects++; throw Error("private"); } } as any));
     for (const r of [{}, request("__proto__"), request(" "), { ...request("practice-a"), isAuthenticated: () => false },
       { ...request("practice-a"), isAuthenticated: () => { throw Error("private"); } }])
-      for (const call of [() => bad.create(r, {}), () => bad.read(r, "x"), () => bad.submission(r, "x"), () => bad.list(r), () => bad.eligibility(r, "x")])
+      for (const call of [() => bad.create(r, {}), () => bad.read(r, "x"), () => bad.submission(r, "x"), () => bad.list(r), () => bad.eligibility(r, "x"),() => bad.edit(r,"x",{}),() => bad.delete(r,"x",{}),() => bad.restore(r,"x",{}),() => bad.mutation(r,"x","x")])
         await expect(call()).rejects.toMatchObject({ status: 401 });
     for (const payload of [{ ...input(configs.a, "invalid"), ownerUserId: "practice-b" }, { ...input(configs.a, "invalid"), values: {} as any, practiceEvent: false },
       { ...input(configs.a, "invalid"), observedAt: "2026-01-10T12:00:00.0001Z" },
@@ -81,7 +89,7 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
     expect(new Set(Object.values(rows).map(r => r.activity.activityId)).size).toBe(3);
     for (const key of ["a", "b", "c"]) {
       const r = request("practice-" + key);
-      expect(await service.submission(r, "same-submission")).toEqual(rows[key].activity);
+      expect(await service.submission(r, "same-submission")).toEqual({submissionKey:"same-submission",activity:rows[key].activity});
       for (const foreign of ["a", "b", "c"].filter(k => k !== key)) {
         await unchanged(() => service.read(r, rows[foreign].activity.activityId), 404);
         await unchanged(() => service.eligibility(r, configs[foreign].domainId), 404);
@@ -228,8 +236,8 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
       }, release: (destroy?: boolean) => { destroyed = destroy === true; client.release(destroy); } } as any;
     } }), { clock: now });
     await expect(losing.create(request("practice-a"), p)).rejects.toMatchObject({ status: 503 }); expect(destroyed).toBe(true);
-    const saved = await service.submission(request("practice-a"), p.submissionKey), before = await snapshot();
-    expect(await service.create(request("practice-a"), p)).toEqual({ created: false, activity: saved }); expect(await snapshot()).toBe(before);
+    const saved = (await service.submission(request("practice-a"), p.submissionKey)).activity, before = await snapshot();
+    expect(await service.create(request("practice-a"), p)).toEqual({ created: false, submissionKey:p.submissionKey,activity: saved }); expect(await snapshot()).toBe(before);
     expect((await f.client.query("SELECT audit_event_id FROM audit_events WHERE entity_type='observations' AND entity_id=$1", [JSON.stringify([saved.activityId])])).rows).toHaveLength(1);
   });
   it("late observation/audit SQL failures roll back all rows, with no attempt to recover in the aborted unit", async () => {
@@ -240,6 +248,142 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
       try { await unchanged(() => service.create(request("practice-a"), input(c, "rollback-" + table)), 503); }
       finally { await f.client.query(`DROP TRIGGER reject_practice ON ${table}; DROP FUNCTION reject_practice()`); }
     }
+  });
+  it("reasoned corrections replace raw fields atomically, retain immutable identity, and expose key-correlated reconciliation",async()=>{
+    const c=await seed("practice-a","correction"),p={...input(c,"correction-create",12),notes:"Original note",context:{description:"Original context"}},first=await service.create(request("practice-a"),p);
+    const edit={...correction(first.activity,"edit-one",0),notes:"Corrected note"},saved=await service.edit(request("practice-a"),first.activity.activityId,edit);
+    expect(saved).toMatchObject({mutationKey:edit.mutationKey,changed:true,operation:"edit",activity:{activityId:first.activity.activityId,domainId:c.domainId,notes:"Corrected note",deletedAt:null}});
+    expect(saved.activity.values["m-cupcakes"].value).toBe(0);expect(saved.activity).not.toHaveProperty("context");expect(saved.activity.configuration).toEqual(c);
+    expect(saved.activity.stateFingerprint).not.toBe(first.activity.stateFingerprint);expect(saved.appliedStateFingerprint).toBe(saved.activity.stateFingerprint);
+    const audits=await updates(first.activity.activityId);expect(audits).toHaveLength(1);expect(audits[0].reason).toBe(edit.reason);
+    for(const snapshot of [audits[0].before,audits[0].after]) {expect(Object.keys(snapshot)).toHaveLength(13);expect(snapshot).not.toHaveProperty("__personal_millisecond_time");expect(snapshot).not.toHaveProperty("__personal_deleted_millisecond_time");}
+    expect(audits[0].before.observation.notes).toBe("Original note");expect(audits[0].after.observation.values["m-cupcakes"].value).toBe(0);
+    const before=await snapshot();expect(await service.mutation(request("practice-a"),first.activity.activityId,edit.mutationKey)).toEqual({...saved,changed:false});
+    expect(await service.edit(request("practice-a"),first.activity.activityId,edit)).toEqual({...saved,changed:false});expect(await snapshot()).toBe(before);
+    expect((await service.submission(request("practice-a"),p.submissionKey))).toEqual({submissionKey:p.submissionKey,activity:saved.activity});
+    expect((await service.create(request("practice-a"),p))).toEqual({created:false,submissionKey:p.submissionKey,activity:saved.activity});expect(await snapshot()).toBe(before);
+  });
+  it("edits every declared raw value kind without converting units or manufacturing duration",async()=>{
+    for(let i=0;i<MEASUREMENTS.length;i++){
+      const m=MEASUREMENTS[i],c=await seed("practice-a","edit-kind-"+i,m,m.valueType==="boolean"?true:20);
+      const first=(await service.create(request("practice-a"),input(c,"edit-kind-create-"+i,m.valueType==="boolean"?false:0))).activity;
+      const source=input(c,"unused",m.valueType==="boolean"?true:2);
+      const edited=await service.edit(request("practice-a"),first.activityId,{mutationKey:"edit-kind-"+i,expectedStateFingerprint:first.stateFingerprint,
+        reason:"Correct synthetic typed amount",policyVersionId:c.policyVersionId,practiceEvent:true,observedAt:first.observedAt,values:source.values});
+      expect(edited.activity.values[m.measurementId]).toEqual(source.values[m.measurementId]);expect(edited.activity.configuration).toEqual(c);
+      expect(edited.activity).not.toHaveProperty("durationMinutes");expect(edited.activity.scoreAvailability).toBe("not_calculated");
+    }
+  });
+  it("first no-ops consume no mutation key, while stale fingerprints and reused changed requests cannot overwrite",async()=>{
+    const c=await seed("practice-a","no-op"),first=(await service.create(request("practice-a"),input(c,"no-op-create"))).activity;
+    const p=correction(first,"reusable-no-op",12);await unchanged(()=>service.edit(request("practice-a"),first.activityId,p),400);
+    await unchanged(()=>service.restore(request("practice-a"),first.activityId,lifecycle(first,"restore-no-op")),400);
+    await unchanged(()=>service.mutation(request("practice-a"),first.activityId,p.mutationKey),404);expect(await updates(first.activityId)).toHaveLength(0);
+    const saved=await service.edit(request("practice-a"),first.activityId,{...p,values:correction(first,p.mutationKey,9).values});
+    for(const altered of [{...p,values:correction(first,p.mutationKey,10).values},{...p,reason:"A changed reason",values:saved.activity.values},
+      {...correction(first,"stale-key",10)}, {...correction(saved.activity,p.mutationKey,9)}])
+      await unchanged(()=>service.edit(request("practice-a"),first.activityId,altered),400);
+    await unchanged(()=>service.delete(request("practice-a"),first.activityId,{...lifecycle(first,p.mutationKey)}),400);
+    expect(await updates(first.activityId)).toHaveLength(1);
+  });
+  it("delete/restore retries retain the persisted delete instant and acknowledge current later state without resurrecting",async()=>{
+    const c=await seed("practice-a","lifecycle"),p=input(c,"lifecycle-create"),first=(await service.create(request("practice-a"),p)).activity;
+    const del=lifecycle(first,"delete-one"),deleted=await service.delete(request("practice-a"),first.activityId,del);
+    expect(deleted.activity.deletedAt).toBe(now().toISOString());expect(deleted.changed).toBe(true);expect(deleted.operation).toBe("delete");
+    await unchanged(()=>service.delete(request("practice-a"),first.activityId,lifecycle(deleted.activity,"delete-no-op")),400);
+    await unchanged(()=>service.edit(request("practice-a"),first.activityId,correction(deleted.activity,"edit-deleted")),400);
+    const replayClock=createActivityServiceV2(createPinnedOwnershipUnit(pool),{clock:()=>{throw Error("Equal committed retry must not read a new clock");}});
+    const before=await snapshot();expect(await replayClock.delete(request("practice-a"),first.activityId,del)).toEqual({...deleted,changed:false});
+    expect((await service.create(request("practice-a"),p)).activity.deletedAt).toBe(deleted.activity.deletedAt);expect(await snapshot()).toBe(before);
+    const restore=lifecycle(deleted.activity,"restore-one"),restored=await service.restore(request("practice-a"),first.activityId,restore);
+    expect(restored.activity.deletedAt).toBeNull();expect(restored.appliedStateFingerprint).toBe(first.stateFingerprint);
+    const edited=await service.edit(request("practice-a"),first.activityId,correction(restored.activity,"edit-after-restore",10));
+    const after=await snapshot(),old=await replayClock.delete(request("practice-a"),first.activityId,del);
+    expect(old.activity).toEqual(edited.activity);expect(old.appliedStateFingerprint).toBe(deleted.appliedStateFingerprint);
+    expect(await service.restore(request("practice-a"),first.activityId,restore)).toMatchObject({changed:false,activity:edited.activity,appliedStateFingerprint:restored.appliedStateFingerprint});
+    expect(await snapshot()).toBe(after);expect(await updates(first.activityId)).toHaveLength(3);
+  });
+  it("new edit/restore gates active custom history but inactive or subsequently bound manual events can still be deleted",async()=>{
+    const c=await seed("practice-a","inactive-correction"),first=(await service.create(request("practice-a"),input(c,"inactive-correction-create"))).activity;
+    await f.client.query("UPDATE domains SET deactivated_at='2026-02-01' WHERE domain_id=$1",[c.domainId]);
+    await unchanged(()=>service.edit(request("practice-a"),first.activityId,correction(first,"inactive-edit")),400);
+    const deleted=await service.delete(request("practice-a"),first.activityId,lifecycle(first,"inactive-delete"));
+    await unchanged(()=>service.restore(request("practice-a"),first.activityId,lifecycle(deleted.activity,"inactive-restore")),400);
+    await f.client.query("UPDATE domains SET deactivated_at=NULL WHERE domain_id=$1",[c.domainId]);
+    const context=await createOrgContextResolver(f.db)(request("practice-a"));await createPolicyV2Storage(f.db,context).bindings.create({bindingId:"after-personal-binding",
+      domainId:c.domainId,sourceKind:"manual-legacy",externalId:"after-personal-binding"},"Synthetic later writer binding");
+    await unchanged(()=>service.restore(request("practice-a"),first.activityId,lifecycle(deleted.activity,"legacy-restore")),400);
+    // An already committed delete still acknowledges even after the writer/state changed.
+    expect((await service.delete(request("practice-a"),first.activityId,lifecycle(first,"inactive-delete")))).toMatchObject({changed:false,activity:deleted.activity});
+  });
+  it("corrections select the exact historical half-open policy and reject wrong successors or manufactured frequency amounts",async()=>{
+    const c=await seed("practice-a","correct-history"),context=await createOrgContextResolver(f.db)(request("practice-a"));
+    const next={...structuredClone(c),revision:2,previousVersionId:c.policyVersionId,policyVersionId:"correct-history-v2",effectiveFrom:"2026-02-01T00:00:00.125Z"};
+    await createPolicyV2Storage(f.db,context,{clock:()=>new Date(c.effectiveFrom)}).policies.append(next,"Synthetic historical successor");
+    const first=(await service.create(request("practice-a"),input(c,"correct-history-create"))).activity;
+    await unchanged(()=>service.edit(request("practice-a"),first.activityId,{...correction(first,"bad-boundary"),observedAt:next.effectiveFrom}),400);
+    const changed=await service.edit(request("practice-a"),first.activityId,{...correction(first,"correct-boundary"),policyVersionId:next.policyVersionId,observedAt:next.effectiveFrom});
+    expect(changed.activity.configuration).toEqual(next);expect(changed.activity.observedAt).toBe(next.effectiveFrom);
+    await unchanged(()=>service.edit(request("practice-a"),first.activityId,{...correction(changed.activity,"foreign-correction"),policyVersionId:configs.b.policyVersionId}),404);
+    const frequency=FREQUENCY_CASES[0].configuration.measurements.find(m=>m.kind==="frequency")!;
+    const fc=await seed("practice-a","correct-frequency",MEASUREMENTS[2],12,c=>({...c,measurements:[frequency],targets:{normal:{targetId:"frequency-target",conditions:[conditionFor(frequency,3)]}}}));
+    const ffirst=(await service.create(request("practice-a"),{submissionKey:"frequency-correct-create",domainId:fc.domainId,policyVersionId:fc.policyVersionId,practiceEvent:true,observedAt:"2026-01-10T00:00:00Z",values:{}})).activity;
+    const fedit={...correction(ffirst,"frequency-edit"),observedAt:"2026-01-11T00:00:00Z",values:{}};
+    expect((await service.edit(request("practice-a"),ffirst.activityId,fedit)).activity.values).toEqual({});
+    await unchanged(()=>service.edit(request("practice-a"),ffirst.activityId,{...fedit,mutationKey:"frequency-total",values:{[frequency.measurementId]:{valueType:"integer",value:3,unitId:frequency.unit.unitId}}}),400);
+  });
+  it("parallel equal mutation keys converge; different stale edits admit one winner without losing updates",async()=>{
+    const c=await seed("practice-a","mutation-race"),first=(await service.create(request("practice-a"),input(c,"mutation-race-create"))).activity,p=correction(first,"equal-race",9);
+    const equal=await Promise.all([service.edit(request("practice-a"),first.activityId,p),service.edit(request("practice-a"),first.activityId,p)]);
+    expect(equal.filter(r=>r.changed)).toHaveLength(1);expect(equal[0].activity).toEqual(equal[1].activity);expect(await updates(first.activityId)).toHaveLength(1);
+    const results=await Promise.allSettled([service.edit(request("practice-a"),first.activityId,correction(equal[0].activity,"stale-race-one",10)),
+      service.edit(request("practice-a"),first.activityId,correction(equal[0].activity,"stale-race-two",11))]);
+    expect(results.filter(r=>r.status==="fulfilled")).toHaveLength(1);
+    const rejected=results.find(r=>r.status==="rejected") as PromiseRejectedResult;expect(rejected.reason).toMatchObject({status:400});expect(await updates(first.activityId)).toHaveLength(2);
+  });
+  it("actual COMMIT acknowledgement loss on every mutation disposes its client and reconciles the owned key without a second audit",async()=>{
+    const c=await seed("practice-a","mutation-lost-ack");let activity=(await service.create(request("practice-a"),input(c,"mutation-lost-create"))).activity;
+    for(const operation of ["edit","delete","restore"] as const){
+      let destroyed=false;const losing=createActivityServiceV2(createPinnedOwnershipUnit({connect:async()=>{const client=await pool.connect();return{
+        query:async(sql:string,values?:unknown[])=>{const result=await client.query(sql,values);if(sql==="COMMIT")throw Error("Synthetic lost mutation acknowledgement");return result;},
+        release:(destroy?:boolean)=>{destroyed=destroy===true;client.release(destroy);}} as any;}}),{clock:now});
+      const p=operation==="edit"?correction(activity,"lost-"+operation):lifecycle(activity,"lost-"+operation);
+      const apply=(s:typeof service)=>operation==="edit"?s.edit(request("practice-a"),activity.activityId,p):operation==="delete"?
+        s.delete(request("practice-a"),activity.activityId,p):s.restore(request("practice-a"),activity.activityId,p);
+      await expect(apply(losing)).rejects.toMatchObject({status:503});expect(destroyed).toBe(true);
+      const saved=await service.mutation(request("practice-a"),activity.activityId,p.mutationKey),before=await snapshot(),count=(await updates(activity.activityId)).length;
+      expect(saved).toMatchObject({mutationKey:p.mutationKey,operation,changed:false});expect(await apply(service)).toEqual(saved);
+      expect(await snapshot()).toBe(before);expect(await updates(activity.activityId)).toHaveLength(count);activity=saved.activity;
+    }
+    expect(await updates(activity.activityId)).toHaveLength(3);
+  });
+  it("failed correction UPDATE or audit insertion rolls back both state and reasoned lineage",async()=>{
+    const c=await seed("practice-a","mutation-rollback"),activity=(await service.create(request("practice-a"),input(c,"mutation-rollback-create"))).activity;
+    for(const table of ["observations","audit_events"]){const event=table==="observations"?"UPDATE":"INSERT";
+      await f.client.query(`CREATE FUNCTION reject_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private synthetic mutation failure'; END $$;
+        CREATE TRIGGER reject_mutation BEFORE ${event} ON ${table} FOR EACH ROW EXECUTE FUNCTION reject_mutation()`);
+      try {await unchanged(()=>service.edit(request("practice-a"),activity.activityId,correction(activity,"rollback-"+table)),503);}
+      finally {await f.client.query(`DROP TRIGGER reject_mutation ON ${table}; DROP FUNCTION reject_mutation()`);}
+      await unchanged(()=>service.mutation(request("practice-a"),activity.activityId,"rollback-"+table),404);
+    }
+  });
+  it("owned mutation lineage masks foreign rows and fails closed on duplicate or malformed scoped audits",async()=>{
+    const c=await seed("practice-a","mutation-evidence"),activity=(await service.create(request("practice-a"),input(c,"mutation-evidence-create"))).activity,p=correction(activity,"evidence-edit"),saved=await service.edit(request("practice-a"),activity.activityId,p);
+    for(const actor of ["practice-b","practice-c"])for(const call of [()=>service.mutation(request(actor),activity.activityId,p.mutationKey),
+      ()=>service.edit(request(actor),activity.activityId,p),()=>service.delete(request(actor),activity.activityId,lifecycle(saved.activity,"foreign-delete")),()=>service.restore(request(actor),activity.activityId,lifecycle(saved.activity,"foreign-restore"))])await unchanged(call,404);
+    const audit=(await updates(activity.activityId))[0];await f.client.query(`INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      SELECT 'mutation-duplicate',org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after" FROM audit_events WHERE audit_event_id=$1`,[audit.audit_event_id]);
+    try {await unchanged(()=>service.mutation(request("practice-a"),activity.activityId,p.mutationKey),503);await unchanged(()=>service.edit(request("practice-a"),activity.activityId,p),503);}
+    finally {await f.client.query("DELETE FROM audit_events WHERE audit_event_id='mutation-duplicate'");}
+    await f.client.query(`UPDATE audit_events SET "after"=jsonb_set("after",'{domain_id}','"foreign-domain"') WHERE audit_event_id=$1`,[audit.audit_event_id]);
+    try {await unchanged(()=>service.mutation(request("practice-a"),activity.activityId,p.mutationKey),503);}
+    finally {await f.client.query('UPDATE audit_events SET "after"=$2::jsonb WHERE audit_event_id=$1',[audit.audit_event_id,JSON.stringify(audit.after)]);}
+    const foreignOwned=await seed("practice-a","mutation-foreign-owned"),move=(snapshot:any)=>({...structuredClone(snapshot),domain_id:foreignOwned.domainId,
+      policy_version_id:foreignOwned.policyVersionId,observation:{...structuredClone(snapshot.observation),domainId:foreignOwned.domainId,policyVersionId:foreignOwned.policyVersionId}});
+    await f.client.query('UPDATE audit_events SET "before"=$2::jsonb,"after"=$3::jsonb WHERE audit_event_id=$1',[audit.audit_event_id,JSON.stringify(move(audit.before)),JSON.stringify(move(audit.after))]);
+    try {await unchanged(()=>service.mutation(request("practice-a"),activity.activityId,p.mutationKey),503);await unchanged(()=>service.edit(request("practice-a"),activity.activityId,p),503);}
+    finally {await f.client.query('UPDATE audit_events SET "before"=$2::jsonb,"after"=$3::jsonb WHERE audit_event_id=$1',[audit.audit_event_id,JSON.stringify(audit.before),JSON.stringify(audit.after)]);}
+    await unchanged(()=>service.mutation(request("practice-a"),activity.activityId,"not-committed"),404);
   });
   it("bounded stable paging traverses ties exactly once and excludes legacy/old observation namespaces", async () => {
     const c = await seed("practice-a", "paging");

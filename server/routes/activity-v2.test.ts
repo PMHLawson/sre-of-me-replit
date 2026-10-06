@@ -109,6 +109,10 @@ beforeAll(async () => {
     submission: (request, input) => { pin(request); return actual.submission(request, input); },
     list: (request, input) => { pin(request); return actual.list(request, input); },
     eligibility: (request, input) => { pin(request); return actual.eligibility(request, input); },
+    edit:(request,key,input)=>{pin(request);return actual.edit(request,key,input);},
+    delete:(request,key,input)=>{pin(request);return actual.delete(request,key,input);},
+    restore:(request,key,input)=>{pin(request);return actual.restore(request,key,input);},
+    mutation:(request,key,mutationKey)=>{pin(request);return actual.mutation(request,key,mutationKey);},
   };
   const app = express();
   // Actual root parser ordering: local16KB encoded semantic payload enforcement
@@ -143,7 +147,7 @@ it("ordinary owned no-body history GET is empty/read-only and original authentic
 it("missing, malformed, throwing and false Passport authentication have zero pool connections across all route shapes", async () => {
   const count = connects, state = await snapshot();
   for (const actor of [undefined, "__proto__", " ", "x".repeat(201)]) {
-    for (const path of ["/", "/missing", "/submissions/missing", "/eligibility/route-legacy"]) expect((await call(path, actor)).status).toBe(401);
+    for (const path of ["/", "/missing", "/submissions/missing", "/eligibility/route-legacy", "/missing/mutations/missing"]) expect((await call(path, actor)).status).toBe(401);
     expect((await call("/", actor, "POST", entry(actors[0], "unauthorized"))).status).toBe(401);
   }
   for (const extra of [{ "x-synthetic-auth-false": "yes" }, { "x-synthetic-auth-throws": "yes" }])
@@ -226,7 +230,7 @@ it("same-caption domains and equal submission keys across both same-org and diff
     expect(activity.attainmentAvailability).toBe("not_calculated");
     for (const field of ["idempotencyKey", "idempotency_key", "legacySourceId", "legacy_source_id", "audit", "score", "attainment", "durationMinutes"])
       expect(Object.hasOwn(activity, field)).toBe(false);
-    expect((await call("/submissions/same-client-key", actor)).body).toEqual(activity);
+    expect((await call("/submissions/same-client-key", actor)).body).toEqual({submissionKey:"same-client-key",activity});
     expect((await call("/" + activity.activityId, actor)).body).toEqual(activity);
   }
   expect(new Set(saved.map(activity => activity.activityId)).size).toBe(3);
@@ -246,7 +250,7 @@ it("actual HTTP simultaneous equal retries converge, changed-content conflicts a
   expect((await fixture.client.query("SELECT count(*)::int n FROM audit_events")).rows[0].n).toBe(beforeAudits + 1);
   const state = await snapshot();
   expect((await call("/", actors[0], "POST", entry(actors[0], "http-race", 1))).status).toBe(400);
-  expect((await call("/submissions/http-race", actors[0])).body).toEqual(activity);
+  expect((await call("/submissions/http-race", actors[0])).body).toEqual({submissionKey:"http-race",activity});
   const reordered = { ...input, values: { [configs[actors[0]].measurements[0].measurementId]: {
     value: 0, taskVariantId: configs[actors[0]].measurements[0].taskVariantId, unitId: "cupcake", valueType: "integer",
   } } };
@@ -281,6 +285,55 @@ it("owned history uses bounded stable tie ordering, manual namespace only, and r
   expect((await call("/route-old-raw-namespace", actors[0])).status).toBe(404);
   expect((await call("/submissions/route-old-key", actors[0])).status).toBe(404);
   expect(await snapshot()).toBe(state);
+});
+it("actual reasoned PATCH/delete/restore and owned key reconciliation retain current state without repeating mutations",async()=>{
+  const original=entry(actors[0],"http-correction",12),created=await call("/",actors[0],"POST",original),first=created.body.activity;
+  expect(created.body.submissionKey).toBe(original.submissionKey);
+  const m=configs[actors[0]].measurements[0],edit={mutationKey:"http-edit",expectedStateFingerprint:first.stateFingerprint,reason:"Correct the synthetic count",
+    policyVersionId:first.policyVersionId,practiceEvent:true,observedAt:first.observedAt,values:{[m.measurementId]:{...original.values[m.measurementId],value:0}},notes:"Corrected HTTP note"};
+  const patched=await call("/"+first.activityId,actors[0],"PATCH",edit);
+  expect(patched.status).toBe(200);expect(patched.cache).toBe("no-store");expect(patched.body).toMatchObject({mutationKey:edit.mutationKey,changed:true,operation:"edit",
+    activity:{activityId:first.activityId,notes:"Corrected HTTP note",stateFingerprint:patched.body.appliedStateFingerprint}});
+  expect(patched.body.activity.values[m.measurementId].value).toBe(0);
+  const deletion={mutationKey:"http-delete",expectedStateFingerprint:patched.body.activity.stateFingerprint,reason:"Remove synthetic duplicate"};
+  const deleted=await call("/"+first.activityId+"/delete",actors[0],"POST",deletion);
+  expect(deleted.status).toBe(200);expect(deleted.body.activity.deletedAt).toBe(now);
+  const state=await snapshot();
+  expect((await call("/",actors[0],"POST",original)).body).toMatchObject({created:false,submissionKey:original.submissionKey,activity:deleted.body.activity});
+  expect((await call("/submissions/"+original.submissionKey,actors[0])).body).toEqual({submissionKey:original.submissionKey,activity:deleted.body.activity});
+  expect((await call("/"+first.activityId+"/mutations/"+edit.mutationKey,actors[0])).body).toEqual({...patched.body,changed:false,activity:deleted.body.activity});
+  expect((await call("/"+first.activityId,actors[0],"PATCH",edit)).body).toEqual({...patched.body,changed:false,activity:deleted.body.activity});
+  expect((await call("/"+first.activityId+"/delete",actors[0],"POST",deletion)).body).toEqual({...deleted.body,changed:false});
+  expect(await snapshot()).toBe(state);
+  const restore={mutationKey:"http-restore",expectedStateFingerprint:deleted.body.activity.stateFingerprint,reason:"Restore the corrected synthetic entry"};
+  const restored=await call("/"+first.activityId+"/restore",actors[0],"POST",restore);
+  expect(restored.status).toBe(200);expect(restored.body).toMatchObject({operation:"restore",mutationKey:restore.mutationKey,changed:true,activity:{deletedAt:null}});
+  expect(restored.body.activity.values[m.measurementId].value).toBe(0);
+  const restoredState=await snapshot();expect((await call("/"+first.activityId+"/delete",actors[0],"POST",deletion)).body).toEqual({...deleted.body,changed:false,activity:restored.body.activity});
+  expect(await snapshot()).toBe(restoredState);
+  const count=(await fixture.client.query("SELECT count(*)::int n FROM audit_events WHERE entity_type='observations' AND entity_id::jsonb->>0=$1",[first.activityId])).rows[0].n;expect(count).toBe(4);
+  expect(forwarded.every(request=>originalRequests.has(request))).toBe(true);
+});
+it("correction authority, stale/no-op requests, foreign owners and unknown mutation keys cannot consume keys or write rows",async()=>{
+  const input=entry(actors[0],"http-correction-refusal"),first=(await call("/",actors[0],"POST",input)).body.activity;
+  const edit={mutationKey:"http-refusal-key",expectedStateFingerprint:first.stateFingerprint,reason:"Synthetic unchanged request",policyVersionId:first.policyVersionId,
+    practiceEvent:true,observedAt:first.observedAt,values:input.values};
+  await noMutation(()=>call("/"+first.activityId,actors[0],"PATCH",edit),400);
+  await noMutation(()=>call("/"+first.activityId+"/mutations/"+edit.mutationKey,actors[0]),404);
+  for(const patch of [{domainId:configs[actors[1]].domainId},{ownerUserId:actors[1]},{deletedAt:null},{reason:" "},{expectedStateFingerprint:"bad"},{isAnomaly:true}])
+    await noMutation(()=>call("/"+first.activityId,actors[0],"PATCH",{...edit,...patch}),400);
+  for(const actor of actors.slice(1)){
+    await noMutation(()=>call("/"+first.activityId,actor,"PATCH",edit),404);
+    for(const operation of ["delete","restore"])await noMutation(()=>call("/"+first.activityId+"/"+operation,actor,"POST",{mutationKey:"foreign-"+operation,
+      expectedStateFingerprint:first.stateFingerprint,reason:"Synthetic foreign refusal"}),404);
+    await noMutation(()=>call("/"+first.activityId+"/mutations/"+edit.mutationKey,actor),404);
+  }
+  await noMutation(()=>call("/"+first.activityId+"/mutations/"+edit.mutationKey+"?owner="+actors[1],actors[0]),400);
+  const m=configs[actors[0]].measurements[0],valid={...edit,values:{[m.measurementId]:{...input.values[m.measurementId],value:9}}};
+  expect((await call("/"+first.activityId,actors[0],"PATCH",valid)).body.changed).toBe(true);
+  await noMutation(()=>call("/"+first.activityId,actors[0],"PATCH",{...valid,mutationKey:"stale-later-key"}),400);
+  await noMutation(()=>call("/"+first.activityId+"/delete",actors[0],"POST",{mutationKey:valid.mutationKey,
+    expectedStateFingerprint:valid.expectedStateFingerprint,reason:valid.reason}),400);
 });
 it("missing, ambiguous and revoked membership fail closed without record or settings mutation", async () => {
   for (const actor of ["route-practice-none", "route-practice-ambiguous"])

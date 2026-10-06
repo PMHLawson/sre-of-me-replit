@@ -338,7 +338,7 @@ describe("personal practice repository preserves the legacy surface and fails cl
     expect(old.idempotency_key).toMatch(/^observation:v1:[a-f0-9]{64}$/);expect(saved.activity.activityId).not.toBe(old.observation_id);
     const row=(await f.client.query("SELECT * FROM observations WHERE observation_id=$1",[saved.activity.activityId])).rows[0];
     expect(row.idempotency_key).toMatch(/^personal-practice:v1:[a-f0-9]{64}$/);expect(row.legacy_source_type).toBeNull();expect(row.legacy_source_id).toBeNull();
-    expect(Object.keys(store.personalPractice).sort()).toEqual(["create","eligibility","list","read","submission"].sort());
+    expect(Object.keys(store.personalPractice).sort()).toEqual(["create","eligibility","list","read","submission","edit","delete","restore","mutation"].sort());
     expect((await store.personalPractice.list({})).activities.map(a=>a.activityId)).toEqual([saved.activity.activityId]);
     await unchanged(()=>store.personalPractice.read(old.observation_id),404);
     const before=await snapshot();expect(await store.observations.create({observation:observationFor(c,"existing-raw-id",2),idempotencyKey:"same-caller-key"},"Synthetic equal retry")).toEqual(old);
@@ -402,13 +402,27 @@ describe("personal practice repository preserves the legacy surface and fails cl
       await unchanged(()=>store.personalPractice.create(input("raw-sql-precision")),503);
     } finally {await f.client.query("UPDATE observations SET observed_at=date_trunc('milliseconds',observed_at) WHERE observation_id=$1",[id]);}
     await f.client.query("UPDATE observations SET deleted_at='2026-02-01T00:00:00.0001Z' WHERE observation_id=$1",[id]);
-    try {await unchanged(()=>store.personalPractice.read(id),503);}
+    try {await unchanged(()=>store.personalPractice.read(id),503);
+      await unchanged(()=>store.personalPractice.mutation(id,"not-committed"),503);
+      await unchanged(()=>store.personalPractice.restore(id,{mutationKey:"precision-restore",expectedStateFingerprint:saved.activity.stateFingerprint,reason:"Synthetic precision refusal"}),503);}
     finally {await f.client.query("UPDATE observations SET deleted_at=NULL WHERE observation_id=$1",[id]);}
     const page=await store.personalPractice.list({domainId:c.domainId,limit:100});
     expect(page.activities.some(a=>a.activityId===id)).toBe(true);
     expect(Object.keys(await store.personalPractice.read(id)).some(key=>key.startsWith("__personal"))).toBe(false);
     const audit=(await f.client.query(`SELECT "after" FROM audit_events WHERE entity_type='observations' AND action='create' AND entity_id=$1`,[JSON.stringify([id])])).rows[0].after;
     expect(Object.keys(audit).some(key=>key.startsWith("__personal"))).toBe(false);
+  });
+  it("correction state and audit roll back when a later nested failure is caught by the caller",async()=>{
+    const activity=(await store.personalPractice.create(input("nested-correction-create"))).activity,unit=createPinnedOwnershipUnit(pool);
+    await unchanged(()=>unit.run(request,async ownership=>{
+      const scoped=createPolicyV2Storage(ownership.db,ownership.context,{clock:time});
+      await scoped.personalPractice.edit(activity.activityId,{mutationKey:"nested-valid-correction",expectedStateFingerprint:activity.stateFingerprint,
+        reason:"Synthetic valid correction before caught failure",policyVersionId:activity.policyVersionId,practiceEvent:true,observedAt:activity.observedAt,
+        values:{"m-repetitions":{valueType:"integer",value:3,unitId:"rep"}}});
+      await scoped.personalPractice.delete(activity.activityId,{mutationKey:"nested-invalid",expectedStateFingerprint:"not-a-fingerprint",reason:"Synthetic caught failure"}).catch(()=>{});
+      return "Attempted partial commit";
+    }),503);
+    await unchanged(()=>store.personalPractice.mutation(activity.activityId,"nested-valid-correction"),404);
   });
   it("a caught nested failure poisons the pinned transaction and rolls back an earlier valid practice/audit",async()=>{
     const unit=createPinnedOwnershipUnit(pool);

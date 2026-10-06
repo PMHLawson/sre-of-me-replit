@@ -5,7 +5,8 @@ import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema
 import { createAuditService } from "../lib/audit-service";
 import { ActivityCreateInputSchema, ActivityIdSchema, ActivitySubmissionKeySchema, ActivityListInputSchema,
   ActivityCursorPayloadSchema, ActivityTimestampSchema, ActivityViewSchema, validatePracticeValues,
-  type ActivityCreateInput, type ActivityView, type ActivityCursorPayload } from "../../shared/activity";
+  ActivityEditInputSchema,ActivityLifecycleInputSchema,
+  type ActivityEditInput,type ActivityLifecycleInput,type ActivityView, type ActivityCursorPayload } from "../../shared/activity";
 import { assertContext, revalidate, bounded, BoundaryError, type OrgContext, type OwnershipDatabase, type Transaction } from "../lib/org-context";
 
 const id = z.string().min(1).max(200).refine(x => x.trim() === x && !/[\u0000-\u001f\u007f]/.test(x) && x !== "__proto__");
@@ -136,6 +137,19 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     }),
   });
   const practicePrefix="personal-practice:v1:";
+  const practiceColumns=["observation_id","org_id","owner_user_id","domain_id","policy_version_id","idempotency_key","observed_at",
+    "observation","is_anomaly","anomaly_note","deleted_at","legacy_source_type","legacy_source_id"] as const;
+  function practiceSnapshot(row:any) {
+    if(!row||typeof row!=="object"||practiceColumns.some(column=>!Object.hasOwn(row,column)))throw new BoundaryError(503);
+    return Object.fromEntries(practiceColumns.map(column=>[column,column==="observed_at"?persistedTime(row[column]):
+      column==="deleted_at"&&row[column]!==null?persistedTime(row[column]):row[column]]));
+  }
+  function canonical(value:unknown):string {
+    if(Array.isArray(value))return "["+value.map(canonical).join(",")+"]";
+    if(value!==null&&typeof value==="object")return "{"+Object.keys(value).sort().map(key=>JSON.stringify(key)+":"+canonical((value as Record<string,unknown>)[key])).join(",")+"}";
+    const result=JSON.stringify(value);if(result===undefined)throw new BoundaryError(503);return result;
+  }
+  const fingerprint=(row:any)=>createHash("sha256").update("personal-practice-state:v1:"+canonical(practiceSnapshot(row))).digest("hex");
   const practiceIdentity=(key:string)=>{
     const digest=createHash("sha256").update(JSON.stringify([...scope,key])).digest("hex");
     return {storageKey:practicePrefix+digest,activityId:"practice-v1-"+digest};
@@ -193,6 +207,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const original=audits[0].after;
     if(!original||original.deleted_at!==null||original.idempotency_key!==row.idempotency_key||
       original.observation_id!==row.observation_id||original.domain_id!==row.domain_id)throw new BoundaryError(503);
+    if(Object.keys(original).length!==practiceColumns.length)throw new BoundaryError(503);
+    practiceSnapshot(original);
     const observation=practiceRow(original),{configuration,next}=await practicePolicy(tx,observation.domainId,observation.policyVersionId);
     const input=ActivityCreateInputSchema.safeParse({submissionKey:"audit-validation",domainId:observation.domainId,
       policyVersionId:observation.policyVersionId,practiceEvent:true,observedAt:observation.observedAt,values:observation.values,
@@ -213,6 +229,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       policyVersionId:o.policyVersionId,practiceEvent:true,observedAt:o.observedAt,values:o.values,
       ...(o.notes!==undefined?{notes:o.notes}:{}),...(o.context!==undefined?{context:o.context}:{}),
       deletedAt:row.deleted_at===null?null:persistedTime(row.deleted_at),configuration,
+      stateFingerprint:fingerprint(row),
       scoreAvailability:"not_calculated",attainmentAvailability:"not_calculated"});
     if(!view.success)throw new BoundaryError(503);return view.data;
   }
@@ -223,7 +240,114 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       AND idempotency_key LIKE 'personal-practice:v1:%' AND legacy_source_type IS NULL AND legacy_source_id IS NULL${extra}${lock?" FOR UPDATE":""}`,
       [...scope,...args])).rows;
   }
+  type MutationOperation="edit"|"delete"|"restore";
+  function mutationIdentities(activityId:string,key:string) {
+    const digest="personal-practice-mutation:v1:"+createHash("sha256").update(JSON.stringify([...scope,activityId,key])).digest("hex");
+    return (["edit","delete","restore"] as const).map(operation=>({operation,identity:[activityId,digest,operation]}));
+  }
+  async function validatedSnapshot(tx:Transaction,row:any) {
+    if(!row||Object.keys(row).length!==practiceColumns.length)throw new BoundaryError(503);
+    practiceSnapshot(row);const o=practiceRow(row),{configuration,next}=await practicePolicy(tx,o.domainId,o.policyVersionId);
+    const input=ActivityCreateInputSchema.safeParse({submissionKey:"mutation-lineage",domainId:o.domainId,policyVersionId:o.policyVersionId,
+      practiceEvent:true,observedAt:o.observedAt,values:o.values,...(o.notes!==undefined?{notes:o.notes}:{}),...(o.context!==undefined?{context:o.context}:{})});
+    if(!input.success||!validatePracticeValues(configuration,input.data)||!validateObservationContext(configuration,o).success||
+      (next&&Date.parse(o.observedAt)>=Date.parse(next.effectiveFrom)))throw new BoundaryError(503);
+  }
+  async function savedMutation(tx:Transaction,row:any,key:string) {
+    const identities=mutationIdentities(row.observation_id,key);
+    const audits=(await tx.query(`SELECT entity_id,reason,"before","after" FROM public.audit_events
+      WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND entity_type='observations' AND action='update'
+      AND entity_id=ANY($3::text[]) ORDER BY audit_event_id`,[...scope,identities.map(value=>JSON.stringify(value.identity))])).rows;
+    if(audits.length>1)throw new BoundaryError(503);if(!audits.length)return null;
+    const audit=audits[0],identity=identities.find(value=>JSON.stringify(value.identity)===audit.entity_id);
+    if(!identity||!reasonSchema.safeParse(audit.reason).success||audit.reason!==audit.reason.trim())throw new BoundaryError(503);
+    await validatedSnapshot(tx,audit.before);await validatedSnapshot(tx,audit.after);
+    const before=practiceSnapshot(audit.before),after=practiceSnapshot(audit.after);
+    if(before.observation_id!==row.observation_id||after.observation_id!==row.observation_id||
+      ["observation_id","org_id","owner_user_id","domain_id","idempotency_key","is_anomaly","anomaly_note","legacy_source_type","legacy_source_id"]
+        .some(column=>!semanticEqual(before[column],after[column])||!semanticEqual(before[column],row[column])))throw new BoundaryError(503);
+    if(identity.operation==="edit") {
+      if(before.deleted_at!==null||after.deleted_at!==null||semanticEqual(before.observation,after.observation))throw new BoundaryError(503);
+    } else {
+      if(!semanticEqual({...before,deleted_at:null},{...after,deleted_at:null})||
+        (identity.operation==="delete"?(before.deleted_at!==null||after.deleted_at===null):(before.deleted_at===null||after.deleted_at!==null)))
+        throw new BoundaryError(503);
+    }
+    return {operation:identity.operation,reason:audit.reason,before,after};
+  }
+  function proposedObservation(row:any,p:ActivityEditInput) {
+    return {schemaVersion:1 as const,observationId:row.observation_id,organizationId:scope[0],ownerUserId:scope[1],domainId:row.domain_id,
+      policyVersionId:p.policyVersionId,observedAt:p.observedAt,values:p.values,
+      ...(p.notes!==undefined?{notes:p.notes}:{}),...(p.context!==undefined?{context:p.context}:{})};
+  }
+  async function activePractice(tx:Transaction,row:any,observation:any) {
+    const policy=await practicePolicy(tx,row.domain_id,observation.policyVersionId);
+    if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
+    const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
+      AND domain_id=$3 AND source_kind='manual-legacy' FOR SHARE`,[...scope,row.domain_id])).rows;
+    if(legacy.length)throw new BoundaryError(400);
+    const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
+    const p=parse(ActivityCreateInputSchema,{submissionKey:"mutation-validation",domainId:row.domain_id,policyVersionId:observation.policyVersionId,
+      practiceEvent:true,observedAt:observation.observedAt,values:observation.values,
+      ...(observation.notes!==undefined?{notes:observation.notes}:{}),...(observation.context!==undefined?{context:observation.context}:{})});
+    if(Date.parse(p.observedAt)>now.getTime()||Date.parse(policy.configuration.effectiveFrom)>now.getTime()||
+      Date.parse(p.observedAt)<Date.parse(policy.configuration.effectiveFrom)||
+      (policy.next&&Date.parse(p.observedAt)>=Date.parse(policy.next.effectiveFrom))||
+      !validatePracticeValues(policy.configuration,p)||!validateObservationContext(policy.configuration,observation).success)throw new BoundaryError(400);
+  }
+  async function mutatePractice(tx:Transaction,activityId:string,p:ActivityEditInput|ActivityLifecycleInput,operation:MutationOperation) {
+    const rows=await manualRows(tx," AND observation_id=$3",[activityId],true);
+    if(rows.length!==1)throw new BoundaryError(404);
+    const row=rows[0];practiceRow(row,true);await originalPractice(tx,row);
+    // Reconciliation happens before new-operation fingerprint, clock or active-state checks.
+    const previous=await savedMutation(tx,row,p.mutationKey);
+    if(previous) {
+      if(previous.operation!==operation||previous.reason!==p.reason||fingerprint(previous.before)!==p.expectedStateFingerprint||
+        (operation==="edit"&&!semanticEqual(previous.after.observation,proposedObservation(previous.before,p as ActivityEditInput))))
+        throw new BoundaryError(400);
+      return {mutationKey:p.mutationKey,changed:false,operation,activity:await practiceView(tx,row),appliedStateFingerprint:fingerprint(previous.after)};
+    }
+    const before=practiceSnapshot(row);
+    if(fingerprint(row)!==p.expectedStateFingerprint)throw new BoundaryError(400);
+    // Also validate the current saved raw state before deriving a new audited state.
+    await validatedSnapshot(tx,before);
+    let changed:any;
+    if(operation==="edit") {
+      if(row.deleted_at!==null)throw new BoundaryError(400);
+      const observation=proposedObservation(row,p as ActivityEditInput);
+      if(semanticEqual(observation,row.observation))throw new BoundaryError(400);
+      await activePractice(tx,row,observation);
+      changed=(await tx.query(`UPDATE public.observations SET policy_version_id=$4,observed_at=$5,observation=$6::jsonb
+        WHERE org_id=$1 AND owner_user_id=$2 AND observation_id=$3 RETURNING *`,[...scope,activityId,observation.policyVersionId,
+        observation.observedAt,JSON.stringify(observation)])).rows;
+    } else if(operation==="delete") {
+      if(row.deleted_at!==null)throw new BoundaryError(400);
+      const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
+      changed=(await tx.query(`UPDATE public.observations SET deleted_at=$4 WHERE org_id=$1 AND owner_user_id=$2
+        AND observation_id=$3 RETURNING *`,[...scope,activityId,now.toISOString()])).rows;
+    } else {
+      if(row.deleted_at===null)throw new BoundaryError(400);
+      await activePractice(tx,row,row.observation);
+      changed=(await tx.query(`UPDATE public.observations SET deleted_at=NULL WHERE org_id=$1 AND owner_user_id=$2
+        AND observation_id=$3 RETURNING *`,[...scope,activityId])).rows;
+    }
+    if(changed.length!==1)throw new BoundaryError(404);
+    const after=practiceSnapshot(changed[0]),identity=mutationIdentities(activityId,p.mutationKey).find(value=>value.operation===operation)!;
+    await createAuditService(tx,db,context).append("observations",identity.identity,"update",p.reason,before,after);
+    const updated=await manualRows(tx," AND observation_id=$3",[activityId]);
+    if(updated.length!==1)throw new BoundaryError(503);
+    return {mutationKey:p.mutationKey,changed:true,operation,activity:await practiceView(tx,updated[0]),appliedStateFingerprint:fingerprint(after)};
+  }
   const personalPractice=Object.freeze({
+    edit:(key:unknown,input:unknown)=>run(tx=>mutatePractice(tx,parse(ActivityIdSchema,key),parse(ActivityEditInputSchema,input),"edit")),
+    delete:(key:unknown,input:unknown)=>run(tx=>mutatePractice(tx,parse(ActivityIdSchema,key),parse(ActivityLifecycleInputSchema,input),"delete")),
+    restore:(key:unknown,input:unknown)=>run(tx=>mutatePractice(tx,parse(ActivityIdSchema,key),parse(ActivityLifecycleInputSchema,input),"restore")),
+    mutation:(key:unknown,mutationKey:unknown)=>run(async tx=>{
+      const activityId=parse(ActivityIdSchema,key),k=parse(ActivityIdSchema,mutationKey),rows=await manualRows(tx," AND observation_id=$3",[activityId]);
+      if(rows.length!==1)throw new BoundaryError(404);const row=rows[0];practiceRow(row,true);await originalPractice(tx,row);
+      const saved=await savedMutation(tx,row,k);if(!saved)throw new BoundaryError(404);
+      return {mutationKey:k,changed:false,operation:saved.operation,activity:await practiceView(tx,row),appliedStateFingerprint:fingerprint(saved.after)};
+    }),
     eligibility:(input:unknown)=>run(async tx=>{
       const domainId=parse(ActivityIdSchema,input),history=await practiceHistory(tx,domainId);
       const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
@@ -250,7 +374,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         const original=await originalPractice(tx,existing[0]);
         // Compare the immutable create snapshot, not a later corrected/deleted row.
         if(!semanticEqual(original,observation))throw new BoundaryError(400);
-        return {created:false,activity:await practiceView(tx,existing[0])};
+        return {created:false,submissionKey:p.submissionKey,activity:await practiceView(tx,existing[0])};
       }
       if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
       const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
@@ -266,7 +390,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         idempotency_key:identity.storageKey,observed_at:p.observedAt,observation,legacy_source_type:null,legacy_source_id:null},"Recorded personal practice");
       const saved=await manualRows(tx," AND observation_id=$3",[identity.activityId]);
       if(saved.length!==1)throw new BoundaryError(503);
-      return {created:true,activity:await practiceView(tx,saved[0])};
+      return {created:true,submissionKey:p.submissionKey,activity:await practiceView(tx,saved[0])};
     }),
     read:(input:unknown)=>run(async tx=>{
       const key=parse(ActivityIdSchema,input),rows=await manualRows(tx," AND observation_id=$3",[key]);
@@ -274,7 +398,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     }),
     submission:(input:unknown)=>run(async tx=>{
       const key=parse(ActivitySubmissionKeySchema,input),rows=await manualRows(tx," AND idempotency_key=$3",[practiceIdentity(key).storageKey]);
-      if(rows.length!==1)throw new BoundaryError(404);return practiceView(tx,rows[0]);
+      if(rows.length!==1)throw new BoundaryError(404);return {submissionKey:key,activity:await practiceView(tx,rows[0])};
     }),
     list:(input:unknown)=>run(async tx=>{
       const p=parse(ActivityListInputSchema,input),cursorScope=createHash("sha256").update(JSON.stringify([...scope,p.domainId??null])).digest("hex");

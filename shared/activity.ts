@@ -35,6 +35,16 @@ export type ActivityListInput = z.infer<typeof ActivityListInputSchema>;
 export const ActivityCursorPayloadSchema = z.object({ version: z.literal(1), scope: z.string().regex(/^[a-f0-9]{64}$/),
   observedAt: ActivityTimestampSchema, activityId: ActivityIdSchema }).strict();
 export type ActivityCursorPayload = z.infer<typeof ActivityCursorPayloadSchema>;
+export const ActivityStateFingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const ActivityMutationOperationSchema = z.enum(["edit", "delete", "restore"]);
+const mutationFields = { mutationKey: ActivityIdSchema, expectedStateFingerprint: ActivityStateFingerprintSchema,
+  reason: z.string().trim().min(1).max(500) };
+export const ActivityEditInputSchema = z.object({ ...mutationFields, policyVersionId: ActivityIdSchema,
+  practiceEvent: z.literal(true), observedAt: ActivityTimestampSchema, values: ActivityValuesSchema,
+  notes: z.string().max(4000).optional(), context: ActivityContextSchema.optional() }).strict();
+export const ActivityLifecycleInputSchema = z.object(mutationFields).strict();
+export type ActivityEditInput = z.infer<typeof ActivityEditInputSchema>;
+export type ActivityLifecycleInput = z.infer<typeof ActivityLifecycleInputSchema>;
 
 /** Raw occurrences are not computed frequency totals or claims of qualification. */
 export function validatePracticeValues(configuration: DomainConfiguration, input: ActivityCreateInput): boolean {
@@ -56,6 +66,7 @@ export const ActivityViewSchema = z.object({
   practiceEvent: z.literal(true), observedAt: ActivityTimestampSchema, values: ActivityValuesSchema,
   notes: z.string().max(4000).optional(), context: ActivityContextSchema.optional(),
   deletedAt: ActivityTimestampSchema.nullable(), configuration: DomainConfigurationSchema,
+  stateFingerprint: ActivityStateFingerprintSchema,
   scoreAvailability: z.literal("not_calculated"), attainmentAvailability: z.literal("not_calculated"),
 }).strict().superRefine((value, ctx) => {
   const c = value.configuration;
@@ -63,7 +74,12 @@ export const ActivityViewSchema = z.object({
     ctx.addIssue({ code: "custom", message: "Activity and configuration identities must agree." });
 });
 export type ActivityView = z.infer<typeof ActivityViewSchema>;
-export const ActivityCreateResultSchema = z.object({ created: z.boolean(), activity: ActivityViewSchema }).strict();
+export const ActivityMutationResultSchema = z.object({ mutationKey:ActivityIdSchema,changed: z.boolean(), operation: ActivityMutationOperationSchema,
+  activity: ActivityViewSchema, appliedStateFingerprint: ActivityStateFingerprintSchema }).strict();
+export type ActivityMutationResult = z.infer<typeof ActivityMutationResultSchema>;
+export const ActivityCreateResultSchema = z.object({ created: z.boolean(), submissionKey:ActivitySubmissionKeySchema,activity: ActivityViewSchema }).strict();
+export const ActivitySubmissionResultSchema = z.object({submissionKey:ActivitySubmissionKeySchema,activity:ActivityViewSchema}).strict();
+export type ActivitySubmissionResult = z.infer<typeof ActivitySubmissionResultSchema>;
 export const ActivityListResultSchema = z.object({ activities: z.array(ActivityViewSchema).max(100),
   nextCursor: z.string().max(1024).nullable() }).strict();
 export const ActivityEligibilitySchema = z.discriminatedUnion("canCreate", [

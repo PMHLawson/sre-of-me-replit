@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import { DomainsApiError, parsePersonalDomain, personalDomainBoundaryQuery, personalDomainsQuery } from "@/lib/domains-api";
 import DomainSettingsPage, { openPersonalDomainDraft, PersonalDomainDraftSlot, PersonalConfigurationView, PersonalDomainActions,
-  PersonalDomainDetail, PersonalDomainsBackLink, PersonalDomainsList, PersonalDomainsNotice } from "./domain-settings";
+  PersonalDomainActivityLinks, PersonalDomainDetail, PersonalDomainsBackLink, PersonalDomainsList, PersonalDomainsNotice } from "./domain-settings";
 
 function fixture() {
   const amount = { measurementId: "amount", unitId: "cupcake", basis: { kind: "per_event" }, valueType: "integer", constraint: { operator: "gte", value: 12 } };
@@ -43,6 +43,26 @@ function fixture() {
 }
 const parsed = () => parsePersonalDomain(fixture(), "owner-a", "custom-five");
 describe("personal domain configuration rendering", () => {
+  it("offers custom activity entry and raw history only through the exact owned domain availability", () => {
+    const html = renderToStaticMarkup(<Router ssrPath="/domains/custom-five"><PersonalDomainActivityLinks domainId="custom-five"
+      availability={{ domainId: "custom-five", canCreate: true, reason: null, effectivePolicyVersionId: "version-one" }}/></Router>);
+    expect(html).toContain('href="/activities/new/custom-five"'); expect(html).toContain('href="/activities/domain/custom-five"');
+    expect(html).not.toContain('href="/log"');
+    const foreign = renderToStaticMarkup(<Router ssrPath="/domains/custom-five"><PersonalDomainActivityLinks domainId="custom-five"
+      availability={{ domainId: "other-domain", canCreate: true, reason: null, effectivePolicyVersionId: "version-one" }}/></Router>);
+    expect(foreign).toContain("could not be verified"); expect(foreign).not.toContain('href="/activities/new/custom-five"');
+  });
+  it.each(["legacy_writer", "inactive", "no_effective_policy"] as const)("uses per-domain %s refusal while retaining own raw history access", reason => {
+    const html = renderToStaticMarkup(<Router ssrPath="/domains/custom-five"><PersonalDomainActivityLinks domainId="custom-five"
+      availability={{ domainId: "custom-five", canCreate: false, reason }}/></Router>);
+    expect(html).toContain('href="/activities/domain/custom-five"'); expect(html).not.toContain("Record activity");
+    expect(html.includes('href="/log"')).toBe(reason === "legacy_writer");
+  });
+  it.each([{ loading: true }, { error: true }])("never invents activity permission from loading or failed availability %j", flags => {
+    const html = renderToStaticMarkup(<Router ssrPath="/domains/custom-five"><PersonalDomainActivityLinks domainId="custom-five" {...flags}
+      availability={{ domainId: "custom-five", canCreate: true, reason: null, effectivePolicyVersionId: "version-one" }} retry={() => {}}/></Router>);
+    expect(html).not.toContain("Record activity"); expect(html).toContain(flags.loading ? "Checking activity availability" : "could not be verified");
+  });
   it("renders a custom fifth domain by immutable UID and escaped display name", () => {
     const view = parsed();
     const html = renderToStaticMarkup(<Router ssrPath="/domains"><PersonalDomainsList domains={[view, { ...view, domainId: "other-cooking" }]} /></Router>);

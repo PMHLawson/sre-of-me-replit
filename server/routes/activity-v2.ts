@@ -1,5 +1,6 @@
 import { Router, json, type RequestHandler } from "express";
-import { ActivityCreateInputSchema, ActivityIdSchema, ActivityListInputSchema, ActivitySubmissionKeySchema } from "../../shared/activity";
+import { ActivityCreateInputSchema, ActivityIdSchema, ActivityListInputSchema, ActivitySubmissionKeySchema,
+  ActivityEditInputSchema,ActivityLifecycleInputSchema } from "../../shared/activity";
 import { authenticatedBootstrapActor } from "../lib/authenticated-bootstrap-unit";
 import { BoundaryError } from "../lib/org-context";
 import { ActivityInputError, parseActivityInput, type createActivityServiceV2 } from "../services/activity-service-v2";
@@ -7,7 +8,7 @@ import { ActivityInputError, parseActivityInput, type createActivityServiceV2 } 
 type Service = ReturnType<typeof createActivityServiceV2>;
 export function createActivityV2Router(options: { service: Service; authenticate: RequestHandler }) {
   if (!options || typeof options.authenticate !== "function" || !options.service ||
-    ["create", "read", "submission", "list", "eligibility"].some(key => typeof options.service[key as keyof Service] !== "function"))
+    ["create", "read", "submission", "list", "eligibility","edit","delete","restore","mutation"].some(key => typeof options.service[key as keyof Service] !== "function"))
     throw new BoundaryError(503);
   const router = Router();
   router.use(options.authenticate);
@@ -48,6 +49,22 @@ export function createActivityV2Router(options: { service: Service; authenticate
   }));
   router.get("/submissions/:submissionKey", handle(request => {
     noQuery(request); return options.service.submission(request, parseActivityInput(ActivitySubmissionKeySchema, request.params.submissionKey));
+  }));
+  router.get("/:activityId/mutations/:mutationKey",handle(request=>{
+    noQuery(request);return options.service.mutation(request,parseActivityInput(ActivityIdSchema,request.params.activityId),
+      parseActivityInput(ActivityIdSchema,request.params.mutationKey));
+  }));
+  router.patch("/:activityId",handle(request=>{
+    noQuery(request);return options.service.edit(request,parseActivityInput(ActivityIdSchema,request.params.activityId),
+      parseActivityInput(ActivityEditInputSchema,request.body));
+  }));
+  router.post("/:activityId/delete",handle(request=>{
+    noQuery(request);return options.service.delete(request,parseActivityInput(ActivityIdSchema,request.params.activityId),
+      parseActivityInput(ActivityLifecycleInputSchema,request.body));
+  }));
+  router.post("/:activityId/restore",handle(request=>{
+    noQuery(request);return options.service.restore(request,parseActivityInput(ActivityIdSchema,request.params.activityId),
+      parseActivityInput(ActivityLifecycleInputSchema,request.body));
   }));
   router.get("/:activityId", handle(request => {
     noQuery(request); return options.service.read(request, parseActivityInput(ActivityIdSchema, request.params.activityId));

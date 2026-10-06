@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DomainConfiguration, QualificationPredicate } from "@shared/domain-config";
+import type { ActivityEligibility } from "@shared/activity";
+import { personalActivityEligibilityQuery } from "@/lib/activities-api";
 import { useAuth } from "@/hooks/use-auth";
 import DomainPolicyForm, { type DomainPolicyFormProps } from "@/components/domains/domain-policy-form";
 import { describeCondition, DomainsApiError, PERSONAL_DOMAINS_QUERY, personalDomainBoundaryQuery, personalDomainsQuery,
@@ -121,11 +123,31 @@ export function PersonalDomainsList({ domains, navigationPaused = false }: { dom
     </Link></li>;
   })}</ul>;
 }
-export function PersonalDomainDetail({ domain }: { domain: PersonalDomain }) {
+export function PersonalDomainActivityLinks({ domainId, availability, loading, error, retry }: {
+  domainId: string; availability?: ActivityEligibility; loading?: boolean; error?: boolean; retry?: () => void;
+}) {
+  const verified = availability?.domainId === domainId ? availability : undefined;
+  return <section className={panel} data-testid="domain-activity-links">
+    <Link href={`/activities/domain/${encodeURIComponent(domainId)}`} className="underline">View this domain's custom activity history</Link>
+    {loading ? <p role="status">Checking activity availability…</p> : error || !verified ? <><p role="alert">Activity availability could not be verified.</p>
+      {retry && <button type="button" className="underline" onClick={retry}>Check activity availability</button>}</> : verified.canCreate ?
+        <Link href={`/activities/new/${encodeURIComponent(domainId)}`} className="underline block">Record activity</Link> :
+        <><p>{verified.reason === "legacy_writer" ? "This domain uses the original session logger." : verified.reason === "inactive" ?
+          "This domain is inactive; new activity is unavailable." : "Its first configuration has not taken effect; scheduled activity entry is unavailable."}</p>
+          {verified.reason === "legacy_writer" && <Link href="/log" className="underline">Open the original logger</Link>}</>}
+  </section>;
+}
+function OwnedDomainActivityLinks({ ownerId, domainId }: { ownerId: string; domainId: string }) {
+  const query = useQuery(personalActivityEligibilityQuery(ownerId, domainId));
+  return <PersonalDomainActivityLinks domainId={domainId} availability={query.data} loading={query.isPending} error={query.isError}
+    retry={() => { void query.refetch(); }}/>
+}
+export function PersonalDomainDetail({ domain, activityOwnerId }: { domain: PersonalDomain; activityOwnerId?: string }) {
   const selected = personalPolicySelection(domain);
   return <div className="space-y-5" data-testid="personal-domain-detail">
     <h2 className="text-2xl font-bold break-words">{domain.displayName}</h2>
-    <p className="text-muted-foreground" data-testid="domain-score-unavailable">Score not calculated. Activity logging for these configurations is not available here yet.</p>
+    <p className="text-muted-foreground" data-testid="domain-score-unavailable">Score not calculated. These are your saved targets and references.</p>
+    {activityOwnerId && <OwnedDomainActivityLinks key={`${activityOwnerId}-${domain.domainId}`} ownerId={activityOwnerId} domainId={domain.domainId}/>}
     {selected.current ? <section className="space-y-4"><h3 className="text-xl font-semibold">Active configuration</h3>
       <p>Version {selected.current.configuration.revision} · effective {dateLabel(selected.current.configuration.effectiveFrom, selected.current.configuration.boundary.timezone)}</p>
       <PersonalConfigurationView version={selected.current} /></section> :
@@ -234,7 +256,8 @@ export default function DomainSettingsPage() {
   return <div className="min-h-screen bg-background text-foreground pb-24 font-sans">
     <header className="px-6 py-8 space-y-2"><PersonalDomainsBackLink domainId={domainId} editing={!!activeForm} />
       <h1 className="text-2xl font-bold">Your domains</h1>
-      <p className="text-sm text-muted-foreground">Your saved goals, measurements and reference benchmarks.</p></header>
+      <p className="text-sm text-muted-foreground">Your saved goals, measurements and reference benchmarks.</p>
+      {ownerId && !activeForm && <Link href="/activities" className="underline">Your custom activity history</Link>}</header>
     <main className="px-6 max-w-3xl space-y-5">
       {ownerId && query.isSuccess && !activeForm && <PersonalDomainActions domain={domainId ? domain : undefined}
         onAdd={() => setForm(openPersonalDomainDraft(ownerId))}
@@ -244,7 +267,7 @@ export default function DomainSettingsPage() {
         onSaved={saved} onCancel={() => setForm(null)} onReconcile={reconcile} />
       {inputError || !ownerId ? <PersonalDomainsNotice error={inputError ?? new DomainsApiError(401)} /> :
         query.isPending ? <PersonalDomainsNotice loading /> : query.isError ? <PersonalDomainsNotice error={query.error} retry={() => { void query.refetch(); }} /> :
-          domainId && query.data && !Array.isArray(query.data) ? <PersonalDomainDetail domain={query.data} /> :
+          domainId && query.data && !Array.isArray(query.data) ? <PersonalDomainDetail domain={query.data} activityOwnerId={activeForm ? undefined : ownerId} /> :
             !domainId && Array.isArray(query.data) ? <PersonalDomainsList domains={query.data} navigationPaused={!!activeForm} /> : <PersonalDomainsNotice error={new DomainsApiError(503)} />}
     </main>
   </div>;
