@@ -2,7 +2,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DomainConfigurationSchema } from "@shared/domain-config";
-import DomainPolicyForm, { DomainPolicyEditor, DomainPolicyFormNotice, DomainPolicyReview, policyIssueLabel } from "./domain-policy-form";
+import DomainPolicyForm, { chooseCapabilityLater, DomainPolicyEditor, DomainPolicyFormNotice, DomainPolicyReview, policyIssueLabel,
+  UNSPECIFIED_CAPABILITY } from "./domain-policy-form";
 import { conditionFor, draftIdentities, newPolicyDraft, newReference, prospectivePolicyDraft, validationConfiguration,
   withPracticeFrequency } from "@/lib/domain-policy-draft";
 
@@ -25,6 +26,21 @@ function draft() {
   return value;
 }
 describe("personal domain form presentation", () => {
+  it("supports an explicit capability skip without inventing intent, motivation or a minimum", () => {
+    const value = newPolicyDraft({ timezone: "Europe/London", dayStartHour: 4 }, ids, now, "repetitions");
+    value.displayName = "Cooking";
+    value.goal = chooseCapabilityLater(value.goal, true);
+    expect(value.goal).toEqual({ intent: "unknown", desiredCapability: UNSPECIFIED_CAPABILITY });
+    expect(value.references).toEqual([]); expect(value.review.intervalDays).toBe(84);
+    expect(DomainConfigurationSchema.safeParse(validationConfiguration(value)).success).toBe(true);
+    const html = renderToStaticMarkup(<DomainPolicyEditor draft={value} ids={ids} onChange={() => {}}/>);
+    expect(html).toContain("I&#x27;ll define this later"); expect(html).toContain("Capability is explicitly unspecified");
+    expect(html).toMatch(/<textarea[^>]*disabled=""/); expect(html).toContain("Not yet decided");
+    expect(html).not.toContain("science-based"); expect(html).not.toContain("minimum to develop");
+    const specified = chooseCapabilityLater({ ...value.goal, privateMotivation: "Only mine" }, false);
+    expect(specified).toMatchObject({ intent: "unknown", desiredCapability: "", privateMotivation: "Only mine" });
+    expect(DomainConfigurationSchema.safeParse(validationConfiguration({ ...value, goal: specified })).success).toBe(false);
+  });
   it("labels amount, independent frequency and future scheduling without inventing duration or scoring", () => {
     const html = renderToStaticMarkup(<DomainPolicyEditor draft={draft()} ids={ids} onChange={() => {}} />);
     for (const label of ["Domain name", "Desired capability", "Your private motivation", "Primary measurement", "Cupcakes (cupcakes) target",
