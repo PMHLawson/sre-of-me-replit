@@ -15,6 +15,9 @@ import { authStorage } from "./replit_integrations/auth/storage";
 import { createPolicyV2Router } from "./routes/policy-v2";
 import { createDomainServiceV2 } from "./services/domain-service-v2";
 import { createPinnedOwnershipUnit } from "./lib/pinned-ownership-unit";
+import { createAuthenticatedBootstrapUnit } from "./lib/authenticated-bootstrap-unit";
+import { createPersonalWorkspaceService } from "./services/personal-workspace-service";
+import { createOnboardingRouter } from "./routes/onboarding";
 import {
   computeCompositeState,
   isInRampUp,
@@ -35,6 +38,13 @@ export async function registerRoutes(
     getPool: async () => (await import("./db")).pool,
   }),
 ): Promise<Server> {
+  app.use("/api/onboarding", createOnboardingRouter({
+    authenticate: isAuthenticated,
+    service: createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({
+      connect: async () => (await import("./db")).pool.connect(),
+    })),
+  }));
+
   // Original Passport authentication runs before the lazy pool connection.
   // Management uses the existing ownership transaction; no caller supplies authority.
   app.use("/api/v2/domains", createPolicyV2Router({
