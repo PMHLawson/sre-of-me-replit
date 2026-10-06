@@ -190,7 +190,7 @@ export function personalDomainBoundaryQuery(ownerId: string) {
   const owner = validatedOwner(ownerId);
   return { queryKey: [PERSONAL_DOMAINS_QUERY, owner, "boundary", null] as const,
     queryFn: async ({ signal }: { signal: AbortSignal }): Promise<DomainPolicyDraft["boundary"]> => {
-      const value = await readJson("/api/settings", signal);
+      const value = await readJson("/api/onboarding/settings", signal);
       const parsed = z.object({ userId: z.literal(owner), dayStartHour: z.number().int().min(0).max(23),
         timezone: z.string().min(1).refine(timezone => {
           try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); return true; } catch { return false; }

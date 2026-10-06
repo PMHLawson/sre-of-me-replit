@@ -13,6 +13,11 @@ const groupClass = "rounded-xl border border-border/60 p-4 space-y-3 min-w-0";
 const kinds: Record<MeasurementKind, string> = { duration: "Duration", repetitions: "Repetitions", count: "Whole-number count",
   quantity: "Quantity or distance", completion: "Completion", frequency: "Practice frequency" };
 const intents = { develop: "Develop a skill", maintain: "Maintain capability", general_wellbeing: "General wellbeing", unknown: "Not yet decided" };
+export const UNSPECIFIED_CAPABILITY = "I'll define this later.";
+/** An explicit user choice in the existing text contract; never an inferred goal. */
+export function chooseCapabilityLater(goal: DomainPolicyDraft["goal"], later: boolean): DomainPolicyDraft["goal"] {
+  return { ...goal, desiredCapability: later ? UNSPECIFIED_CAPABILITY : "" };
+}
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return <label className="block space-y-1 text-sm"><span className="font-semibold">{label}</span>{children}</label>;
 }
@@ -160,8 +165,12 @@ export function DomainPolicyEditor({ draft, ids, previous, onChange }: { draft: 
       <Field label="What are you aiming for?"><select className={inputClass} value={goal.intent}
         onChange={event => update({ goal: { ...goal, intent: event.target.value as DomainPolicyDraft["goal"]["intent"] } })}>
         {Object.entries(intents).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-      <Field label="Desired capability"><textarea className={inputClass} value={goal.desiredCapability} required
+      <label className="flex gap-2 text-sm"><input type="checkbox" checked={goal.desiredCapability === UNSPECIFIED_CAPABILITY}
+        onChange={event => update({ goal: chooseCapabilityLater(goal, event.target.checked) })} />I'll define this later</label>
+      <Field label="Desired capability"><textarea className={inputClass} value={goal.desiredCapability}
+        disabled={goal.desiredCapability === UNSPECIFIED_CAPABILITY} required={goal.desiredCapability !== UNSPECIFIED_CAPABILITY}
         onChange={event => update({ goal: { ...goal, desiredCapability: event.target.value } })} /></Field>
+      {goal.desiredCapability === UNSPECIFIED_CAPABILITY && <p className="text-sm">Capability is explicitly unspecified. Your intent can remain undecided; no minimum or progress claim is inferred.</p>}
       <Field label="Your private motivation (optional)"><textarea className={inputClass} value={goal.privateMotivation ?? ""}
         onChange={event => update({ goal: { ...goal, privateMotivation: event.target.value || undefined } })} /></Field>
       <Field label="Current capability assessment (optional)"><textarea className={inputClass} value={goal.currentCapability?.assessment ?? ""}
