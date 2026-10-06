@@ -18,6 +18,8 @@ import { createPinnedOwnershipUnit } from "./lib/pinned-ownership-unit";
 import { createAuthenticatedBootstrapUnit } from "./lib/authenticated-bootstrap-unit";
 import { createPersonalWorkspaceService } from "./services/personal-workspace-service";
 import { createOnboardingRouter } from "./routes/onboarding";
+import { createActivityServiceV2 } from "./services/activity-service-v2";
+import { createActivityV2Router } from "./routes/activity-v2";
 import {
   computeCompositeState,
   isInRampUp,
@@ -38,6 +40,13 @@ export async function registerRoutes(
     getPool: async () => (await import("./db")).pool,
   }),
 ): Promise<Server> {
+  app.use("/api/v2/activities", createActivityV2Router({
+    authenticate: isAuthenticated,
+    service: createActivityServiceV2(createPinnedOwnershipUnit({
+      connect: async () => (await import("./db")).pool.connect(),
+    })),
+  }));
+
   app.use("/api/onboarding", createOnboardingRouter({
     authenticate: isAuthenticated,
     service: createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({
