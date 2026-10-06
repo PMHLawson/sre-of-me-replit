@@ -4,6 +4,8 @@ import { createOrgContextResolver,type OrgContext } from "../lib/org-context";
 import { createPolicyV2Storage } from "./policy-v2-storage";
 import { configurationFor,observationFor,MEASUREMENTS } from "../../shared/fixtures/domain-config-cases";
 import type { DomainConfiguration } from "../../shared/domain-config";
+import { Pool } from "pg";
+import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 
 describe("actual scoped repositories and atomic audit",()=>{
   let f:Awaited<ReturnType<typeof startFixture>>;
@@ -59,7 +61,7 @@ describe("actual scoped repositories and atomic audit",()=>{
 
   it("requires a real capability and does not expose default connections/raw SQL/system mutations",()=>{
     expect(()=>createPolicyV2Storage(f.db,{...contexts.a})).toThrow();
-    expect(Object.keys(stores.a).sort()).toEqual(["workspace","domains","policies","dimensions","observations","evaluations","deviations","associations","bindings","audit"].sort());
+    expect(Object.keys(stores.a).sort()).toEqual(["workspace","domains","policies","dimensions","observations","evaluations","deviations","associations","bindings","audit","personalPractice"].sort());
     expect(Object.keys(stores.a.policies).sort()).toEqual(["get","list","exists","append"].sort());
     expect(Object.keys(stores.a.dimensions).sort()).toEqual(["get","list","exists"].sort());
     expect(Object.keys(stores.a.audit).sort()).toEqual(["get","list"]);
@@ -299,5 +301,136 @@ describe("actual scoped repositories and atomic audit",()=>{
       ()=>s.deviations.delete(["v-a"],reason),()=>s.associations.create(["v-a","d-a"],reason),
       ()=>s.associations.delete(["v-a","d-a"],reason),()=>s.bindings.create(binding("a"),reason),()=>s.bindings.delete(["b-a"],reason));
     for(const operation of operations)await unchangedOnReject(operation,403);
+  });
+});
+
+describe("personal practice repository preserves the legacy surface and fails closed on persisted evidence",()=>{
+  let f:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:ReturnType<typeof createPolicyV2Storage>,c:DomainConfiguration;
+  const request={isAuthenticated:()=>true,user:{claims:{sub:"personal-storage-owner"}}};
+  const time=()=>new Date("2026-03-01T00:00:00Z");
+  const input=(key:string)=>({submissionKey:key,domainId:c.domainId,policyVersionId:c.policyVersionId,practiceEvent:true,
+    observedAt:"2026-01-10T12:00:00Z",values:{"m-repetitions":{valueType:"integer",value:2,unitId:"rep"}}});
+  async function snapshot(){
+    const state:Record<string,unknown>={};
+    for(const table of ["domains","policy_versions","dimension_definitions","source_bindings","observations","audit_events","sessions","user_settings"])
+      state[table]=(await f.client.query(`SELECT to_jsonb(t) row FROM public.${table} t ORDER BY to_jsonb(t)::text`)).rows;
+    return JSON.stringify(state);
+  }
+  async function unchanged(operation:()=>Promise<unknown>,status:number){
+    const before=await snapshot();await expect(operation()).rejects.toMatchObject({status});expect(await snapshot()).toBe(before);
+  }
+  beforeAll(async()=>{
+    f=await startFixture("personal-practice-storage");
+    await f.client.query(`INSERT INTO users(id) VALUES('personal-storage-owner');
+      INSERT INTO organizations(org_id,display_name) VALUES('personal-storage-org','Synthetic');
+      INSERT INTO organization_members(org_id,user_id,role) VALUES('personal-storage-org','personal-storage-owner','owner')`);
+    const context=await createOrgContextResolver(f.db)(request);
+    c={...configurationFor("personal-storage",MEASUREMENTS[1],10),organizationId:context.orgId,ownerUserId:context.actorUserId};
+    store=createPolicyV2Storage(f.db,context,{clock:time});
+    await createPolicyV2Storage(f.db,context,{clock:()=>new Date(c.effectiveFrom)}).domains.createWithPolicy({domainId:c.domainId,slug:"personal-storage",displayName:c.displayName},c,"Synthetic setup");
+    pool=new Pool({host:f.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false,
+      max:3,connectionTimeoutMillis:5000,options:"-c statement_timeout=10000 -c lock_timeout=5000"});
+  },60000);
+  afterAll(async()=>{if(pool)await pool.end();if(f)await f.cleanup();},60000);
+  it("retains existing observation keys/API and excludes those rows from every personal read",async()=>{
+    const old=await store.observations.create({observation:observationFor(c,"existing-raw-id",2),idempotencyKey:"same-caller-key"},"Synthetic old API");
+    const saved=await store.personalPractice.create(input("same-caller-key"));
+    expect(old.idempotency_key).toMatch(/^observation:v1:[a-f0-9]{64}$/);expect(saved.activity.activityId).not.toBe(old.observation_id);
+    const row=(await f.client.query("SELECT * FROM observations WHERE observation_id=$1",[saved.activity.activityId])).rows[0];
+    expect(row.idempotency_key).toMatch(/^personal-practice:v1:[a-f0-9]{64}$/);expect(row.legacy_source_type).toBeNull();expect(row.legacy_source_id).toBeNull();
+    expect(Object.keys(store.personalPractice).sort()).toEqual(["create","eligibility","list","read","submission","edit","delete","restore","mutation"].sort());
+    expect((await store.personalPractice.list({})).activities.map(a=>a.activityId)).toEqual([saved.activity.activityId]);
+    await unchanged(()=>store.personalPractice.read(old.observation_id),404);
+    const before=await snapshot();expect(await store.observations.create({observation:observationFor(c,"existing-raw-id",2),idempotencyKey:"same-caller-key"},"Synthetic equal retry")).toEqual(old);
+    expect(await snapshot()).toBe(before);
+  });
+  it("captures the trusted clock only after locked owned history, dimensions and writer lookup",async()=>{
+    const context=await createOrgContextResolver(f.db)(request);let calls=0;
+    const checked=createPolicyV2Storage(f.db,context,{clock:()=>{
+      calls++;const recent=f.queries.slice(-5).map(q=>q.sql);
+      expect(recent.some(sql=>sql.includes("policy_versions")&&sql.includes("FOR SHARE"))).toBe(true);
+      expect(recent.some(sql=>sql.includes("dimension_definitions")&&sql.includes("FOR SHARE"))).toBe(true);
+      expect(recent.at(-1)).toContain("source_bindings");return time();
+    }});
+    await checked.personalPractice.create(input("locked-clock"));expect(calls).toBe(1);
+    const before=await snapshot();await checked.personalPractice.create(input("locked-clock"));expect(calls).toBe(1);expect(await snapshot()).toBe(before);
+  });
+  it("missing, duplicate and mismatched original scoped create snapshots fail closed on reads and retries",async()=>{
+    const saved=await store.personalPractice.create(input("audit-evidence")),identity=JSON.stringify([saved.activity.activityId]);
+    const audit=(await f.client.query("SELECT * FROM audit_events WHERE entity_type='observations' AND action='create' AND entity_id=$1",[identity])).rows[0];
+    await f.client.query(`INSERT INTO users(id) VALUES('personal-storage-other');
+      INSERT INTO organization_members(org_id,user_id,role) VALUES('personal-storage-org','personal-storage-other','member')`);
+    await f.client.query("UPDATE audit_events SET actor_user_id='personal-storage-other' WHERE audit_event_id=$1",[audit.audit_event_id]);
+    await unchanged(()=>store.personalPractice.read(saved.activity.activityId),503);
+    await unchanged(()=>store.personalPractice.create(input("audit-evidence")),503);
+    await f.client.query("UPDATE audit_events SET actor_user_id='personal-storage-owner' WHERE audit_event_id=$1",[audit.audit_event_id]);
+    await f.client.query(`INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      SELECT 'personal-duplicate-audit',org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after"
+      FROM audit_events WHERE audit_event_id=$1`,[audit.audit_event_id]);
+    await unchanged(()=>store.personalPractice.submission("audit-evidence"),503);
+    await unchanged(()=>store.personalPractice.create(input("audit-evidence")),503);
+    await f.client.query("DELETE FROM audit_events WHERE audit_event_id='personal-duplicate-audit'");
+    await f.client.query(`UPDATE audit_events SET "after"=jsonb_set("after",'{idempotency_key}','"personal-practice:v1:forged"') WHERE audit_event_id=$1`,[audit.audit_event_id]);
+    await unchanged(()=>store.personalPractice.read(saved.activity.activityId),503);
+    await f.client.query('UPDATE audit_events SET "after"=$2::jsonb WHERE audit_event_id=$1',[audit.audit_event_id,JSON.stringify(audit.after)]);
+    await f.client.query("DELETE FROM audit_events WHERE audit_event_id=$1",[audit.audit_event_id]);
+    await unchanged(()=>store.personalPractice.create(input("audit-evidence")),503);
+    await f.client.query(`INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb)`,[audit.audit_event_id,audit.org_id,audit.actor_kind,audit.actor_user_id,
+      audit.entity_type,audit.entity_id,audit.action,audit.occurred_at,audit.reason,JSON.stringify(audit.before),JSON.stringify(audit.after)]);
+  });
+  it("mismatched saved dimension definitions fail without substituting current settings or inferred units",async()=>{
+    const definition=(await f.client.query("SELECT definition FROM dimension_definitions WHERE policy_version_id=$1",[c.policyVersionId])).rows[0].definition;
+    await f.client.query(`UPDATE dimension_definitions SET definition=jsonb_set(definition,'{unit,unitId}','"invented-unit"') WHERE policy_version_id=$1`,[c.policyVersionId]);
+    try {
+      await unchanged(()=>store.personalPractice.create(input("dimension-failure")),503);
+      await unchanged(()=>store.personalPractice.eligibility(c.domainId),503);
+    } finally {await f.client.query("UPDATE dimension_definitions SET definition=$2::jsonb WHERE policy_version_id=$1",[c.policyVersionId,JSON.stringify(definition)]);}
+  });
+  it("rejects SQL-only microsecond drift even when PG Date decoding and the saved JSON appear identical",async()=>{
+    const saved=await store.personalPractice.create(input("raw-sql-precision")),id=saved.activity.activityId;
+    await f.client.query("UPDATE policy_versions SET effective_from=effective_from+interval '100 microseconds' WHERE policy_version_id=$1",[c.policyVersionId]);
+    try {
+      await unchanged(()=>store.personalPractice.eligibility(c.domainId),503);
+      await unchanged(()=>store.personalPractice.create(input("raw-sql-precision")),503);
+      await unchanged(()=>store.personalPractice.read(id),503);
+    } finally {await f.client.query("UPDATE policy_versions SET effective_from=date_trunc('milliseconds',effective_from) WHERE policy_version_id=$1",[c.policyVersionId]);}
+    await f.client.query("UPDATE observations SET observed_at=observed_at+interval '100 microseconds' WHERE observation_id=$1",[id]);
+    try {
+      await unchanged(()=>store.personalPractice.read(id),503);
+      await unchanged(()=>store.personalPractice.submission("raw-sql-precision"),503);
+      await unchanged(()=>store.personalPractice.create(input("raw-sql-precision")),503);
+    } finally {await f.client.query("UPDATE observations SET observed_at=date_trunc('milliseconds',observed_at) WHERE observation_id=$1",[id]);}
+    await f.client.query("UPDATE observations SET deleted_at='2026-02-01T00:00:00.0001Z' WHERE observation_id=$1",[id]);
+    try {await unchanged(()=>store.personalPractice.read(id),503);
+      await unchanged(()=>store.personalPractice.mutation(id,"not-committed"),503);
+      await unchanged(()=>store.personalPractice.restore(id,{mutationKey:"precision-restore",expectedStateFingerprint:saved.activity.stateFingerprint,reason:"Synthetic precision refusal"}),503);}
+    finally {await f.client.query("UPDATE observations SET deleted_at=NULL WHERE observation_id=$1",[id]);}
+    const page=await store.personalPractice.list({domainId:c.domainId,limit:100});
+    expect(page.activities.some(a=>a.activityId===id)).toBe(true);
+    expect(Object.keys(await store.personalPractice.read(id)).some(key=>key.startsWith("__personal"))).toBe(false);
+    const audit=(await f.client.query(`SELECT "after" FROM audit_events WHERE entity_type='observations' AND action='create' AND entity_id=$1`,[JSON.stringify([id])])).rows[0].after;
+    expect(Object.keys(audit).some(key=>key.startsWith("__personal"))).toBe(false);
+  });
+  it("correction state and audit roll back when a later nested failure is caught by the caller",async()=>{
+    const activity=(await store.personalPractice.create(input("nested-correction-create"))).activity,unit=createPinnedOwnershipUnit(pool);
+    await unchanged(()=>unit.run(request,async ownership=>{
+      const scoped=createPolicyV2Storage(ownership.db,ownership.context,{clock:time});
+      await scoped.personalPractice.edit(activity.activityId,{mutationKey:"nested-valid-correction",expectedStateFingerprint:activity.stateFingerprint,
+        reason:"Synthetic valid correction before caught failure",policyVersionId:activity.policyVersionId,practiceEvent:true,observedAt:activity.observedAt,
+        values:{"m-repetitions":{valueType:"integer",value:3,unitId:"rep"}}});
+      await scoped.personalPractice.delete(activity.activityId,{mutationKey:"nested-invalid",expectedStateFingerprint:"not-a-fingerprint",reason:"Synthetic caught failure"}).catch(()=>{});
+      return "Attempted partial commit";
+    }),503);
+    await unchanged(()=>store.personalPractice.mutation(activity.activityId,"nested-valid-correction"),404);
+  });
+  it("a caught nested failure poisons the pinned transaction and rolls back an earlier valid practice/audit",async()=>{
+    const unit=createPinnedOwnershipUnit(pool);
+    await unchanged(()=>unit.run(request,async ownership=>{
+      const scoped=createPolicyV2Storage(ownership.db,ownership.context,{clock:time});
+      await scoped.personalPractice.create(input("poisoned-unit"));
+      await scoped.personalPractice.create({...input("poisoned-invalid"),practiceEvent:false}).catch(()=>{});
+      return "Caller tried to ignore failure";
+    }),503);
   });
 });

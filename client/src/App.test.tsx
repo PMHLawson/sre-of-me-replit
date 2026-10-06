@@ -76,6 +76,15 @@ describe("actual app workspace routing boundary", () => {
     expect(html).toContain(`legacy-${page}`); expect(mocks.legacy).toHaveBeenCalledExactlyOnceWith(page);
     expect(html).toContain("Protect what grows you");
   });
+  it.each(["personal", "legacy"] as const)("mounts the real custom activity routes for a verified %s owner without changing the original logger", experience => {
+    for (const [path, label] of [["/activities", "Your activity history"], ["/activities/domain/custom-domain", "Your activity history"],
+      ["/activities/new/custom-domain", "Record activity"], ["/activities/owned-record", "Saved activity"]]) {
+      mocks.legacy.mockClear(); const html = render(<JourneySurface ownerId="owner-a" state={state(experience)}/>, path);
+      expect(html).toContain(label); expect(html).not.toContain("not part of your personal workspace"); expect(mocks.legacy).not.toHaveBeenCalled();
+    }
+    if (experience === "legacy") expect(render(<JourneySurface ownerId="owner-a" state={state(experience)}/>, "/log")).toContain("legacy-log");
+    else expect(render(<JourneySurface ownerId="owner-a" state={state(experience)}/>, "/log")).toContain("not part of your personal workspace");
+  });
   it("never infers legacy experience from configured domains, workspace roles or a failed response", () => {
     const personal: WorkspaceEntrySnapshot = { ownerId: "owner-a", phase: "ready", status: { ...ready(), hasConfiguredDomain: true,
       workspace: { organizationId: "own-workspace", role: "member" } } };

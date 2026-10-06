@@ -9,6 +9,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { sanitizeDeepLinkPath } from "@/lib/notification-deeplink";
 import { createWorkspaceEntrySession, parseOnboardingStatus, type WorkspaceEntrySnapshot } from "@/lib/onboarding-api";
 import type { OnboardingReady } from "@shared/onboarding";
+import { bindActivityOwner, pendingActivityEntries, pendingActivityMutations } from "@/lib/activities-api";
 
 import Dashboard from "@/pages/dashboard";
 import LogSession from "@/pages/log-session";
@@ -19,11 +20,14 @@ import SystemHealth from "@/pages/system-health";
 import SettingsPage from "@/pages/settings";
 import DomainSettingsPage from "@/pages/domain-settings";
 import OnboardingPage from "@/pages/onboarding";
+import ActivitiesPage from "@/pages/activities";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/landing";
 
 function LegacyRouter() {
   return <Switch>
+    <Route path="/activities/new/:domainId" component={ActivitiesPage}/><Route path="/activities/domain/:domainId" component={ActivitiesPage}/>
+    <Route path="/activities/:activityId" component={ActivitiesPage}/><Route path="/activities" component={ActivitiesPage}/>
     <Route path="/" component={Dashboard}/><Route path="/log" component={LogSession}/>
     <Route path="/decide" component={Decide}/><Route path="/history" component={History}/>
     <Route path="/domain/:domain" component={DomainDetail}/><Route path="/system-health" component={SystemHealth}/>
@@ -33,6 +37,8 @@ function LegacyRouter() {
 }
 export function PersonalJourneyRoutes({ ownerId, status, onOwnedStatusChanged }: { ownerId: string; status: OnboardingReady; onOwnedStatusChanged?: () => void }) {
   return <Switch>
+    <Route path="/activities/new/:domainId" component={ActivitiesPage}/><Route path="/activities/domain/:domainId" component={ActivitiesPage}/>
+    <Route path="/activities/:activityId" component={ActivitiesPage}/><Route path="/activities" component={ActivitiesPage}/>
     <Route path="/"><>{status.hasConfiguredDomain ? <DomainSettingsPage/> : <OnboardingPage ownerId={ownerId} status={status} onOwnedStatusChanged={onOwnedStatusChanged}/>}</></Route>
     <Route path="/onboarding"><OnboardingPage ownerId={ownerId} status={status} onOwnedStatusChanged={onOwnedStatusChanged}/></Route>
     <Route path="/domains/:domainId" component={DomainSettingsPage}/><Route path="/domains" component={DomainSettingsPage}/>
@@ -111,6 +117,16 @@ function AuthGate() {
   const { user, isLoading } = useAuth();
   const ownerId = user?.id;
   const queries = useQueryClient();
+  try { bindActivityOwner(ownerId ?? null); } catch { bindActivityOwner(null); }
+  useEffect(() => {
+    if (!ownerId || typeof window === "undefined") return;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!pendingActivityEntries(ownerId).length && !pendingActivityMutations(ownerId).length) return;
+      event.preventDefault(); event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [ownerId]);
   useEffect(() => {
     // Reset visible legacy state on owner departure. Personal routes never read it.
     // A complete legacy mutation/read generation refactor is separate work.
