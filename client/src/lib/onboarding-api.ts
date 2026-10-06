@@ -25,7 +25,7 @@ export function parseOnboardingStatus(value: unknown, ownerId: string): Onboardi
 }
 export function parsePersonalDaySettings(value: unknown, ownerId: string): OnboardingSettings {
   const owner = ownerIdentity(ownerId);
-  // /api/settings contains unrelated settings. Copy only the declared day fields.
+  // Copy only the declared owner day fields from the saved acknowledgement.
   const fields = z.object({ userId: z.unknown(), dayStartHour: z.unknown(), timezone: z.unknown(), windowDays: z.unknown() })
     .safeParse(value);
   const parsed = OnboardingSettingsSchema.safeParse(fields.success ? fields.data : null);
@@ -71,7 +71,7 @@ export async function savePersonalDaySettings(ownerId: string, input: PersonalDa
   const owner = ownerIdentity(ownerId), parsed = dayPatch.safeParse(input);
   if (!parsed.success) throw new OnboardingApiError(400);
   try {
-    const saved = parsePersonalDaySettings(await request("/api/settings", signal, "PATCH", parsed.data), owner);
+    const saved = parsePersonalDaySettings(await request("/api/onboarding/settings", signal, "PATCH", parsed.data), owner);
     if (Object.entries(parsed.data).some(([field, value]) => saved[field as keyof OnboardingSettings] !== value))
       throw new OnboardingApiError(503, true);
     return saved;

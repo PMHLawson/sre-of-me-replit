@@ -34,6 +34,15 @@ export const OnboardingStatusSchema = z.discriminatedUnion("status", [needsWorks
 
 /** This operation has no caller-selected identities, roles, mode or template. */
 export const WorkspaceEnsureInputSchema = z.object({}).strict();
+/** Personal day edits never normalize an omitted persisted setting. */
+export const OnboardingSettingsPatchSchema = z.object({
+  dayStartHour: OnboardingSettingsSchema.shape.dayStartHour.optional(),
+  timezone: OnboardingSettingsSchema.shape.timezone.optional(),
+  windowDays: z.union([z.literal(7), z.literal(14), z.literal(28), z.literal(42)]).optional(),
+}).strict().refine(value => Object.values(value).some(field => field !== undefined), {
+  message: "Supply at least one day setting",
+});
 export type OnboardingSettings = z.infer<typeof OnboardingSettingsSchema>;
+export type OnboardingSettingsPatch = z.infer<typeof OnboardingSettingsPatchSchema>;
 export type OnboardingReady = z.infer<typeof OnboardingReadySchema>;
 export type OnboardingStatus = z.infer<typeof OnboardingStatusSchema>;

@@ -51,13 +51,14 @@ describe("owned onboarding transport", () => {
     await expect(ensurePersonalWorkspace("owner-a", signal())).rejects.toMatchObject({ status: 403, needsReconciliation: false });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it("patches only deliberate day fields, preserves other saved fields and verifies acknowledgement", async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...ready().settings, dayStartHour: 6, notificationsEnabled: true }), { status: 200 }));
+  it.each([21, 30])("uses the personal settings route and retains omitted saved window %i", async windowDays => {
+    const acknowledged = { ...ready().settings, dayStartHour: 6, timezone: "Europe/London", windowDays };
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...acknowledged, notificationsEnabled: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
-    const abort = signal(), saved = await savePersonalDaySettings("owner-a", { dayStartHour: 6 }, abort);
-    expect(saved).toEqual({ ...ready().settings, dayStartHour: 6 });
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/settings", { method: "PATCH", credentials: "include", signal: abort,
-      headers: { "Content-Type": "application/json" }, body: '{"dayStartHour":6}' });
+    const abort = signal(), saved = await savePersonalDaySettings("owner-a", { dayStartHour: 6, timezone: "Europe/London" }, abort);
+    expect(saved).toEqual(acknowledged);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/onboarding/settings", { method: "PATCH", credentials: "include", signal: abort,
+      headers: { "Content-Type": "application/json" }, body: '{"dayStartHour":6,"timezone":"Europe/London"}' });
     fetcher.mockResolvedValue(new Response(JSON.stringify(ready().settings), { status: 200 }));
     await expect(savePersonalDaySettings("owner-a", { dayStartHour: 6 }, signal())).rejects.toMatchObject({ needsReconciliation: true });
   });

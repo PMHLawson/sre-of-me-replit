@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { OnboardingReadySchema, WorkspaceEnsureInputSchema, type OnboardingReady, type OnboardingStatus } from "../../shared/onboarding";
+import { OnboardingReadySchema, OnboardingSettingsSchema, OnboardingSettingsPatchSchema,
+  WorkspaceEnsureInputSchema, type OnboardingReady, type OnboardingStatus, type OnboardingSettings } from "../../shared/onboarding";
 import { authenticatedBootstrapActor, type BootstrapUnit, type createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap-unit";
 import { createAuditService } from "../lib/audit-service";
 import { assertContext, revalidate, BoundaryError, type OrgContext } from "../lib/org-context";
@@ -48,6 +49,50 @@ export function createPersonalWorkspaceService(units: Units) {
       if (found.length !== 1) throw new BoundaryError(403);
       return ready(unit, await unit.resolveContext());
     }),
+    readSettings: (request: Request): Promise<OnboardingSettings> => units.run<OnboardingSettings>(request, async unit => {
+      const found = await memberships(unit);
+      if (found.length !== 1) throw new BoundaryError(403);
+      const result = await ready(unit, await unit.resolveContext());
+      if (result.settings === null) throw new BoundaryError(503);
+      return result.settings;
+    }),
+    updateSettings: async (request: Request, input: unknown): Promise<OnboardingSettings> => {
+      authenticatedBootstrapActor(request);
+      const parsed = OnboardingSettingsPatchSchema.safeParse(input);
+      if (!parsed.success) throw new BoundaryError(400);
+      return units.run<OnboardingSettings>(request, async unit => {
+        const found = await memberships(unit);
+        if (found.length !== 1) throw new BoundaryError(403);
+        const context = await unit.resolveContext();
+        assertContext(unit.db, context); await revalidate(unit.tx, unit.db, context);
+        const selected = await unit.tx.query("SELECT * FROM public.user_settings WHERE user_id=$1 FOR UPDATE", [context.actorUserId]);
+        if (selected.rows.length !== 1) throw new BoundaryError(503);
+        const before = selected.rows[0];
+        const projection = (row: typeof before) => OnboardingSettingsSchema.safeParse({ userId: row.user_id,
+          dayStartHour: row.day_start_hour, timezone: row.timezone, windowDays: row.window_days });
+        const existing = projection(before);
+        if (!existing.success || existing.data.userId !== context.actorUserId) throw new BoundaryError(503);
+        // These identifiers are fixed server literals; every supplied value is
+        // bound separately. No legacy normalization/default insertion occurs.
+        const fields = ["dayStartHour", "timezone", "windowDays"] as const;
+        const columns = { dayStartHour: "day_start_hour", timezone: "timezone", windowDays: "window_days" } as const;
+        const changed = fields.filter(field => parsed.data[field] !== undefined && parsed.data[field] !== existing.data[field]);
+        if (!changed.length) return existing.data;
+        const values: unknown[] = [context.actorUserId, ...changed.map(field => parsed.data[field])];
+        const assignments = changed.map((field, index) => `${columns[field]}=$${index + 2}`);
+        const updated = await unit.tx.query(`UPDATE public.user_settings SET ${assignments.join(",")},updated_at=now()
+          WHERE user_id=$1 RETURNING *`, values);
+        if (updated.rows.length !== 1) throw new BoundaryError(503);
+        const after = updated.rows[0], saved = projection(after);
+        if (!saved.success || saved.data.userId !== context.actorUserId ||
+          fields.some(field => saved.data[field] !== (parsed.data[field] ?? existing.data[field])) ||
+          after.notifications_enabled !== before.notifications_enabled || after.notification_tier !== before.notification_tier)
+          throw new BoundaryError(503);
+        await createAuditService(unit.tx, unit.db, context).append("user_settings", [context.actorUserId], "update",
+          "Personal day settings update", before, after);
+        return saved.data;
+      });
+    },
     ensure: async (request: Request, input: unknown): Promise<OnboardingReady> => {
       authenticatedBootstrapActor(request); // authentication precedes input validation and DB access
       if (!WorkspaceEnsureInputSchema.safeParse(input).success) throw new BoundaryError(400);

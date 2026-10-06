@@ -28,13 +28,16 @@ describe("personal workspace provision/status: accepted PostgreSQL schema and ac
   beforeAll(async () => {
     f = await startFixture("personal-workspaces");
     await f.client.query(`INSERT INTO users(id,email) VALUES ('onboard-a','a@example.invalid'),('onboard-b','b@example.invalid'),
-      ('preserved-settings',NULL),('existing-owner',NULL),('same-org-member',NULL),('blank-member',NULL),('ambiguous-owner',NULL),('failure-owner',NULL),('commit-owner',NULL);
+      ('preserved-settings',NULL),('existing-owner',NULL),('same-org-member',NULL),('blank-member',NULL),('ambiguous-owner',NULL),('failure-owner',NULL),('commit-owner',NULL),
+      ('settings-write',NULL),('settings-commit',NULL);
       INSERT INTO organizations(org_id,display_name,rollout_mode) VALUES ('established-org','Established','shadow'),('other-org','Other','legacy');
       INSERT INTO organization_members(org_id,user_id,role) VALUES ('established-org','existing-owner','owner'),
         ('established-org','same-org-member','member'),('other-org','blank-member','member'),
-        ('established-org','ambiguous-owner','member'),('other-org','ambiguous-owner','owner');
+        ('established-org','ambiguous-owner','member'),('other-org','ambiguous-owner','owner'),
+        ('other-org','settings-write','member'),('other-org','settings-commit','owner');
       INSERT INTO user_settings(user_id,day_start_hour,timezone,window_days,notifications_enabled) VALUES
-        ('existing-owner',6,'Asia/Tokyo',21,true),('preserved-settings',5,'Europe/London',14,true);
+        ('existing-owner',6,'Asia/Tokyo',21,true),('preserved-settings',5,'Europe/London',14,true),
+        ('settings-write',19,'Europe/London',30,true),('settings-commit',5,'America/New_York',21,true);
       INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp) SELECT 'unassigned-'||g,NULL,'music',1,'2026-01-01T00:00:00Z' FROM generate_series(1,73) g;
       INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp) VALUES ('historical-owned','existing-owner','meditation',10,'2026-01-01T00:00:00Z')`);
     verifyFixture(f.root);
@@ -153,5 +156,72 @@ describe("personal workspace provision/status: accepted PostgreSQL schema and ac
     const before = await snapshot(); expect(await service.ensure(request("commit-owner"), {})).toEqual(resolved); expect(await snapshot()).toBe(before);
     expect((await f.client.query("SELECT count(*)::int n FROM organization_members WHERE user_id='commit-owner'")).rows[0].n).toBe(1);
     expect((await f.client.query("SELECT count(*)::int n FROM audit_events WHERE actor_user_id='commit-owner'")).rows[0].n).toBe(3);
+  });
+  it("personal settings refuse malformed authority before connection and refuse missing or ambiguous context without seeding", async () => {
+    let connects = 0;
+    const safe = createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({ connect: async () => { connects++; throw Error("must not connect"); } } as any));
+    await expect(safe.updateSettings({}, { dayStartHour: 5 })).rejects.toMatchObject({ status: 401 });
+    for (const input of [undefined, null, [], {}, { dayStartHour: undefined }, { dayStartHour: "5" }, { dayStartHour: 24 },
+      { timezone: "Unknown/Zone" }, { windowDays: 21 }, { windowDays: 30 }, { userId: "settings-write", dayStartHour: 5 },
+      { organizationId: "other-org", timezone: "UTC" }, { notificationsEnabled: false }, { updatedAt: "chosen" }])
+      await expect(safe.updateSettings(request("settings-write"), input)).rejects.toMatchObject({ status: 400 });
+    expect(connects).toBe(0);
+    await unchanged(() => service.updateSettings(request("blank-member"), { timezone: "UTC" }), 503);
+    await unchanged(() => service.updateSettings(request("ambiguous-owner"), { timezone: "UTC" }), 403);
+    await unchanged(() => service.updateSettings(request("failure-owner"), { timezone: "UTC" }), 403);
+  });
+  it("equal personal values are a full no-op, including updatedAt, notifications and audit history", async () => {
+    const before = await snapshot();
+    expect(await service.readSettings(request("settings-write")))
+      .toEqual({ userId: "settings-write", dayStartHour: 19, timezone: "Europe/London", windowDays: 30 });
+    expect(await service.readSettings(request("existing-owner")))
+      .toEqual({ userId: "existing-owner", dayStartHour: 6, timezone: "Asia/Tokyo", windowDays: 21 });
+    expect(await service.updateSettings(request("settings-write"), { dayStartHour: 19, timezone: "Europe/London" }))
+      .toEqual({ userId: "settings-write", dayStartHour: 19, timezone: "Europe/London", windowDays: 30 });
+    expect(await snapshot()).toBe(before);
+  });
+  it("concurrent disjoint personal edits preserve an omitted30-day window and preferences with one scoped audit per changed patch", async () => {
+    const foreignBefore = (await f.client.query("SELECT to_jsonb(t) r FROM user_settings t WHERE user_id<>'settings-write' ORDER BY user_id")).rows;
+    await Promise.all([service.updateSettings(request("settings-write"), { dayStartHour: 20 }),
+      service.updateSettings(request("settings-write"), { timezone: "Africa/Nairobi" })]);
+    expect(await service.status(request("settings-write"))).toMatchObject({ settings: {
+      userId: "settings-write", dayStartHour: 20, timezone: "Africa/Nairobi", windowDays: 30 } });
+    const row = (await f.client.query("SELECT * FROM user_settings WHERE user_id='settings-write'")).rows[0];
+    expect(row).toMatchObject({ notifications_enabled: true, notification_tier: "WARNING", window_days: 30 });
+    expect((await f.client.query("SELECT to_jsonb(t) r FROM user_settings t WHERE user_id<>'settings-write' ORDER BY user_id")).rows).toEqual(foreignBefore);
+    const audits = (await f.client.query(`SELECT org_id,actor_user_id,entity_type,action,"before","after"
+      FROM audit_events WHERE actor_user_id='settings-write' ORDER BY occurred_at,audit_event_id`)).rows;
+    expect(audits).toHaveLength(2);
+    expect(audits.every(a => a.org_id === "other-org" && a.actor_user_id === "settings-write" &&
+      a.entity_type === "user_settings" && a.action === "update" && a.before.window_days === 30 && a.after.window_days === 30 &&
+      a.before.notifications_enabled === true && a.after.notifications_enabled === true)).toBe(true);
+  });
+  it("a failed actual settings update or audit rolls back the row and all audit snapshots", async () => {
+    for (const table of ["user_settings", "audit_events"] as const) {
+      await f.client.query(`CREATE FUNCTION public.fail_personal_settings() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'private settings failure'; END $$;
+        CREATE TRIGGER fail_personal_settings AFTER ${table === "user_settings" ? "UPDATE" : "INSERT"} ON public.${table}
+        FOR EACH ROW ${table === "audit_events" ? "WHEN (NEW.action='update' AND NEW.entity_type='user_settings')" : ""}
+        EXECUTE FUNCTION public.fail_personal_settings()`);
+      try { await unchanged(() => service.updateSettings(request("settings-write"), { dayStartHour: 21 }), 503); }
+      finally { await f.client.query(`DROP TRIGGER fail_personal_settings ON public.${table}; DROP FUNCTION public.fail_personal_settings()`); }
+    }
+  });
+  it("a lost settings COMMIT acknowledgement is reconciled from own status and deliberate replay produces no second update or audit", async () => {
+    const releases: boolean[] = [];
+    const uncertain = createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({ connect: async () => {
+      const client = await pool.connect(); return { query: async (sql: string, values?: any[]) => {
+        const result = await client.query(sql, values); if (sql === "COMMIT") throw Error("private lost settings acknowledgement"); return result;
+      }, release: (destroy: boolean) => { releases.push(destroy); client.release(destroy); } } as any;
+    } }));
+    await expect(uncertain.updateSettings(request("settings-commit"), { timezone: "Asia/Tokyo" })).rejects.toMatchObject({ status: 503 });
+    expect(releases).toEqual([true]);
+    expect(await service.status(request("settings-commit"))).toMatchObject({ settings: {
+      userId: "settings-commit", dayStartHour: 5, timezone: "Asia/Tokyo", windowDays: 21 } });
+    const before = await snapshot();
+    expect(await service.updateSettings(request("settings-commit"), { timezone: "Asia/Tokyo" }))
+      .toEqual({ userId: "settings-commit", dayStartHour: 5, timezone: "Asia/Tokyo", windowDays: 21 });
+    expect(await snapshot()).toBe(before);
+    expect((await f.client.query("SELECT count(*)::int n FROM audit_events WHERE actor_user_id='settings-commit'")).rows[0].n).toBe(1);
   });
 });

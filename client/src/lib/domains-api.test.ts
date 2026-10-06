@@ -220,15 +220,16 @@ describe("explicit private domain writes", () => {
   });
 });
 describe("new-domain day settings", () => {
-  it("requires the actual authenticated owner and retains unusual valid inherited boundaries", async () => {
+  it("reads the owned personal settings path without legacy normalization or identity disclosure", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ userId: "owner-a", timezone: "Asia/Tokyo", dayStartHour: 15,
       windowDays: 13, notificationsEnabled: true }), { status: 200 })); vi.stubGlobal("fetch", fetch);
     const query = personalDomainBoundaryQuery("owner-a"), signal = new AbortController().signal;
     expect(await query.queryFn({ signal })).toEqual({ timezone: "Asia/Tokyo", dayStartHour: 15 });
-    expect(fetch).toHaveBeenCalledWith("/api/settings", { credentials: "include", signal });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/onboarding/settings", { credentials: "include", signal });
     expect(query.queryKey).not.toEqual(personalDomainBoundaryQuery("owner-b").queryKey);
     expect(query.gcTime).toBe(0); expect(query.retry).toBe(false);
     await expect(personalDomainBoundaryQuery("owner-b").queryFn({ signal })).rejects.toBeInstanceOf(DomainsApiError);
+    expect(fetch.mock.calls.map(([requestPath]) => requestPath)).toEqual(["/api/onboarding/settings", "/api/onboarding/settings"]);
   });
   it.each([{ timezone: "America/New_York", dayStartHour: 4 }, { userId: "owner-a", timezone: "fake/timezone", dayStartHour: 4 },
     { userId: "owner-a", timezone: "America/New_York", dayStartHour: 24 }])("never substitutes a boundary for malformed or unowned settings", async value => {
