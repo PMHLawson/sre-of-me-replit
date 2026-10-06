@@ -1,9 +1,11 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
-import { DomainsApiError, parsePersonalDomain, personalDomainsQuery } from "@/lib/domains-api";
-import { PersonalConfigurationView, PersonalDomainDetail, PersonalDomainsList, PersonalDomainsNotice } from "./domain-settings";
+import { DomainsApiError, parsePersonalDomain, personalDomainBoundaryQuery, personalDomainsQuery } from "@/lib/domains-api";
+import DomainSettingsPage, { openPersonalDomainDraft, PersonalDomainDraftSlot, PersonalConfigurationView, PersonalDomainActions,
+  PersonalDomainDetail, PersonalDomainsBackLink, PersonalDomainsList, PersonalDomainsNotice } from "./domain-settings";
 
 function fixture() {
   const amount = { measurementId: "amount", unitId: "cupcake", basis: { kind: "per_event" }, valueType: "integer", constraint: { operator: "gte", value: 12 } };
@@ -142,5 +144,92 @@ describe("availability rendering", () => {
     expect(html).toContain("Try again");
     expect(html).not.toContain("healthy");
     if (status === 404) expect(html).toContain("not available to your account");
+  });
+});
+describe("personal domain form entry points", () => {
+  const actions = { onSaved: () => {}, onCancel: () => {}, onReconcile: async () => null };
+  it("captures the latest scheduled owner configuration separately from mutable read data", () => {
+    const view = parsed(), scheduled = structuredClone(view.policyVersions[0]);
+    Object.assign(scheduled.configuration, { policyVersionId: "version-two", previousVersionId: "version-one", revision: 2, effectiveFrom: "2099-01-01T00:00:00Z" });
+    view.policyVersions.push(scheduled);
+    const session = openPersonalDomainDraft("owner-a", view);
+    if (session.kind !== "configure") throw new Error("Expected an owned prospective draft.");
+    expect(session.openingConfiguration.policyVersionId).toBe("version-two");
+    scheduled.configuration.goal.privateMotivation = "Changed incoming private goal";
+    scheduled.configuration.boundary.dayStartHour = 14;
+    expect(session.openingConfiguration.goal.privateMotivation).toBe("My own <private> reason");
+    expect(session.openingConfiguration.boundary.dayStartHour).toBe(6);
+    expect(() => openPersonalDomainDraft("owner-b", view)).toThrow(DomainsApiError);
+    const empty = { ...view, currentPolicyVersionId: null, policyVersions: [] };
+    expect(() => openPersonalDomainDraft("owner-a", empty)).toThrow(DomainsApiError);
+  });
+  it.each(["503 refetch", "loading", "query reset"])("keeps the opening configuration rendered during a same-owner %s", state => {
+    const session = openPersonalDomainDraft("owner-a", parsed());
+    const html = renderToStaticMarkup(<><PersonalDomainDraftSlot session={session} ownerId="owner-a" domainId="custom-five"
+      latestPolicyVersionId={undefined} {...actions} /><PersonalDomainsNotice loading={state !== "503 refetch"} error={new DomainsApiError(503)} /></>);
+    expect(html).toContain('data-testid="domain-policy-form"'); expect(html).toContain("My own &lt;private&gt; reason");
+    expect(html).toContain("Bake consistently"); expect(html).not.toContain("A newer saved version was loaded");
+    expect(html).not.toContain("saved configuration is no longer available");
+  });
+  it.each(["version-two", null])("retains the opening draft but blocks save when a successful latest read is %s", latest => {
+    const session = openPersonalDomainDraft("owner-a", parsed());
+    const html = renderToStaticMarkup(<PersonalDomainDraftSlot session={session} ownerId="owner-a" domainId="custom-five"
+      latestPolicyVersionId={latest} {...actions} />);
+    expect(html).toContain('data-testid="domain-policy-form"'); expect(html).toContain("My own &lt;private&gt; reason");
+    expect(html).toContain('fieldset disabled=""');
+    expect(html).toContain(latest ? "A newer saved version was loaded" : "saved configuration is no longer available");
+  });
+  it.each([["owner-b", "custom-five"], [undefined, "custom-five"], ["owner-a", "other-domain"]] as const)(
+    "never renders a pinned private draft for owner %s on route %s", (ownerId, domainId) => {
+      const html = renderToStaticMarkup(<PersonalDomainDraftSlot session={openPersonalDomainDraft("owner-a", parsed())}
+        ownerId={ownerId} domainId={domainId} {...actions} />);
+      expect(html).toBe("");
+    });
+  it("does not mount a new private draft before the first owner-verified boundary read", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}><PersonalDomainDraftSlot
+      session={openPersonalDomainDraft("owner-a")} ownerId="owner-a" {...actions} /></QueryClientProvider>);
+    expect(html).toContain("Loading your day settings"); expect(html).not.toContain('data-testid="domain-policy-form"');
+    expect(html).not.toContain("America/New_York"); client.clear();
+  });
+  it("opens a new draft with that owner's verified boundary and never borrows another owner's cache", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    client.setQueryData(personalDomainBoundaryQuery("owner-a").queryKey, { timezone: "America/New_York", dayStartHour: 14 });
+    const render = (ownerId: string) => renderToStaticMarkup(<QueryClientProvider client={client}><PersonalDomainDraftSlot
+      session={openPersonalDomainDraft(ownerId)} ownerId={ownerId} {...actions} /></QueryClientProvider>);
+    expect(render("owner-a")).toContain('data-testid="domain-policy-form"'); expect(render("owner-a")).toContain("Day starts at 14:00");
+    expect(render("owner-b")).not.toContain('data-testid="domain-policy-form"'); expect(render("owner-b")).not.toContain("14:00"); client.clear();
+  });
+  it("does not dereference a null draft when both form and authenticated owner are absent", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}><Router ssrPath="/domains"><DomainSettingsPage /></Router></QueryClientProvider>);
+    expect(html).toContain("Sign in to view your domains");
+    expect(html).not.toContain('data-testid="domain-policy-form"');
+    expect(html).not.toContain("Add domain"); client.clear();
+  });
+  it("keeps in-page navigation from bypassing the pending or uncertain form gate", () => {
+    const html = renderToStaticMarkup(<Router ssrPath="/domains"><PersonalDomainsBackLink editing /><PersonalDomainsList domains={[parsed()]} navigationPaused /></Router>);
+    expect(html).toContain("finish this draft to return"); expect(html).toContain("Finish or discard this draft");
+    expect(html).not.toContain('href="/settings"'); expect(html).not.toContain('href="/domains/custom-five"');
+    const normal = renderToStaticMarkup(<Router ssrPath="/domains"><PersonalDomainsBackLink editing={false} /></Router>);
+    expect(normal).toContain('href="/settings"');
+  });
+  it("offers creation only from the authenticated successful list entry", () => {
+    const html = renderToStaticMarkup(<PersonalDomainActions onAdd={() => {}} onConfigure={() => {}} />);
+    expect(html).toContain("Add domain"); expect(html).not.toContain("Schedule a new configuration");
+  });
+  it("explains that edits start from the latest scheduled version rather than the current active version", () => {
+    const view = parsed(), scheduled = structuredClone(view.policyVersions[0]);
+    Object.assign(scheduled.configuration, { policyVersionId: "version-two", previousVersionId: "version-one", revision: 2, effectiveFrom: "2099-01-01T00:00:00Z" });
+    view.policyVersions.push(scheduled);
+    const html = renderToStaticMarkup(<PersonalDomainActions domain={view} onAdd={() => {}} onConfigure={() => {}} />);
+    expect(html).toContain("Schedule a new configuration"); expect(html).toContain("latest saved version 2");
+    expect(html).toContain("including any scheduled changes"); expect(html).not.toContain("latest saved version 1");
+  });
+  it("does not expose a configure form for a valid owned domain with no policy", () => {
+    const view = parsed(); view.policyVersions = []; view.currentPolicyVersionId = null;
+    const html = renderToStaticMarkup(<PersonalDomainActions domain={view} onAdd={() => {}} onConfigure={() => {}} />);
+    expect(html).toContain("not available for a domain with no saved policy");
+    expect(html).not.toContain("<button");
   });
 });

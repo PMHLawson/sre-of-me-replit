@@ -1,9 +1,10 @@
-import React, { useEffect } from "react";
-import { Link, useRoute } from "wouter";
+import React, { useEffect, useRef, useState } from "react";
+import { Link, useLocation, useRoute } from "wouter";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DomainConfiguration, QualificationPredicate } from "@shared/domain-config";
 import { useAuth } from "@/hooks/use-auth";
-import { describeCondition, DomainsApiError, PERSONAL_DOMAINS_QUERY, personalDomainsQuery,
+import DomainPolicyForm, { type DomainPolicyFormProps } from "@/components/domains/domain-policy-form";
+import { describeCondition, DomainsApiError, PERSONAL_DOMAINS_QUERY, personalDomainBoundaryQuery, personalDomainsQuery,
   personalPolicySelection, type PersonalDomain, type PersonalPolicyVersion } from "@/lib/domains-api";
 
 const intentLabels = { develop: "Develop a skill", maintain: "Maintain capability",
@@ -107,7 +108,8 @@ export function PersonalConfigurationView({ version }: { version: PersonalPolicy
     </section>
   </div>;
 }
-export function PersonalDomainsList({ domains }: { domains: PersonalDomain[] }) {
+export function PersonalDomainsList({ domains, navigationPaused = false }: { domains: PersonalDomain[]; navigationPaused?: boolean }) {
+  if (navigationPaused) return <p className={panel}>Finish or discard this draft before selecting another domain.</p>;
   if (!domains.length) return <p className={panel} data-testid="domains-empty">You have no personal domains yet.</p>;
   return <ul className="space-y-3" data-testid="personal-domains-list">{domains.map(domain => {
     const selected = personalPolicySelection(domain);
@@ -143,30 +145,107 @@ export function PersonalDomainsNotice({ loading, error, retry }: { loading?: boo
   return <div className={panel} role="alert" data-testid="domains-error"><p>{message}</p>
     {retry && <button type="button" onClick={retry} className="underline font-semibold">Try again</button>}</div>;
 }
+export function PersonalDomainActions({ domain, onAdd, onConfigure }: { domain?: PersonalDomain; onAdd: () => void; onConfigure: () => void }) {
+  const latest = domain ? personalPolicySelection(domain).latest : undefined;
+  if (domain && !latest) return <p className={panel}>Configuration setup is not available for a domain with no saved policy yet.</p>;
+  return <div className="space-y-2"><button type="button" className="rounded-lg border border-border px-4 py-2 text-sm font-semibold"
+    onClick={domain ? onConfigure : onAdd}>{domain ? "Schedule a new configuration" : "Add domain"}</button>
+    {domain && <p className="text-sm text-muted-foreground">Starts from latest saved version {latest!.configuration.revision}, including any scheduled changes.</p>}</div>;
+}
+export function PersonalDomainsBackLink({ domainId, editing }: { domainId?: string; editing: boolean }) {
+  return editing ? <p className="text-sm text-muted-foreground">Your domains · finish this draft to return</p> :
+    <Link href={domainId ? "/domains" : "/settings"} className="underline text-sm">{domainId ? "Back to your domains" : "Back to settings"}</Link>;
+}
+export type PersonalDomainDraftSession = { ownerId: string; kind: "new"; domainId?: undefined } |
+  { ownerId: string; kind: "configure"; domainId: string; openingConfiguration: DomainConfiguration };
+export function openPersonalDomainDraft(ownerId: string, domain?: PersonalDomain): PersonalDomainDraftSession {
+  if (!ownerId) throw new DomainsApiError(401);
+  if (!domain) return { ownerId, kind: "new" };
+  const latest = personalPolicySelection(domain).latest?.configuration;
+  if (!latest || latest.ownerUserId !== ownerId || latest.domainId !== domain.domainId) throw new DomainsApiError(404);
+  return { ownerId, kind: "configure", domainId: domain.domainId, openingConfiguration: structuredClone(latest) };
+}
+export function NewDomainForm({ ownerId, onSaved, onCancel, onReconcile }: Omit<DomainPolicyFormProps, "boundary" | "domainId" | "previous" | "latestPolicyVersionId">) {
+  const query = useQuery(personalDomainBoundaryQuery(ownerId));
+  const [verified, setVerified] = useState<{ ownerId: string; boundary: DomainPolicyFormProps["boundary"] } | null>(() =>
+    query.isSuccess && query.data ? { ownerId, boundary: structuredClone(query.data) } : null);
+  useEffect(() => {
+    if (query.isSuccess && query.data) {
+      const boundary = structuredClone(query.data);
+      setVerified(current => current?.ownerId === ownerId ? current : { ownerId, boundary });
+    }
+  }, [ownerId, query.isSuccess, query.data]);
+  // The first owner-verified boundary belongs to this draft, independently of later query state.
+  if (verified?.ownerId === ownerId) return <>
+    {query.isError && <div role="alert" className={panel}><p>Day settings could not be refreshed. This draft keeps the day settings verified when it opened.</p>
+      <button type="button" className="underline" onClick={() => { void query.refetch(); }}>Reload day settings</button></div>}
+    <DomainPolicyForm ownerId={ownerId} boundary={verified.boundary} onSaved={onSaved} onCancel={onCancel} onReconcile={onReconcile} />
+  </>;
+  if (query.isPending) return <p role="status" className={panel}>Loading your day settings before creating a domain…</p>;
+  if (query.isError || !query.data) return <div role="alert" className={panel}><p>Your day settings could not be verified. No default boundary has been substituted.</p>
+    <button type="button" className="underline" onClick={() => { void query.refetch(); }}>Reload day settings</button>
+    <button type="button" className="underline ml-4" onClick={onCancel}>Cancel</button></div>;
+  return <p role="status" className={panel}>Preparing your verified day settings…</p>;
+}
+export function PersonalDomainDraftSlot({ session, ownerId, domainId, latestPolicyVersionId, onSaved, onCancel, onReconcile }: {
+  session: PersonalDomainDraftSession | null; ownerId?: string; domainId?: string; latestPolicyVersionId?: string | null;
+} & Pick<DomainPolicyFormProps, "onSaved" | "onCancel" | "onReconcile">) {
+  if (!session || !ownerId || session.ownerId !== ownerId || session.domainId !== domainId) return null;
+  return session.kind === "new" ? <NewDomainForm key={`${ownerId}-new`} ownerId={ownerId} onSaved={onSaved} onCancel={onCancel} onReconcile={onReconcile} /> :
+    <DomainPolicyForm key={`${ownerId}-${session.domainId}`} ownerId={ownerId} boundary={session.openingConfiguration.boundary}
+      previous={session.openingConfiguration} domainId={session.domainId} latestPolicyVersionId={latestPolicyVersionId}
+      onSaved={onSaved} onCancel={onCancel} onReconcile={onReconcile} />;
+}
 export default function DomainSettingsPage() {
   const { user } = useAuth();
   const [, params] = useRoute("/domains/:domainId");
   const domainId = params?.domainId;
   const queryClient = useQueryClient();
   const ownerId = user?.id;
+  const ownerRef = useRef(ownerId); ownerRef.current = ownerId;
+  const [, navigate] = useLocation();
+  const [form, setForm] = useState<PersonalDomainDraftSession | null>(null);
   useEffect(() => {
     queryClient.removeQueries({ predicate: query => query.queryKey[0] === PERSONAL_DOMAINS_QUERY && query.queryKey[1] !== ownerId });
-  }, [ownerId, queryClient]);
+    setForm(null);
+  }, [ownerId, domainId, queryClient]);
   let options: ReturnType<typeof personalDomainsQuery> | undefined;
   let inputError: unknown;
   try { if (ownerId) options = personalDomainsQuery(ownerId, domainId); } catch (error) { inputError = error; }
   const query = useQuery({ ...(options ?? { queryKey: [PERSONAL_DOMAINS_QUERY, "unavailable", "list", null] as const,
     queryFn: async () => { throw new DomainsApiError(401); }, staleTime: 0, gcTime: 0, retry: false as const }),
     enabled: !!options });
+  const domain = query.data && !Array.isArray(query.data) ? query.data : undefined;
+  const activeForm = form && ownerId && form.ownerId === ownerId && form.domainId === domainId ? form : null;
+  const saved = (value: PersonalDomain) => {
+    if (!ownerId || ownerRef.current !== ownerId) return;
+    queryClient.setQueryData(personalDomainsQuery(ownerId, value.domainId).queryKey, value);
+    void queryClient.invalidateQueries({ predicate: item => item.queryKey[0] === PERSONAL_DOMAINS_QUERY && item.queryKey[1] === ownerId });
+    setForm(null); navigate(`/domains/${encodeURIComponent(value.domainId)}`);
+  };
+  const reconcile: DomainPolicyFormProps["onReconcile"] = async (slug, signal) => {
+    if (!ownerId || ownerRef.current !== ownerId) throw new DomainsApiError(401);
+    const data = await personalDomainsQuery(ownerId, domainId).queryFn({ signal });
+    if (signal.aborted || ownerRef.current !== ownerId) throw new DomainsApiError(401);
+    queryClient.setQueryData(personalDomainsQuery(ownerId, domainId).queryKey, data);
+    return Array.isArray(data) ? data.find(item => item.slug === slug) ?? null : data;
+  };
+  const latest = domain ? personalPolicySelection(domain).latest?.configuration : undefined;
   return <div className="min-h-screen bg-background text-foreground pb-24 font-sans">
-    <header className="px-6 py-8 space-y-2"><Link href={domainId ? "/domains" : "/settings"} className="underline text-sm">{domainId ? "Back to your domains" : "Back to settings"}</Link>
+    <header className="px-6 py-8 space-y-2"><PersonalDomainsBackLink domainId={domainId} editing={!!activeForm} />
       <h1 className="text-2xl font-bold">Your domains</h1>
       <p className="text-sm text-muted-foreground">Your saved goals, measurements and reference benchmarks.</p></header>
     <main className="px-6 max-w-3xl space-y-5">
+      {ownerId && query.isSuccess && !activeForm && <PersonalDomainActions domain={domainId ? domain : undefined}
+        onAdd={() => setForm(openPersonalDomainDraft(ownerId))}
+        onConfigure={() => { if (domain) setForm(openPersonalDomainDraft(ownerId, domain)); }} />}
+      <PersonalDomainDraftSlot session={activeForm} ownerId={ownerId} domainId={domainId}
+        latestPolicyVersionId={query.isSuccess ? latest?.policyVersionId ?? null : undefined}
+        onSaved={saved} onCancel={() => setForm(null)} onReconcile={reconcile} />
       {inputError || !ownerId ? <PersonalDomainsNotice error={inputError ?? new DomainsApiError(401)} /> :
         query.isPending ? <PersonalDomainsNotice loading /> : query.isError ? <PersonalDomainsNotice error={query.error} retry={() => { void query.refetch(); }} /> :
           domainId && query.data && !Array.isArray(query.data) ? <PersonalDomainDetail domain={query.data} /> :
-            !domainId && Array.isArray(query.data) ? <PersonalDomainsList domains={query.data} /> : <PersonalDomainsNotice error={new DomainsApiError(503)} />}
+            !domainId && Array.isArray(query.data) ? <PersonalDomainsList domains={query.data} navigationPaused={!!activeForm} /> : <PersonalDomainsNotice error={new DomainsApiError(503)} />}
     </main>
   </div>;
 }

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { describeCondition, DomainsApiError, parsePersonalDomain, parsePersonalDomains,
-  personalDomainsQuery, personalPolicySelection } from "./domains-api";
+import { configurePersonalDomain, createPersonalDomain, describeCondition, DomainsApiError, DomainsMutationError,
+  parsePersonalDomain, parsePersonalDomains, personalDomainBoundaryQuery, personalDomainsQuery, personalPolicySelection } from "./domains-api";
+import { policyDraft, SERVER_POLICY_FIELDS } from "./domain-policy-draft";
 
 function domain(owner = "owner-a", uid = "domain-a") {
   const amount = { measurementId: "reps", unitId: "rep", basis: { kind: "per_event" },
@@ -128,5 +129,110 @@ describe("configuration availability and typed amounts", () => {
     const c = parsePersonalDomain(domain(), "owner-a", "domain-a").policyVersions[0].configuration;
     expect(describeCondition(c.targets.normal.conditions[0], c)).toBe("Cupcakes: at least 20 cupcakes, per practice event");
     expect(describeCondition(c.targets.normal.conditions[0], c)).not.toMatch(/minutes|%/);
+  });
+});
+describe("explicit private domain writes", () => {
+  const input = () => ({ slug: "cooking", reason: "Initial setup", configuration: policyDraft(
+    parsePersonalDomain(domain(), "owner-a", "domain-a").policyVersions[0].configuration) });
+  it("creates once with credentials, typed amounts and no client account/version authority", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(domain()), { status: 201 })); vi.stubGlobal("fetch", fetch);
+    const controller = new AbortController();
+    expect((await createPersonalDomain("owner-a", input(), controller.signal)).domainId).toBe("domain-a");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [path, request] = fetch.mock.calls[0]; expect(path).toBe("/api/v2/domains");
+    expect(request).toMatchObject({ method: "POST", credentials: "include", signal: controller.signal,
+      headers: { "Content-Type": "application/json" } });
+    const body = JSON.parse(request.body);
+    expect(Object.keys(body).sort()).toEqual(["configuration", "reason", "slug"]);
+    expect(body.configuration.measurements[0].valueType).toBe("integer");
+    expect(body.configuration.goal.privateMotivation).toBe("Private reason");
+    for (const field of SERVER_POLICY_FIELDS) expect(Object.hasOwn(body.configuration, field)).toBe(false);
+    expect(body.configuration).toEqual(input().configuration);
+  });
+  it("appends after the expected latest scheduled predecessor using only the owned UID route", async () => {
+    const fixture: any = domain("owner-a", "domain/with space");
+    const second = structuredClone(fixture.policyVersions[0]);
+    Object.assign(second.configuration, { policyVersionId: "policy-2", previousVersionId: "policy-1", revision: 2,
+      effectiveFrom: "2099-01-01T00:00:00Z" }); fixture.policyVersions.push(second);
+    const third = structuredClone(second);
+    Object.assign(third.configuration, { policyVersionId: "policy-3", previousVersionId: "policy-2", revision: 3,
+      effectiveFrom: "2099-01-02T00:00:00Z" }); fixture.policyVersions.push(third);
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(fixture), { status: 201 })); vi.stubGlobal("fetch", fetch);
+    const configuration = policyDraft(parsePersonalDomain(fixture, "owner-a", "domain/with space").policyVersions[2].configuration);
+    await configurePersonalDomain("owner-a", "domain/with space", { expectedPolicyVersionId: "policy-2", configuration, reason: "Future target" });
+    expect(fetch.mock.calls[0][0]).toBe("/api/v2/domains/domain%2Fwith%20space/policies");
+    const body = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(body.expectedPolicyVersionId).toBe("policy-2");
+    for (const field of SERVER_POLICY_FIELDS) expect(Object.hasOwn(body.configuration, field)).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each([401, 403, 404, 413])("keeps a %i rejection distinct without repeating private server text", async status => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "PRIVATE server failure" }), { status })); vi.stubGlobal("fetch", fetch);
+    await expect(createPersonalDomain("owner-a", input())).rejects.toMatchObject({ status, needsReconciliation: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("surfaces a safe 400 version conflict and never copies arbitrary upstream text", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ issues: [
+      { path: "expectedPolicyVersionId", code: "version_conflict", message: "PRIVATE reason in failure" },
+      { path: "configuration.effectiveFrom", code: "backdated", message: "PRIVATE timestamp" },
+    ] }), { status: 400 })));
+    try { await createPersonalDomain("owner-a", input()); throw new Error("Expected failure"); }
+    catch (failure) {
+      expect(failure).toBeInstanceOf(DomainsMutationError);
+      expect((failure as DomainsMutationError).issues.map(i => i.code)).toEqual(["version_conflict", "backdated"]);
+      expect(JSON.stringify(failure)).not.toContain("PRIVATE");
+      expect((failure as Error).message).toContain("newer configuration");
+    }
+  });
+  it.each([408, 503])("requires reconciliation for HTTP %i without automatic retry", async status => {
+    const fetch = vi.fn().mockResolvedValue(new Response("unavailable", { status })); vi.stubGlobal("fetch", fetch);
+    await expect(createPersonalDomain("owner-a", input())).rejects.toMatchObject({ needsReconciliation: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each([new Error("network lost"), new DOMException("aborted", "AbortError")])("treats post-send transport/cancellation as uncertain", async failure => {
+    const fetch = vi.fn().mockRejectedValue(failure); vi.stubGlobal("fetch", fetch);
+    await expect(createPersonalDomain("owner-a", input())).rejects.toMatchObject({ needsReconciliation: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("refuses malformed, foreign-owner, empty or unrelated 201 responses rather than claiming a save", async () => {
+    const wrongGoal = domain(); wrongGoal.policyVersions[0].configuration.goal.desiredCapability = "Other goal";
+    const cases = ["not JSON", JSON.stringify(domain("owner-b")), JSON.stringify({ ...domain(), policyVersions: [], currentPolicyVersionId: null }),
+      JSON.stringify({ ...domain(), slug: "different" }), JSON.stringify(wrongGoal)];
+    for (const response of cases) {
+      const fetch = vi.fn().mockResolvedValue(new Response(response, { status: 201 })); vi.stubGlobal("fetch", fetch);
+      await expect(createPersonalDomain("owner-a", input())).rejects.toMatchObject({ needsReconciliation: true });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("rejects authority fields and invalid input before sending any request", async () => {
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    const hostile: any = input(); hostile.configuration.ownerUserId = "owner-b";
+    await expect(createPersonalDomain("owner-a", hostile)).rejects.toMatchObject({ status: 400 });
+    await expect(createPersonalDomain("owner-a", { ...input(), reason: " " })).rejects.toMatchObject({ status: 400 });
+    await expect(configurePersonalDomain("owner-a", "__proto__", { configuration: input().configuration, reason: "Change", expectedPolicyVersionId: "policy-1" }))
+      .rejects.toMatchObject({ status: 404 });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("rejects an append response that omits its promised successor", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(domain()), { status: 201 })); vi.stubGlobal("fetch", fetch);
+    await expect(configurePersonalDomain("owner-a", "domain-a", { expectedPolicyVersionId: "policy-1",
+      configuration: input().configuration, reason: "Change" })).rejects.toMatchObject({ needsReconciliation: true });
+  });
+});
+describe("new-domain day settings", () => {
+  it("requires the actual authenticated owner and retains unusual valid inherited boundaries", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ userId: "owner-a", timezone: "Asia/Tokyo", dayStartHour: 15,
+      windowDays: 13, notificationsEnabled: true }), { status: 200 })); vi.stubGlobal("fetch", fetch);
+    const query = personalDomainBoundaryQuery("owner-a"), signal = new AbortController().signal;
+    expect(await query.queryFn({ signal })).toEqual({ timezone: "Asia/Tokyo", dayStartHour: 15 });
+    expect(fetch).toHaveBeenCalledWith("/api/settings", { credentials: "include", signal });
+    expect(query.queryKey).not.toEqual(personalDomainBoundaryQuery("owner-b").queryKey);
+    expect(query.gcTime).toBe(0); expect(query.retry).toBe(false);
+    await expect(personalDomainBoundaryQuery("owner-b").queryFn({ signal })).rejects.toBeInstanceOf(DomainsApiError);
+  });
+  it.each([{ timezone: "America/New_York", dayStartHour: 4 }, { userId: "owner-a", timezone: "fake/timezone", dayStartHour: 4 },
+    { userId: "owner-a", timezone: "America/New_York", dayStartHour: 24 }])("never substitutes a boundary for malformed or unowned settings", async value => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(value), { status: 200 })));
+    await expect(personalDomainBoundaryQuery("owner-a").queryFn({ signal: new AbortController().signal })).rejects.toBeInstanceOf(DomainsApiError);
   });
 });
