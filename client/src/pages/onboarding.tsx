@@ -158,7 +158,7 @@ function OwnedPersonalJourney({ ownerId, status, settingsOnly, onOwnedStatusChan
             onClick={() => setEditing(true)}>Define my first domain</button>
           {!verified && <p>Save and verify your own day settings first.</p>}
           {verified && dayChange && <p>Save your changed day settings or refresh the saved choice before opening the form.</p>}
-          <p className="text-sm">Custom activity logging and scores are not available yet.</p></section>}
+          <p className="text-sm">You can log activity for your personal domain. Qualification and scores are not calculated yet.</p></section>}
         {!pending && !uncertain && <nav className="flex gap-4 text-sm"><Link href="/domains" className="underline">Your domains</Link>
           {!settingsOnly && <Link href="/settings" className="underline">Your day settings</Link>}</nav>}
       </>}
