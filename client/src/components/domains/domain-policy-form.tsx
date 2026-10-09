@@ -381,6 +381,6 @@ export default function DomainPolicyForm({ ownerId, boundary, previous, domainId
       {pending ? "Saving…" : "Save future configuration"}</button>
       {needsReconciliation && !stale && <button type="button" className={buttonClass} onClick={() => { void reconcile(); }} disabled={pending}>Refresh my domains</button>}
       <button type="button" className={buttonClass} onClick={onCancel} disabled={pending || needsReconciliation}>Cancel and discard draft</button></div>
-    <p className="text-sm">Private drafts stay here until saved or discarded. Activity logging and scores for personal domains are not available yet.</p>
+    <p className="text-sm">Private drafts stay here until saved or discarded. You can log activity for personal domains. Qualification and scores are not calculated yet.</p>
   </form>;
 }

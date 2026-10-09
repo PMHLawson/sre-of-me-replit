@@ -98,7 +98,14 @@ describe("personal domain form presentation", () => {
       domainId="owned-domain" onSaved={() => {}} onCancel={() => {}} onReconcile={async () => null} />);
     expect(html).toContain("Schedule a new configuration"); expect(html).toContain("Reason for this change");
     expect(html).toContain("Save future configuration"); expect(html).toContain("Cancel and discard draft");
-    expect(html).toContain("Private drafts stay here");
+    expect(html).toContain("Private drafts stay here until saved or discarded. You can log activity for personal domains. Qualification and scores are not calculated yet.");
     expect(html).not.toContain("Immediately active"); expect(html).not.toContain("data-mutation-cache");
+  });
+  it("describes logging availability in the shared new-domain and first-domain form", () => {
+    const html = renderToStaticMarkup(<DomainPolicyForm ownerId="fictional-owner" boundary={{ timezone: "Europe/London", dayStartHour: 6 }}
+      onSaved={() => {}} onCancel={() => {}} onReconcile={async () => null} />);
+    expect(html).toContain("Add a personal domain");
+    expect(html).toContain("Private drafts stay here until saved or discarded. You can log activity for personal domains. Qualification and scores are not calculated yet.");
+    expect(html).not.toContain("Activity logging and scores for personal domains are not available yet");
   });
 });

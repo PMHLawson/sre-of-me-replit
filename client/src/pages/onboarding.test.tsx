@@ -19,7 +19,7 @@ describe("owned first personal journey", () => {
     expect(html).toContain("Europe/London"); expect(html).toContain('value="6" selected=""');
     expect(html).toContain("Define my first domain"); expect(html).not.toMatch(/disabled=""[^>]*>Define my first domain/);
     for (const text of ["can stay undecided", "defined later", "private and optional", "No practice minimum is assumed", "every 84 days",
-      "Custom activity logging and scores are not available yet"]) expect(html).toContain(text);
+      "You can log activity for your personal domain. Qualification and scores are not calculated yet."]) expect(html).toContain(text);
     for (const text of ["Martial Arts", "Meditation", "Fitness", "Music", "100%", "Healthy"]) expect(html).not.toContain(text);
     expect(html).not.toContain('data-testid="domain-policy-form"');
   });
