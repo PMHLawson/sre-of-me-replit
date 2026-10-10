@@ -1,0 +1,6 @@
+{
+  "viteVersion": "7.3.7",
+  "upstream": "https://github.com/websockets/ws/commit/2b2abd458a1b647d0b6033bd62a619c36189839a",
+  "advisory": "GHSA-96hv-2xvq-fx4p",
+  "patchedSHA256": "39469d6ce8e9e52d62113313576a018759e723e2abc2faae53a32744ba0c5b78"
+}
