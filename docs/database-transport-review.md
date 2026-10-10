@@ -1,5 +1,23 @@
 # Database transport candidate — isolated review only
 
+## Independent pool-sharing correction
+
+The original shared pool omitted the idle-client error listener that the session
+store's internally owned pool previously supplied. The shared pool factory now
+handles that event with one fixed sanitized message, never logging the error or
+client (including nested credential-bearing properties). Reporting failures are
+contained. pg-pool itself discards the failed idle client before this handler;
+the handler neither retries requests nor changes active-query errors.
+
+The regression preserves proof that an unhandled error on the old pool throws.
+On the guarded pool, a credential-shaped client error passes through pg-pool's
+actual idle listener, removes the connection, and logs only the approved literal.
+Session reads and database queries then recover on a new backend. A separate
+real pg_terminate_backend against that fixture's idle session connection verifies
+asynchronous disconnect recovery. All involved records/backends are disposable.
+The correction's 23 focused tests, project check, strict source/test typing and
+build pass. The previously passing 1,483-test suite is retained, not rerun.
+
 ## Scope and policy
 
 The application pool and connect-pg-simple now share one configured pool.

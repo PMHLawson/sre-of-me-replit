@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { databaseConnection } from "./database-connection";
+import { createDatabasePool } from "./database-pool";
 import { Pool } from "pg";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
@@ -100,6 +101,43 @@ describe("real disposable PostgreSQL TLS: app pool and session store", () => {
       await new Promise<void>((resolve,reject)=>store.set("synthetic",{cookie:{maxAge:10000},fixture:true} as unknown as session.SessionData,error=>error?reject(error):resolve()));
       const value=await new Promise<session.SessionData | null | undefined>((resolve,reject)=>store.get("synthetic",(error,value)=>error?reject(error):resolve(value)));
       expect(value).toMatchObject({fixture:true});
+      // This is the same real backend used by the session store, now idle.
+      const idle = await pool.connect();
+      const oldPid = (await idle.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      idle.release();
+      // Reproduce the old unhandled-event failure using credential-shaped data.
+      const secret = "postgres://fixture:DO_NOT_LOG_SYNTHETIC_PASSWORD@invalid/fixture";
+      const failure = Object.assign(new Error(secret), { connectionString: secret, client: { password: secret } });
+      expect(() => pool.emit("error", failure, idle)).toThrow(secret);
+      // The production factory owns a separate shared pool with the new handler.
+      const logs: string[] = [];
+      const guarded = createDatabasePool(config(), (...args) => logs.push(JSON.stringify(args)));
+      const guardedStore = new Store({pool:guarded,tableName:"http_sessions",createTableIfMissing:false,pruneSessionInterval:false});
+      try {
+        await new Promise((resolve,reject)=>guardedStore.get("synthetic",(error,value)=>error?reject(error):resolve(value)));
+        const client = await guarded.connect();
+        const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        Object.assign(client, { syntheticCredential: secret });
+        client.release();
+        // Client error traverses the actual pg-pool idle listener: removes client,
+        // attaches it to error, then emits pool.error. Not merely a pool mock.
+        expect(() => client.emit("error", failure)).not.toThrow();
+        expect(guarded.totalCount).toBe(0);
+        expect(logs).toEqual([JSON.stringify(["Database pool discarded a failed idle connection."])]);
+        expect(logs.join("")).not.toContain(secret);
+        const next = await guarded.query("SELECT pg_backend_pid() AS pid");
+        expect(next.rows[0].pid).not.toBe(pid);
+        expect(next.rows[0].pid).not.toBe(oldPid);
+        expect(await new Promise((resolve,reject)=>guardedStore.get("synthetic",(error,value)=>error?reject(error):resolve(value)))).toMatchObject({fixture:true});
+        // A real server-side termination of an idle session connection also recovers.
+        const event = new Promise<void>(resolve => guarded.once("error", () => resolve()));
+        await pool.query("SELECT pg_terminate_backend($1)", [next.rows[0].pid]);
+        await event;
+        expect(guarded.totalCount).toBe(0);
+        expect(await new Promise((resolve,reject)=>guardedStore.get("synthetic",(error,value)=>error?reject(error):resolve(value)))).toMatchObject({fixture:true});
+        expect((await guarded.query("SELECT 1 AS value")).rows[0].value).toBe(1);
+        expect(logs.every(x=>x===JSON.stringify(["Database pool discarded a failed idle connection."]))).toBe(true);
+      } finally { await guardedStore.close(); await guarded.end(); }
     }finally{await store.close();await pool.end();pools.splice(pools.indexOf(pool),1);}
     receipts.push({case:"valid",app:true,session:true});
   });
