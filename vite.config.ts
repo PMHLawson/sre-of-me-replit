@@ -4,9 +4,12 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 import { metaImagesPlugin } from "./vite-plugin-meta-images";
+import { trustedVitePlugin } from "./server/trusted-vite";
+import { projectOrigins } from "./shared/trusted-addresses";
 
 export default defineConfig({
   plugins: [
+    trustedVitePlugin(),
     react(),
     runtimeErrorOverlay(),
     tailwindcss(),
@@ -42,7 +45,7 @@ export default defineConfig({
   },
   server: {
     host: "0.0.0.0",
-    allowedHosts: true,
+    allowedHosts: projectOrigins().map(origin => new URL(origin).hostname),
     fs: {
       strict: true,
       deny: ["**/.*"],

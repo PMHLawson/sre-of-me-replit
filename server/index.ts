@@ -7,8 +7,10 @@ import { createServer } from "http";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { storage } from "./storage";
 import { runStartupRetention } from "./startup-retention";
+import { trustedAddressGuard } from "../shared/trusted-addresses";
 
 const app = express();
+app.use(trustedAddressGuard());
 const httpServer = createServer(app);
 
 declare module "http" {

@@ -8,6 +8,7 @@ import memoize from "memoizee";
 import connectPg from "connect-pg-simple";
 import { authStorage } from "./storage";
 import { pool } from "../../db";
+import { matchedOrigin, projectOrigins, trustedAddressGuard } from "../../../shared/trusted-addresses";
 
 const getOidcConfig = memoize(
   async () => {
@@ -63,6 +64,8 @@ async function upsertUser(claims: any) {
 }
 
 export async function setupAuth(app: Express) {
+  const origins = projectOrigins();
+  app.use(trustedAddressGuard(origins));
   app.set("trust proxy", 1);
   app.use(getSession());
   app.use(passport.initialize());
@@ -80,39 +83,32 @@ export async function setupAuth(app: Express) {
     verified(null, user);
   };
 
-  const registeredStrategies = new Set<string>();
-
-  const ensureStrategy = (domain: string) => {
-    const strategyName = `replitauth:${domain}`;
-    if (!registeredStrategies.has(strategyName)) {
+  for (const origin of origins) {
+    const strategyName = `replitauth:${origin}`;
       const strategy = new Strategy(
         {
           name: strategyName,
           config,
           scope: "openid email profile offline_access",
-          callbackURL: `https://${domain}/api/callback`,
+          callbackURL: `${origin}/api/callback`,
         },
         verify
       );
       passport.use(strategy);
-      registeredStrategies.add(strategyName);
-    }
-  };
+  }
 
   passport.serializeUser((user: Express.User, cb) => cb(null, user));
   passport.deserializeUser((user: Express.User, cb) => cb(null, user));
 
   app.get("/api/login", (req, res, next) => {
-    ensureStrategy(req.hostname);
-    passport.authenticate(`replitauth:${req.hostname}`, {
+    passport.authenticate(`replitauth:${matchedOrigin(req)}`, {
       prompt: "login consent",
       scope: ["openid", "email", "profile", "offline_access"],
     })(req, res, next);
   });
 
   app.get("/api/callback", (req, res, next) => {
-    ensureStrategy(req.hostname);
-    passport.authenticate(`replitauth:${req.hostname}`, {
+    passport.authenticate(`replitauth:${matchedOrigin(req)}`, {
       successReturnToOrRedirect: "/",
       failureRedirect: "/api/login",
     })(req, res, next);
@@ -123,7 +119,7 @@ export async function setupAuth(app: Express) {
       res.redirect(
         client.buildEndSessionUrl(config, {
           client_id: process.env.REPL_ID!,
-          post_logout_redirect_uri: `${req.protocol}://${req.hostname}`,
+          post_logout_redirect_uri: matchedOrigin(req),
         }).href
       );
     });
