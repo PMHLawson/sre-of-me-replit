@@ -5,16 +5,17 @@
   "license": "MIT",
   "scripts": {
     "postinstall": "node script/patch-vite-ws.mjs",
-    "dev:client": "vite dev --port 5000",
-    "dev": "NODE_ENV=development tsx server/index.ts",
-    "build": "tsx script/build.ts",
+    "dev:client": "node script/patch-vite-ws.mjs && vite dev --port 5000",
+    "dev": "node script/patch-vite-ws.mjs && NODE_ENV=development tsx server/index.ts",
+    "build": "node script/patch-vite-ws.mjs && tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",
     "db:migrate": "drizzle-kit migrate",
-    "test": "vitest run"
+    "test": "node script/patch-vite-ws.mjs && vitest run",
+    "test:vite-ws": "node script/patch-vite-ws.mjs && node --test --test-timeout=10000 script/vite-ws.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

@@ -25,9 +25,12 @@ The input must be exactly Vite 7.3.7 with the recorded published bundle SHA-256.
 Each patch anchor has an exact multiplicity. The transformed output must match
 the recorded patched hash before an atomic rename. Reapplication to that exact
 patched output is a no-op. Unexpected versions or content fail installation.
-Lifecycle scripts must be enabled; an install using `--ignore-scripts` does not
-apply this repair. Run the patch command and focused test explicitly in such
-environments before starting Vite.
+Installation with `--ignore-scripts` leaves pristine Vite on disk. Every supported
+npm development, build and test command explicitly runs the guard in its command
+body before launching its tool, so npm's disabled lifecycle hooks cannot bypass
+the guard. This includes dev, dev:client, build, test and test:vite-ws.
+Direct third-party binary invocation is not a supported launch path. Production
+start runs the built server, not Vite; check is the TypeScript compiler only.
 
 The existing semver range is intentionally not forcibly changed. Any future
 resolution to another Vite release fails closed until this backport is reviewed
@@ -43,6 +46,8 @@ Small configurable limits test behavior without a resource-exhaustion attack.
 `node --test --test-timeout=10000 script/vite-ws.test.mjs` checks the actual bundle
 constructors, not root ws. A byte-identical temporary copy exposes internal
 CommonJS constructors solely to test receiver paths and is removed afterward.
+Instrumentation uses unique names, exclusive creation and finally cleanup on
+setup/import failure. Existing files are neither overwritten nor deleted.
 The separate real Vite shared-HTTP-server test uses the uninstrumented installed
 bundle: token checks, custom messages, reload delivery and receiver defaults.
 The root ws package serves only as a client for this HMR integration test.

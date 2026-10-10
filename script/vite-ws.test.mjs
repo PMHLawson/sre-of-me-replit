@@ -3,20 +3,42 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import pathModule from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer as httpServer } from 'node:http';
-import { createServer } from 'vite';
 import WS from 'ws';
 import { repair, transform, digest } from './patch-vite-ws.mjs';
 
+// Also protect the documented direct node --test invocation, before Vite loads.
+repair();
+const { createServer } = await import('vite');
 const path = new URL('../node_modules/vite/dist/node/chunks/config.js', import.meta.url);
-const instrumented = new URL('./security-test-bundle.mjs', path);
-// Only expose constructors from a byte-identical copy; the installed bundle is not instrumented.
-fs.writeFileSync(instrumented, fs.readFileSync(path, 'utf8') +
-  '\nexport const SecurityReceiver=require_receiver(), SecurityWebSocket=require_websocket(), SecurityServer=require_websocket_server(), SecurityDeflate=require_permessage_deflate();\n');
+// Exclusive creation and immediate finally cleanup, including failed imports.
+async function instrument(suffix, url = new URL(`./security-test-${randomUUID()}.mjs`, path), source = path) {
+  let owned = false;
+  try {
+    const fd = fs.openSync(url, 'wx', 0o600);
+    owned = true;
+    try { fs.writeFileSync(fd, fs.readFileSync(source, 'utf8') + suffix); }
+    finally { fs.closeSync(fd); }
+    return await import(url.href);
+  } finally { if (owned) fs.unlinkSync(url); }
+}
 const { SecurityReceiver: Receiver, SecurityWebSocket: EmbeddedWS, SecurityServer: Server,
-  SecurityDeflate: Deflate } = await import(instrumented.href);
-test.after(() => fs.unlinkSync(instrumented));
+  SecurityDeflate: Deflate } = await instrument(
+    '\nexport const SecurityReceiver=require_receiver(), SecurityWebSocket=require_websocket(), SecurityServer=require_websocket_server(), SecurityDeflate=require_permessage_deflate();\n');
+test('instrumentation preserves unrelated files and cleans failed imports', async () => {
+  const url = new URL(`./security-test-${randomUUID()}.mjs`, path);
+  fs.writeFileSync(url, 'sentinel', {flag:'wx'});
+  try {
+    await assert.rejects(instrument('',url), {code:'EEXIST'});
+    assert.equal(fs.readFileSync(url,'utf8'),'sentinel');
+  } finally { fs.unlinkSync(url); }
+  await assert.rejects(instrument('\nexport { missing_symbol };',url),SyntaxError);
+  assert.equal(fs.existsSync(url),false);
+  await assert.rejects(instrument('',url,new URL('./nonexistent-'+randomUUID(),path)),{code:'ENOENT'});
+  assert.equal(fs.existsSync(url),false);
+});
 test('strict identity, repeat application and tampered content', () => {
   assert.equal(repair(), 'already-correct');
   assert.throws(() => transform('unknown content'), /Unexpected/);
@@ -70,6 +92,29 @@ test('ordinary fragmented messages and explicit zero limit', async () => {
     const message = once(r,'message'); r.write(Buffer.from([1,1,97,128,1,98]));
     assert.equal(String((await message)[0]),'ab'); r.destroy();
   }
+});
+test('zero fragment/chunk limits exceed positive boundaries; completed messages reset receiver', async () => {
+  const unlimited = new Receiver({maxFragments:0,maxBufferedChunks:0});
+  const message=once(unlimited,'message');
+  unlimited.write(Buffer.from([2,1,97,0,1,98,128,1,99]));
+  assert.equal(String((await message)[0]),'abc');
+  const chunkMessage=once(unlimited,'message');
+  unlimited.write(Buffer.from([130,4]));
+  for(const byte of [97,98,99,100])unlimited.write(Buffer.from([byte]));
+  assert.equal(String((await chunkMessage)[0]),'abcd');unlimited.destroy();
+  const bounded=new Receiver({maxFragments:2,maxBufferedChunks:2});
+  for(let i=0;i<3;i++){
+    const next=once(bounded,'message');
+    bounded.write(Buffer.from([2,1,97,128,1,98]));
+    assert.equal(String((await next)[0]),'ab');
+    assert.equal(bounded._fragments.length,0);
+    assert.equal(bounded._messageLength,0);
+  }
+  const exact=once(bounded,'message');
+  bounded.write(Buffer.from([130,2]));
+  bounded.write(Buffer.from([97]));bounded.write(Buffer.from([98]));
+  assert.equal(String((await exact)[0]),'ab');
+  assert.equal(bounded._buffers.length,0);bounded.destroy();
 });
 test('embedded client/server defaults and options propagate to receivers', async () => {
   for (const custom of [false,true]) {
