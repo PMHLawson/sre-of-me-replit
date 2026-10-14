@@ -13,9 +13,9 @@ import viteConfig from "../vite.config";
 
 const host="sre-of-me-replit.pmhlabs.org";
 function request(port:number,url:string,authority:string){
-  return new Promise<{status:number,body:string}>((resolve,reject)=>{
+  return new Promise<{status:number,body:string,contentType:string}>((resolve,reject)=>{
     const req=http.get({host:"127.0.0.1",port,path:url,headers:{Host:authority}},res=>{
-      let body="";res.on("data",d=>body+=d);res.on("end",()=>resolve({status:res.statusCode!,body}));
+      let body="";res.on("data",d=>body+=d);res.on("end",()=>resolve({status:res.statusCode!,body,contentType:String(res.headers["content-type"]??"")}));
     });req.on("error",reject);
   });
 }
@@ -23,6 +23,7 @@ for(const mode of ["standalone","shared"]){
   it(`actual ${mode} Development HTTP, file denial and HMR boundary`,async()=>{
     const sockets:WS[]=[];let vite:Awaited<ReturnType<typeof createServer>>|undefined;
     let server:http.Server|undefined;
+    let viteCloseCompleted=false;
     const fixtureId=randomUUID();
     const marker=`SOMR476_SYNTHETIC_${fixtureId}`;
     const secret=path.resolve(`.env.synthetic-${fixtureId}`);
@@ -44,7 +45,7 @@ for(const mode of ["standalone","shared"]){
       const result=await request((server!.address() as import("node:net").AddressInfo).port,url,host);
       observed.push({label,status:result.status,markerExposed:result.body.includes(marker)});
       expect(result.body.includes(marker),`${mode}:${label} exposed only the synthetic canary`).toBe(shouldExpose);
-      if(!shouldExpose)expect(result.status).not.toBe(200);
+      if(!shouldExpose)expect(result.status).toBe(403);
       else expect(result.status).toBe(200);
       return result;
     };
@@ -65,6 +66,12 @@ for(const mode of ["standalone","shared"]){
       }
       const port=(server!.address() as import("node:net").AddressInfo).port;
       resolvedFsAllow=vite.config.server.fs.allow;
+      for(const file of [repoCanary,clientCanary]){
+        expect(resolvedFsAllow.some(allowed=>{
+          const rel=path.relative(allowed,file);
+          return rel!==".."&&!rel.startsWith(`..${path.sep}`)&&!path.isAbsolute(rel);
+        }),`${mode} synthetic canary must be inside the allow boundary`).toBe(true);
+      }
       resolvedFsDeny=vite.config.server.fs.deny;
       resolvedCacheDir=vite.config.cacheDir;
       resolvedCacheRealpath=fs.realpathSync(resolvedCacheDir!);
@@ -97,13 +104,31 @@ for(const mode of ["standalone","shared"]){
       const control=await request(port,`/${path.basename(clientControl)}`,host);
       expect(control.status).toBe(200);
       expect(control.body).toContain("SOMR476_CONTROL_OK");
-      const optimized=Object.values(vite.environments.client.depsOptimizer?.metadata.optimized??{})[0] as {file?:string}|undefined;
-      expect(optimized?.file,"Vite must create a real optimized dependency in the isolated node_modules/.vite cache").toBeTruthy();
-      const optimizedRelative=path.relative(process.cwd(),optimized!.file!).split(path.sep).join("/");
-      expect(optimizedRelative).toMatch(/^node_modules\/\.vite\/deps\//);
-      const optimizedResponse=await request(port,`/${optimizedRelative}`,host);
+      await vite.waitForRequestsIdle();
+      const optimizedEntry=await request(port,"/src/main.tsx",host);
+      expect(optimizedEntry.status).toBe(200);
+      const optimizer=vite.environments.client.depsOptimizer;
+      if(!optimizer)throw Error("Expected the client dependency optimizer");
+      const normalizedCacheDir=cacheDir.split(path.sep).join("/");
+      const optimizedPrefix=`/@fs/${normalizedCacheDir.replace(/^\/+/,"")}/deps/`;
+      const optimizedUrl=[...optimizedEntry.body.matchAll(/["']([^"'\r\n]+)["']/g)]
+        .map(match=>match[1])
+        .find(url=>url.startsWith(optimizedPrefix)&&new URL(url,"https://"+host).searchParams.has("v"));
+      if(!optimizedUrl)throw Error("Expected an emitted optimized import from the owned .vite cache");
+      // The real optimized-module loader awaits this import processing and commit.
+      const optimizedResponse=await request(port,optimizedUrl,host);
+      observed.push({label:"optimized-control",status:optimizedResponse.status,markerExposed:optimizedResponse.body.includes(marker)});
       expect(optimizedResponse.status).toBe(200);
+      expect(optimizedResponse.contentType).toMatch(/^(?:text|application)\/javascript\b/);
       expect(optimizedResponse.body.length).toBeGreaterThan(0);
+      expect(optimizedResponse.body).not.toMatch(/^\s*</);
+      const emittedPath=decodeURIComponent(new URL(optimizedUrl,"https://"+host).pathname);
+      const optimized=Object.values(optimizer.metadata.optimized).find(info=>
+        emittedPath===`/@fs/${info.file.split(path.sep).join("/").replace(/^\/+/,"")}`);
+      if(!optimized)throw Error("Served import must match committed optimizer metadata");
+      expect(path.relative(cacheDir,optimized.file).split(path.sep).join("/")).toMatch(/^deps\/[^/]+\.js$/);
+      expect(fs.realpathSync(optimized.file)).toBe(path.join(resolvedCacheRealpath!,"deps",path.basename(optimized.file)));
+      expect(new URL(optimizedUrl,"https://"+host).searchParams.get("v")).toBe(optimized.browserHash);
       const url=`ws://127.0.0.1:${port}/${mode==="shared"?"vite-hmr":""}`;
       for(const [authority,token] of [["evil.invalid",vite.config.webSocketToken],[host,"bad-token"]]){
         const ws=new WS(url+"?token="+token,"vite-hmr",{headers:{Host:authority},origin:"https://"+host,handshakeTimeout:3000});sockets.push(ws);
@@ -117,18 +142,19 @@ for(const mode of ["standalone","shared"]){
     }finally{
       const cleanupErrors:string[]=[];
       for(const ws of sockets){ws.on("error",()=>{});ws.terminate();}
-      try{if(vite){await vite.environments.client.depsOptimizer?.scanProcessing;await vite.close();}}catch(e){cleanupErrors.push(`vite:${String(e)}`);}
+      try{if(vite){await vite.close();viteCloseCompleted=true;}}catch(e){cleanupErrors.push(`vite:${String(e)}`);}
       try{if(server?.listening)await new Promise<void>((resolve,reject)=>server!.close(error=>error?reject(error):resolve()));}catch(e){cleanupErrors.push(`server:${String(e)}`);}
       if(configCacheOverridden)viteConfig.cacheDir=originalConfigCacheDir;
       for(const file of [secret,repoCanary,clientCanary,clientControl])try{fs.rmSync(file,{force:true});}catch(e){cleanupErrors.push(`file:${String(e)}`);}
       for(const dir of [repoCanaryDir,clientCanaryDir,testCacheRoot])try{fs.rmSync(dir,{recursive:true,force:true});}catch(e){cleanupErrors.push(`directory:${String(e)}`);}
-      const cleanup={mode,serverStopped:!server?.listening,viteClosed:!vite||!vite.httpServer?.listening,clientsTerminated:sockets.length,
+      const cleanup={mode,serverStopped:!server?.listening,viteClosed:!vite||viteCloseCompleted,clientsTerminated:sockets.length,
         canaryFilesRemoved:[secret,repoCanary,clientCanary,clientControl].every(file=>!fs.existsSync(file)),
         canaryDirectoriesRemoved:[repoCanaryDir,clientCanaryDir].every(dir=>!fs.existsSync(dir)),
         cacheDir,resolvedCacheDir,resolvedCacheRealpath,cacheRemoved:!fs.existsSync(testCacheRoot),
         resolvedFsAllow,resolvedFsDeny,observed,cleanupErrors};
       if(process.env.OWNERSHIP_EVIDENCE_DIR){fs.mkdirSync(process.env.OWNERSHIP_EVIDENCE_DIR,{recursive:true});fs.writeFileSync(path.join(process.env.OWNERSHIP_EVIDENCE_DIR,`address-vite-${mode}-cleanup.json`),JSON.stringify(cleanup));}
       expect(cleanup.serverStopped).toBe(true);
+      expect(cleanup.viteClosed).toBe(true);
       expect(cleanup.canaryFilesRemoved).toBe(true);
       expect(cleanup.canaryDirectoriesRemoved).toBe(true);
       expect(cleanup.cacheRemoved).toBe(true);
