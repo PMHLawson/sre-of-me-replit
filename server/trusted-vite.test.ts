@@ -111,7 +111,7 @@ for(const mode of ["standalone","shared"]){
       if(!optimizer)throw Error("Expected the client dependency optimizer");
       const normalizedCacheDir=cacheDir.split(path.sep).join("/");
       const optimizedPrefix=`/@fs/${normalizedCacheDir.replace(/^\/+/,"")}/deps/`;
-      const optimizedUrl=[...optimizedEntry.body.matchAll(/["']([^"'\r\n]+)["']/g)]
+      const optimizedUrl=Array.from(optimizedEntry.body.matchAll(/["']([^"'\r\n]+)["']/g))
         .map(match=>match[1])
         .find(url=>url.startsWith(optimizedPrefix)&&new URL(url,"https://"+host).searchParams.has("v"));
       if(!optimizedUrl)throw Error("Expected an emitted optimized import from the owned .vite cache");
