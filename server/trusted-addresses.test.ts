@@ -17,7 +17,10 @@ vi.mock("passport",()=>({default:{
   authenticate:(name:string)=> (_q:unknown,s:{end:(body:string)=>void})=>{proof.authenticated.push(name);s.end("synthetic authentication");},
 }}));
 vi.mock("express-session",()=>({default:()=> (_q:unknown,_s:unknown,next:()=>void)=>{proof.session++;next();}}));
-vi.mock("connect-pg-simple",()=>({default:()=>class {}}));
+vi.mock("connect-pg-simple",()=>({default:()=>class {
+  query(){throw new Error("Unexpected database use in the auth-address fixture");}
+  close(){}
+}}));
 import { setupAuth } from "./replit_integrations/auth/replitAuth";
 const host="sre-of-me-replit.pmhlabs.org",origins=projectOrigins({});
 function request(port:number,route:string,headers:string[]){

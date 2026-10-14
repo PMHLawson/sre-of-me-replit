@@ -1,7 +1,11 @@
 import {it,expect,vi,afterEach}from"vitest";
 import {QueryClient}from"@tanstack/react-query";
-import {logout,finishLogout}from"./use-auth";
+import {logout,finishLogout,logoutFailureNotice}from"./use-auth";
 afterEach(()=>vi.unstubAllGlobals());
+it("unconfirmed failure copy makes no claim about server invalidation",()=>{
+ expect(logoutFailureNotice).toBe("Sign-out could not be confirmed; please retry");
+ expect(logoutFailureNotice).not.toMatch(/not been cleared|still signed in/);
+});
 it("requires server confirmation and explicit same-origin POST intent, not a fetch redirect",async()=>{
  const fake=vi.fn(async()=>new Response(JSON.stringify({localSignedOut:true,providerLogoutUrl:"https://provider.synthetic.invalid"})));
  vi.stubGlobal("fetch",fake);expect((await logout()).localSignedOut).toBe(true);

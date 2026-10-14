@@ -49,9 +49,15 @@ DELETE against UPDATE; a late update cannot resurrect a deleted row and reports
 a sanitized storage failure. Existing pre-candidate sessions gain the marker
 when loaded, without a migration or read-time database write.
 
-The existing http_sessions table is required. This is not an empty-database
-bootstrap or schema change. Existing cookie lifetime, fallback TTL, ordinary
-session maintenance and database pool/TLS policy are retained.
+Direct first-save table bootstrap is supported. The bounded compatibility bridge
+uses the installed connect-pg-simple **10.0.0** private query method, which awaits
+its existing lazy readiness promise and returns the first row (not pg's Result).
+Version/API guards fail closed; there is no invented readiness function, raw-pool
+bypass, or disabled automatic initialization. A disposable absent-schema-table
+test calls set first, without any preceding store operation. A separate unmarked
+legacy record passes through actual middleware, receives synthetic refresh data,
+saves normally, then rejects a stale save after deletion. No owner migration is
+performed. Cookie lifetime, TTL, maintenance and pool/TLS policy are retained.
 
 The guarantee applies to writes routed through this candidate store. An old
 process still using the previous upsert, a direct SQL writer, an already
@@ -67,6 +73,11 @@ cannot repopulate that cleared cache. Full navigation discards old in-memory
 page state. Failed/network requests retain current client state and show a
 retryable “not confirmed” notice. Provider handoff failure after local success
 uses a distinct notice and local landing destination.
+
+Independent review correction: the unconfirmed client notice is exactly
+“Sign-out could not be confirmed; please retry”. It makes no assertion about
+whether partial server invalidation occurred. Confirmed local success followed
+by provider-handoff failure remains a distinct outcome.
 
 ## Independently inspectable tests
 

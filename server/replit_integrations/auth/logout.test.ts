@@ -12,6 +12,9 @@ import {deliberateLogout,registerLogout}from"./deliberate-logout";
 import {trustedAddressGuard}from"../../../shared/trusted-addresses";
 import fs from"node:fs";
 import path from"node:path";
+import pgStorePackage from"connect-pg-simple/package.json";
+import {createRequire}from"node:module";
+const signature=createRequire(import.meta.url)("cookie-signature") as {sign(value:string,secret:string):string};
 const origin="https://sre-of-me-replit.pmhlabs.org";
 let fixture:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:NonresurrectingStore,server:http.Server,port:number;
 let providerFails=false,gate:Promise<void>|undefined;
@@ -39,6 +42,12 @@ beforeAll(async()=>{
  app.post("/synthetic-login",(req,res,next)=>req.login({id:`synthetic-${++syntheticIdentity}`},e=>e?next(e):res.json({ok:true})));
  app.get("/private",(req,res)=>res.status(req.isAuthenticated()?200:401).end());
  app.get("/capture",(req,res)=>{saves.push(req.session);res.end();});
+ app.post("/synthetic-refresh",(req,res)=>{
+  const state=req.session as unknown as session.SessionData & {passport:{user:{refreshEvidence?:string}}};
+  state.passport.user.refreshEvidence="synthetic-refreshed";
+  saves.push(req.session);
+  req.session.save(error=>res.status(error?503:200).end());
+ });
  app.get("/delayed",async(req,res)=>{
   const old=req.session;delayedEntered?.();await gate;
   old.save(error=>res.status(error?503:200).end(error?"Sanitized failure":"saved"));
@@ -47,6 +56,40 @@ beforeAll(async()=>{
  app.use((_error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>res.status(503).end("Sanitized failure"));
  server=http.createServer(app);server.listen(0,"127.0.0.1");await once(server,"listening");port=(server.address() as import("node:net").AddressInfo).port;
 },30000);
+it("direct first save bootstraps absent table with the installed readiness contract",async()=>{
+ const schema="fresh_session_bootstrap";
+ await fixture.client.query(`CREATE SCHEMA ${schema}`);
+ const freshPool=new Pool({host:fixture.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false,options:`-c search_path=${schema}`});
+ const freshStore=new NonresurrectingStore(freshPool);
+ try{
+  expect((await freshPool.query("SELECT to_regclass('http_sessions') AS name")).rows[0].name).toBeNull();
+  const data={cookie:{expires:new Date(Date.now()+60000)}} as session.SessionData;
+  // No preceding store read/destroy/touch/login/timer: set is its first operation.
+  await new Promise<void>((resolve,reject)=>freshStore.set("first-save",data,e=>e?reject(e):resolve()));
+  expect((await freshPool.query("SELECT sid FROM http_sessions")).rows).toEqual([{sid:"first-save"}]);
+  await new Promise<void>((resolve,reject)=>freshStore.set("first-save",data,e=>e?reject(e):resolve()));
+ }finally{freshStore.close();await freshPool.end();await fixture.client.query(`DROP SCHEMA ${schema} CASCADE`);}
+});
+it("legacy unmarked session loads through middleware, refreshes, then cannot resurrect",async()=>{
+ const sid="unmarked-legacy-middleware";
+ const data={cookie:{expires:new Date(Date.now()+60000),originalMaxAge:60000,httpOnly:true,secure:true,sameSite:"lax",path:"/"},passport:{user:{id:"synthetic-unmarked"}}};
+ await pool.query("INSERT INTO http_sessions (sid,sess,expire) VALUES ($1,$2,now()+interval '1 minute')",[sid,JSON.stringify(data)]);
+ const cookie="connect.sid="+encodeURIComponent("s:"+signature.sign(sid,"synthetic-fixture-only-secret"));
+ expect((await request("/private","GET",cookie)).status).toBe(200);
+ expect((await request("/synthetic-refresh","POST",cookie)).status).toBe(200);
+ const row=(await pool.query("SELECT sess FROM http_sessions WHERE sid=$1",[sid])).rows[0].sess;
+ expect(row.__srePersisted).toBe(true);expect(row.passport.user.refreshEvidence).toBe("synthetic-refreshed");
+ const stale=saves.at(-1)!;
+ await new Promise<void>((resolve,reject)=>store.destroy(sid,e=>e?reject(e):resolve()));
+ await expect(new Promise<void>((resolve,reject)=>store.set(sid,stale,e=>e?reject(e):resolve()))).rejects.toThrow("Session storage operation failed");
+ expect((await pool.query("SELECT sid FROM http_sessions WHERE sid=$1",[sid])).rowCount).toBe(0);
+ expect((await request("/private","GET",cookie)).status).toBe(401);
+});
+it("fails closed on an unsupported private-bridge library version",()=>{
+ const original=pgStorePackage.version;
+ try{pgStorePackage.version="unsupported";expect(()=>new NonresurrectingStore(pool)).toThrow("compatibility version");}
+ finally{pgStorePackage.version=original;}
+});
 it("demonstrates the installed legacy upsert resurrection before the repair",async()=>{
  const Legacy=connectPg(session),legacy=new Legacy({pool,tableName:"http_sessions",pruneSessionInterval:false});
  const data={cookie:{expires:new Date(Date.now()+60000)},passport:{user:{id:"synthetic-legacy"}}} as unknown as session.SessionData;

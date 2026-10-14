@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { User } from "@shared/models/auth";
 import { toast } from "@/hooks/use-toast";
 import type { QueryClient } from "@tanstack/react-query";
+export const logoutFailureNotice = "Sign-out could not be confirmed; please retry";
 
 async function fetchUser(): Promise<User | null> {
   const response = await fetch("/api/auth/user", {
@@ -61,7 +62,7 @@ export function useAuth() {
       const outcome=await finishLogout(result,queryClient,url=>window.location.replace(url));
       if(outcome.providerHandoffFailed)toast({title:"Local sign-out complete",description:"Provider sign-out could not be opened. Your provider account may still be signed in."});
     },
-    onError:()=>toast({title:"Sign-out not confirmed",description:"Please retry. Your account state has not been cleared.",variant:"destructive"}),
+    onError:()=>toast({title:logoutFailureNotice,variant:"destructive"}),
   });
 
   return {
