@@ -5,7 +5,8 @@ import passport from "passport";
 import session from "express-session";
 import type { Express, RequestHandler } from "express";
 import memoize from "memoizee";
-import connectPg from "connect-pg-simple";
+import { NonresurrectingStore } from "./nonresurrecting-store";
+import { deliberateLogout, registerLogout } from "./deliberate-logout";
 import { authStorage } from "./storage";
 import { pool } from "../../db";
 import { matchedOrigin, projectOrigins, trustedAddressGuard } from "../../../shared/trusted-addresses";
@@ -22,13 +23,7 @@ const getOidcConfig = memoize(
 
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-  const pgStore = connectPg(session);
-  const sessionStore = new pgStore({
-    pool,
-    createTableIfMissing: true,
-    ttl: sessionTtl,
-    tableName: "http_sessions",
-  });
+  const sessionStore = new NonresurrectingStore(pool);
   return session({
     secret: process.env.SESSION_SECRET!,
     store: sessionStore,
@@ -66,6 +61,7 @@ async function upsertUser(claims: any) {
 export async function setupAuth(app: Express) {
   const origins = projectOrigins();
   app.use(trustedAddressGuard(origins));
+  app.all("/api/logout", deliberateLogout);
   app.set("trust proxy", 1);
   app.use(getSession());
   app.use(passport.initialize());
@@ -114,16 +110,10 @@ export async function setupAuth(app: Express) {
     })(req, res, next);
   });
 
-  app.get("/api/logout", (req, res) => {
-    req.logout(() => {
-      res.redirect(
-        client.buildEndSessionUrl(config, {
-          client_id: process.env.REPL_ID!,
-          post_logout_redirect_uri: matchedOrigin(req),
-        }).href
-      );
-    });
-  });
+  registerLogout(app, origin => client.buildEndSessionUrl(config, {
+    client_id: process.env.REPL_ID!,
+    post_logout_redirect_uri: origin,
+  }).href);
 }
 
 export const isAuthenticated: RequestHandler = async (req, res, next) => {

@@ -52,6 +52,8 @@ const PILLARS = [
 export default function Landing() {
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col font-sans">
+      {typeof window!=="undefined" && new URLSearchParams(window.location.search).get("localSignedOut")==="1" &&
+        <p role="status" className="p-4">Local sign-out is complete. Provider sign-out could not be opened; your provider account may still be signed in.</p>}
       {/* Hero */}
       <div className="flex-1 flex flex-col px-6 pt-16 pb-8">
         <div className="mb-10">
