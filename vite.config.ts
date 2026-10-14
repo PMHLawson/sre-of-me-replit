@@ -48,7 +48,7 @@ export default defineConfig({
     allowedHosts: projectOrigins().map(origin => new URL(origin).hostname),
     fs: {
       strict: true,
-      deny: ["**/.*"],
+      deny: ["**/.*", "**/.local/**"],
     },
   },
 });
