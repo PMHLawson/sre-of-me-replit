@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';

@@ -1,5 +1,5 @@
 import { SessionText } from '@/components/session-text';
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, RotateCcw, Trash2 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { useAppStore, type Domain } from '@/store';

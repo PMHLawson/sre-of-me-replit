@@ -1,5 +1,5 @@
 import { DeviationText } from '@/components/session-text';
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, CalendarOff, CalendarClock, Pencil, X, Trash2 } from 'lucide-react';
 import {
   useAppStore,

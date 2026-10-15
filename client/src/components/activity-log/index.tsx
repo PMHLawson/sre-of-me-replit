@@ -1,3 +1,4 @@
+import React from "react";
 import { SessionText } from '@/components/session-text';
 import { format, parseISO } from 'date-fns';
 import { Pencil, Trash2, Clock, PlayCircle, StopCircle } from 'lucide-react';

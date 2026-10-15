@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { useAppStore, boundLegacyOwner } from "@/store";
 
 /** A real account never derives a verdict from an archive page or failed read. */

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAppStore, type Session, type Deviation } from "@/store";
 
 /** Full text is fetched only on an explicit open. Each click advances one chunk per field. */

@@ -1,6 +1,6 @@
 import { SessionText } from "@/components/session-text";
 import { sessionEditFields } from "@/lib/legacy-session-edit";
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Repeat, Undo2, Pencil } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY, type Session } from '@/store';

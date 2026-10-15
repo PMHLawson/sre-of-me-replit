@@ -2,7 +2,7 @@ import { CurrentReadBoundary } from "@/components/current-read-boundary";
 import { useLocation } from 'wouter';
 import { useAppStore, Domain } from '@/store';
 import { ArrowLeft, Activity, BrainCircuit, Dumbbell, Music, ChevronRight, TrendingUp, TrendingDown, Minus } from 'lucide-react';
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { OverachievementBadge } from '@/components/overachievement-badge';
 

@@ -1,5 +1,5 @@
 import { CurrentReadBoundary } from "@/components/current-read-boundary";
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check, Info } from 'lucide-react';
 import { useAppStore } from '@/store';

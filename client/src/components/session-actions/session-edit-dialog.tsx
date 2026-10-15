@@ -1,5 +1,5 @@
 import { sessionEditFields } from "@/lib/legacy-session-edit";
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Dialog,
   DialogContent,
