@@ -135,19 +135,35 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
     return JSON.stringify(rows);
   }
   it("performs the reviewed seed/import then clean collection reconciliation, preserving all original records and idempotence", async () => {
-    const before = await legacy(), services = await prepareAdoptionServices(pool, config);
+    const sent:string[]=[];
+    const recordedPool={connect:async()=>{const client=await pool.connect();return{
+      query:(sql:string,values?:unknown[])=>{sent.push(sql);return client.query(sql,values);},
+      release:(destroy?:boolean)=>client.release(destroy),
+    };}};
+    const before = await legacy(), services = await prepareAdoptionServices(recordedPool as any, config);
     await services.seed(req);
-    const counter=async()=>(await f.client.query("SELECT minute_count,day_count,observed_bytes FROM owner_write_resource_budgets WHERE owner_user_id='adopt-a'")).rows;
+    const counter=async()=>(await f.client.query("SELECT minute_count,day_count,observed_bytes,observed_at FROM owner_write_resource_budgets WHERE owner_user_id='adopt-a'")).rows;
     const firstCounter=await counter();expect(firstCounter).toHaveLength(1);
     expect(firstCounter[0].minute_count).toBeGreaterThan(0);expect(firstCounter[0].day_count).toBe(firstCounter[0].minute_count);
-    expect(Number(firstCounter[0].observed_bytes)).toBeGreaterThan(0);
+    // Monitor-only adoption still spends durable admissions, but never runs
+    // optional storage accounting inside the seed/import transaction.
+    const admissions=()=>sent.filter(sql=>sql===OWNER_WRITE_BUDGET_ADMISSION_UPDATE).length;
+    const firstAdmissions=admissions();
+    expect(firstAdmissions).toBeGreaterThan(0);
+    expect(firstCounter[0].day_count).toBe(firstAdmissions);
+    expect(Number(firstCounter[0].observed_bytes)).toBe(0);expect(firstCounter[0].observed_at).toBeNull();
     await services.seed(req);expect(await counter()).toEqual(firstCounter);
+    expect(admissions()).toBe(firstAdmissions);
     await services.import(req);
     expect(await services.reconcile(req)).toMatchObject({ clean: true, counts: { ownedSessions: 4, canonicalSessions: 4, unownedSessions: 1 } });
     const audits = (await f.client.query("SELECT to_jsonb(a) raw FROM audit_events a ORDER BY audit_event_id")).rows;
     await expect(services.seed(req)).rejects.toMatchObject({ status: 403 });
     await services.import(req); await services.reconcile(req);
     expect((await f.client.query("SELECT to_jsonb(a) raw FROM audit_events a ORDER BY audit_event_id")).rows).toEqual(audits);
+    expect(sent.filter(sql=>sql===OWNER_WRITE_BUDGET_OBSERVATION_UPDATE)).toEqual([]);
+    expect(sent.filter(sql=>sql.includes("AS used_bytes"))).toEqual([]);
+    const finalCounter=await counter();
+    expect(Number(finalCounter[0].observed_bytes)).toBe(0);expect(finalCounter[0].observed_at).toBeNull();
     expect(await legacy()).toBe(before);
   });
   it("refuses mismatched database binding before the callback and rolls back", async () => {
