@@ -1,4 +1,4 @@
-import { describe,it,expect,vi } from "vitest";
+import { afterEach,describe,it,expect,vi } from "vitest";
 import { matchTrustedOrigin,projectOrigins } from "../shared/trusted-addresses";
 import express from "express";
 import http from "node:http";
@@ -16,13 +16,18 @@ vi.mock("passport",()=>({default:{
   serializeUser:vi.fn(),deserializeUser:vi.fn(),
   authenticate:(name:string)=> (_q:unknown,s:{end:(body:string)=>void})=>{proof.authenticated.push(name);s.end("synthetic authentication");},
 }}));
-vi.mock("express-session",()=>({default:()=> (_q:unknown,_s:unknown,next:()=>void)=>{proof.session++;next();}}));
+vi.mock("express-session",async()=>{
+  const actual=await vi.importActual<typeof import("express-session")>("express-session");
+  const middleware=()=> (_q:unknown,_s:unknown,next:()=>void)=>{proof.session++;next();};
+  return {...actual,default:Object.assign(middleware,{Store:actual.Store})};
+});
 vi.mock("connect-pg-simple",()=>({default:()=>class {
   query(){throw new Error("Unexpected database use in the auth-address fixture");}
   close(){}
 }}));
 import { setupAuth } from "./replit_integrations/auth/replitAuth";
 const host="sre-of-me-replit.pmhlabs.org",origins=projectOrigins({});
+afterEach(()=>vi.unstubAllEnvs());
 function request(port:number,route:string,headers:string[]){
   return new Promise<{status:number,body:string,cookie:unknown}>((resolve,reject)=>{
     const req=http.request({host:"127.0.0.1",port,path:route,headers},res=>{
@@ -51,6 +56,7 @@ describe("exact project authority",()=>{
     expect(matchTrustedOrigin({rawHeaders:["Host",host,...extra]},origins)).toBeUndefined();
   });
   it("actual auth routes reject before session/auth effects and bound registrations",async()=>{
+    vi.stubEnv("OAUTH_TOKEN_ENCRYPTION_KEYRING",JSON.stringify({activeKeyId:"synthetic-host",keys:{"synthetic-host":Buffer.alloc(32,0x6e).toString("base64url")}}));
     const app=express();await setupAuth(app);const server=http.createServer(app);
     server.listen(0,"127.0.0.1");await once(server,"listening");
     const port=(server.address() as import("node:net").AddressInfo).port;
