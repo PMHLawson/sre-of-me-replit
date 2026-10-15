@@ -1,99 +1,49 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runStartupRetention } from "./startup-retention";
 
-const NOW = Date.parse("2026-10-03T12:00:00.000Z");
-// Independent calendar fixture, not computed from implementation constants.
-const CUTOFF = "2026-08-22T12:00:00.000Z";
 function fakeStorage() {
   const records = [
-    { id: "invented-active", deletedAt: null },
-    { id: "invented-expired", deletedAt: new Date("2026-08-21T12:00:00Z") },
-    { id: "invented-boundary", deletedAt: new Date(CUTOFF) },
-    { id: "invented-recent", deletedAt: new Date("2026-10-02T12:00:00Z") },
+    { id: "invented-active-2020", deletedAt: null, notes: "exact old practice" },
+    { id: "invented-deleted-2020", deletedAt: new Date("2020-01-02T00:00:00Z"), notes: "restorable old note" },
+    { id: "invented-deleted-2026", deletedAt: new Date("2026-10-02T00:00:00Z"), notes: "recent note" },
   ];
-  const purgeExpiredDeletedSessions = vi.fn(async (cutoff: Date) => {
-    let count = 0;
-    for (let i = records.length - 1; i >= 0; i--) {
-      const deletedAt = records[i].deletedAt;
-      if (deletedAt && deletedAt < cutoff) { records.splice(i, 1); count++; }
-    }
-    return count;
+  const purgeExpiredDeletedSessions = vi.fn(async (_cutoff: Date) => {
+    records.splice(0, records.length);
+    throw new Error("Obsolete purge must never execute");
   });
   return { records, purgeExpiredDeletedSessions };
 }
 
-afterEach(() => vi.restoreAllMocks());
-
-describe("startup activity preservation", () => {
+describe("startup historical-data preservation", () => {
   it.each([
     undefined, "", "false", "FALSE", "False", "0", "1", "yes", "on",
     "enabled", "TRUE", "True", " true", "true ", "true\n", "\ntrue",
-    "true=true", "true,false", "null", "undefined",
-  ])("preserves every fake record for opt-in %j", async (optIn) => {
-    const storage = fakeStorage();
-    const before = storage.records.map(row => ({ ...row }));
-    const now = vi.fn(() => NOW), log = vi.fn(), reportError = vi.fn();
-    const result = runStartupRetention({ optIn, storage, now, log, reportError });
-    expect(result).toBeUndefined();
+    "true=true", "true,false", "null", "undefined", "true",
+  ])("preserves every record for retired flag %j, including the old exact opt-in", async optIn => {
+    const storage = fakeStorage(), before = structuredClone(storage.records);
+    const now = vi.fn(() => Date.parse("2099-01-01T00:00:00Z"));
+    const log = vi.fn(), reportError = vi.fn();
+    expect(runStartupRetention({ optIn, storage, now, log, reportError })).toBeUndefined();
     await Promise.resolve();
     expect(storage.records).toEqual(before);
     expect(storage.purgeExpiredDeletedSessions).not.toHaveBeenCalled();
     expect(now).not.toHaveBeenCalled();
-    expect(log).not.toHaveBeenCalled();
     expect(reportError).not.toHaveBeenCalled();
+    if (optIn === "true") expect(log).toHaveBeenCalledExactlyOnceWith(
+      "SESSION_RETENTION_PURGE_ENABLED is retired and ignored; historical data is preserved.", "retention");
+    else expect(log).not.toHaveBeenCalled();
   });
 
-  it("only explicit true invokes the independent forty-two-day cutoff", async () => {
-    const storage = fakeStorage(), log = vi.fn(), reportError = vi.fn();
-    const now = vi.fn(() => NOW);
-    const result = runStartupRetention({ optIn: "true", storage, now, log, reportError });
-    expect(result).toBeInstanceOf(Promise);
-    await result;
-    expect(now).toHaveBeenCalledOnce();
-    expect(storage.purgeExpiredDeletedSessions).toHaveBeenCalledExactlyOnceWith(new Date(CUTOFF));
-    expect(storage.records.map(row => row.id)).toEqual([
-      "invented-active", "invented-boundary", "invented-recent",
-    ]);
-    expect(log).toHaveBeenCalledExactlyOnceWith("purged 1 soft-deleted session older than 42d", "retention");
-    expect(reportError).not.toHaveBeenCalled();
+  it("does not even access an injected storage dependency when the old flag is true", () => {
+    const access = vi.fn(() => { throw new Error("Storage access forbidden"); });
+    const storage = new Proxy({} as { purgeExpiredDeletedSessions(cutoff: Date): Promise<number> }, { get: access });
+    runStartupRetention({ optIn: "true", storage, log: vi.fn() });
+    expect(access).not.toHaveBeenCalled();
   });
 
-  it.each([0, 2])("retains plural success logging for %i rows", async (count) => {
-    const storage = { purgeExpiredDeletedSessions: vi.fn(async () => count) }, log = vi.fn();
-    await runStartupRetention({ optIn: "true", storage, now: () => NOW, log });
-    expect(log).toHaveBeenCalledExactlyOnceWith(`purged ${count} soft-deleted sessions older than 42d`, "retention");
-  });
-
-  it("reports asynchronous errors without rejecting or altering fake records", async () => {
-    const storage = fakeStorage(), before = [...storage.records], error = new Error("invented storage rejection");
-    storage.purgeExpiredDeletedSessions.mockRejectedValueOnce(error);
-    const log = vi.fn(), reportError = vi.fn();
-    await expect(runStartupRetention({ optIn: "true", storage, now: () => NOW, log, reportError })).resolves.toBeUndefined();
-    expect(storage.records).toEqual(before);
-    expect(log).not.toHaveBeenCalled();
-    expect(reportError).toHaveBeenCalledExactlyOnceWith("[retention] purgeExpiredDeletedSessions failed:", error);
-  });
-
-  it("keeps the existing console error sink and default real clock", async () => {
-    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW);
-    const sink = vi.spyOn(console, "error").mockImplementation(() => {});
-    const error = new Error("invented default-sink rejection");
-    const storage = { purgeExpiredDeletedSessions: vi.fn(async (_cutoff: Date) => { throw error; }) };
-    await runStartupRetention({ optIn: "true", storage, log: vi.fn() });
-    expect(clock).toHaveBeenCalledOnce();
-    expect(storage.purgeExpiredDeletedSessions).toHaveBeenCalledExactlyOnceWith(new Date(CUTOFF));
-    expect(sink).toHaveBeenCalledExactlyOnceWith("[retention] purgeExpiredDeletedSessions failed:", error);
-  });
-
-  it("preserves synchronous throw behavior rather than silently swallowing it", () => {
-    const error = new Error("invented synchronous throw");
-    const storage = { purgeExpiredDeletedSessions: (_cutoff: Date): Promise<number> => { throw error; } };
-    expect(() => runStartupRetention({ optIn: "true", storage, now: () => NOW, log: vi.fn() })).toThrow(error);
-  });
-
-  it("wires the actual listen callback to the guard without executing the application", () => {
+  it("wires startup only to the preservation notice without executing the application", () => {
     const text = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const source = ts.createSourceFile("index.ts", text, ts.ScriptTarget.Latest, true);
     const calls: ts.CallExpression[] = [];
@@ -110,7 +60,11 @@ describe("startup activity preservation", () => {
     expect(guard.pos).toBeGreaterThan(listen!.arguments[1].pos);
     expect(guard.end).toBeLessThanOrEqual(listen!.arguments[1].end);
     expect(guard.arguments[0].getText(source)).toMatch(/optIn:\s*process\.env\.SESSION_RETENTION_PURGE_ENABLED/);
-    expect(guard.arguments[0].getText(source)).toMatch(/\bstorage\b/);
+    const argument = guard.arguments[0];
+    expect(ts.isObjectLiteralExpression(argument)).toBe(true);
+    if (ts.isObjectLiteralExpression(argument)) {
+      expect(argument.properties.map(property => property.name?.getText(source))).toEqual(["optIn", "log"]);
+    }
     expect(calls.filter(call => /purgeExpiredDeletedSessions/.test(call.expression.getText(source)))).toHaveLength(0);
     expect(text).toContain('import { runStartupRetention } from "./startup-retention"');
   });

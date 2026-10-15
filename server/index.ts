@@ -5,7 +5,6 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
-import { storage } from "./storage";
 import { runStartupRetention } from "./startup-retention";
 import { trustedAddressGuard } from "../shared/trusted-addresses";
 
@@ -169,11 +168,10 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
 
-      // Preserve activity by default. Only the exact documented opt-in permits
-      // the existing fire-and-forget 42-day purge; keep it off during recovery.
-      void runStartupRetention({
+      // SOMR-469: historical data never expires automatically. Recognize the
+      // retired flag only to warn operators; it cannot activate deletion.
+      runStartupRetention({
         optIn: process.env.SESSION_RETENTION_PURGE_ENABLED,
-        storage,
         log,
       });
     },

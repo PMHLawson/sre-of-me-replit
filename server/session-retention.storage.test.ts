@@ -3,6 +3,9 @@ import {drizzle} from "drizzle-orm/node-postgres";
 import {Pool} from "pg";
 import * as schema from "@shared/schema";
 import {startFixture} from "./lib/ownership-fixture";
+import {seedPolicyV2} from "./lib/seed-policy-v2";
+import {importLegacyObservations} from "./services/legacy-observation-sync";
+import {runStartupRetention} from "./startup-retention";
 vi.mock("./db",()=>({db:{}}));
 import {DatabaseStorage} from "./storage";
 
@@ -43,23 +46,38 @@ describe("actual retention, deviation and settings writes with owner admission",
   expect((await store.restoreSession(owner,id))?.deletedAt).toBeNull();
   expect((await raw()).timestamp).toContain(".123456");
  });
- it("global maintenance deletes only deletion times strictly older than cutoff and is idempotent",async()=>{
-  const cutoff=new Date("2026-08-01T12:00:00Z");
-  for(const [suffix,who,deleted] of [["expired-a",owner,"2026-08-01T11:59:59.999999Z"],["expired-b",other,"2020-01-01T00:00:00Z"],
-   ["boundary",owner,"2026-08-01T12:00:00Z"],["newer",owner,"2026-08-01T12:00:00.000001Z"]] as const)
-   await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,deleted_at) VALUES($1,$2,'music',1,'2030-01-01T00:00:00Z',$3)",[id+"-"+suffix,who,deleted]);
-  expect(await store.purgeExpiredDeletedSessions(cutoff)).toBe(2);
-  const left=(await f.client.query("SELECT id FROM sessions WHERE id LIKE $1 ORDER BY id",[id+"%"])).rows.map(x=>x.id);
-  expect(left).toEqual([id,id+"-boundary",id+"-newer"]);expect(await store.purgeExpiredDeletedSessions(cutoff)).toBe(0);
-  expect(await counts()).toEqual([]);expect(await counts(other)).toEqual([]);
- });
- it("maintenance propagates a real database error instead of reporting zero removals",async()=>{
-  await f.client.query("UPDATE sessions SET deleted_at='2020-01-01T00:00:00Z' WHERE id=$1",[id]);
-  await f.client.query("CREATE FUNCTION fail_retention() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic retention failure'; END $$");
-  await f.client.query("CREATE TRIGGER fail_retention AFTER DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION fail_retention()");
-  try{await expect(store.purgeExpiredDeletedSessions(new Date("2026-01-01T00:00:00Z"))).rejects.toThrow();}
-  finally{await f.client.query("DROP TRIGGER fail_retention ON sessions");await f.client.query("DROP FUNCTION fail_retention()");}
-  expect(await raw()).toBeDefined();expect(await counts()).toEqual([]);
+ it("retired age-based maintenance preserves practices, exact edits, canonical observations and audits even for flag true",async()=>{
+  const request={isAuthenticated:()=>true,user:{claims:{sub:owner}}};
+  await f.client.query("INSERT INTO user_settings(user_id,timezone,day_start_hour,window_days) VALUES($1,'America/New_York',4,14)",[owner]);
+  await f.client.query("UPDATE sessions SET deleted_at='2020-01-02T00:00:00.123456Z' WHERE id=$1",[id]);
+  for(const slug of ["fitness","meditation","martial-arts"])
+   await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,notes) VALUES($1,$2,$3,10,'2020-01-01T01:02:03.123456Z','exact active note')",[id+"-"+slug,owner,slug]);
+  await f.client.query("INSERT INTO session_edits(id,session_id,user_id,edited_at,reason,changed_fields) VALUES($1,$2,$3,'2020-01-01T02:03:04.654321Z','exact edit reason',$4)",
+   [id+"-edit",id,owner,JSON.stringify({notes:"exact prior note 🙂".repeat(500)})]);
+  await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,notes,deleted_at) VALUES($1,$2,'music',1,'2019-01-01T00:00:00Z','foreign retained','2019-01-02T00:00:00Z'),($3,NULL,'music',1,'2018-01-01T00:00:00Z','unowned retained','2018-01-02T00:00:00Z')",
+   [id+"-foreign",other,id+"-unowned"]);
+  await seedPolicyV2(f.db,request);
+  await importLegacyObservations(f.db,request);
+  expect((await f.client.query("SELECT count(*)::int n FROM observations WHERE owner_user_id=$1",[owner])).rows[0].n).toBe(4);
+  expect((await f.client.query("SELECT count(*)::int n FROM audit_events WHERE actor_user_id=$1 AND entity_type LIKE 'legacy_%'",[owner])).rows[0].n).toBe(5);
+  const tables=["users","user_settings","sessions","session_edits","deviations","http_sessions",
+   "organizations","organization_members","domains","policy_versions","dimension_definitions","source_bindings",
+   "observations","deviations_v2","deviation_domains","evaluation_results","audit_events","owner_write_resource_budgets"];
+  const snapshot=async()=>{
+   const rows:Record<string,unknown>={};
+   for(const table of tables)rows[table]=(await f.client.query("SELECT to_jsonb(t) r FROM public."+table+" t ORDER BY to_jsonb(t)::text")).rows;
+   return JSON.stringify(rows);
+  };
+  const before=await snapshot(),log=vi.fn(),now=vi.fn(()=>Date.parse("2099-01-01T00:00:00Z"));
+  expect(runStartupRetention({optIn:"true",storage:store,now,log})).toBeUndefined();
+  expect(now).not.toHaveBeenCalled();expect(log).toHaveBeenCalledOnce();
+  for(const cutoff of [new Date("2026-01-01T00:00:00Z"),new Date("2099-01-01T00:00:00Z"),new Date(NaN)])
+   await expect(store.purgeExpiredDeletedSessions(cutoff)).rejects.toThrow("Automatic age-based deletion is disabled");
+  expect(await snapshot()).toBe(before);
+  const forbidden=vi.fn(()=>{throw Error("Database dependency must never be accessed");});
+  const noDatabase=new Proxy({} as any,{get:forbidden});
+  await expect(new DatabaseStorage(noDatabase,noDatabase).purgeExpiredDeletedSessions(new Date())).rejects.toThrow("Automatic age-based deletion is disabled");
+  expect(forbidden).not.toHaveBeenCalled();
  });
  it("active and deleted listings remain owner scoped, exclude opposite states, and use their respective time ordering",async()=>{
   await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,deleted_at) VALUES($1,$2,'music',1,'2010-01-01T00:00:00Z','2026-10-02T00:00:00Z'),($3,$2,'music',1,'2030-01-01T00:00:00Z','2026-08-01T00:00:00Z'),($4,$5,'music',1,now(),NULL)",

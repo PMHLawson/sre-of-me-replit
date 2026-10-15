@@ -22,7 +22,7 @@ export const sessions = pgTable("sessions", {
   timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   notes: text("notes"),
   // Soft-delete marker. Active sessions have NULL. Set on DELETE; cleared on RESTORE.
-  // Hard-deletion is performed by the retention purge (B2.4).
+  // History does not expire automatically. Permanent deletion is a separate explicit future action.
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   // C1.1 — Anomaly flag set when the user confirmed a 2-sigma duration anomaly
   // at save time. Stored on the row so historical surfaces can mark the session

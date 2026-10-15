@@ -21,7 +21,7 @@ import {
   type InsertUserSettings,
   normalizeComplianceWindowDays,activityTextWithinLimit,insertSessionSchema,updateSessionSchema,insertDeviationSchema,updateDeviationSchema,insertUserSettingsSchema,
 } from "@shared/schema";
-import { sql,eq,desc,gte,and,isNull,lte,lt,or,asc,gt,isNotNull } from "drizzle-orm";
+import { sql,eq,desc,gte,and,isNull,lte,or,asc,gt,isNotNull } from "drizzle-orm";
 
 export interface IStorage {
   getSessions(userId: string): Promise<Session[]>;
@@ -32,10 +32,9 @@ export interface IStorage {
   restoreSession(userId: string, id: string): Promise<Session | undefined>;
   getDeletedSessions(userId: string): Promise<Session[]>;
   /**
-   * Hard-delete soft-deleted sessions strictly older than `olderThan`
-   * (`deletedAt < olderThan`). Active sessions (`deletedAt IS NULL`) are
-   * never matched. Idempotent — once expired rows are removed a re-run with
-   * the same cutoff is a no-op. Returns the number of rows removed.
+   * @deprecated Age-based deletion is retired. This compatibility entry point
+   * always rejects before accessing storage; no cutoff authorizes deletion.
+   * Explicit permanent deletion requires its own future owner-authorized path.
    */
   purgeExpiredDeletedSessions(olderThan: Date): Promise<number>;
 
@@ -258,16 +257,10 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(sessions.deletedAt));
   }
 
-  async purgeExpiredDeletedSessions(olderThan: Date): Promise<number> {
-    // Strict comparator (deletedAt < olderThan) — matches the "older than"
-    // semantics of the IStorage contract. Predicate is gated to soft-deleted
-    // rows only, so active sessions (deletedAt IS NULL) are never matched
-    // and a re-run with the same cutoff is a no-op (idempotent).
-    const removed = await this.database
-      .delete(sessions)
-      .where(and(isNotNull(sessions.deletedAt), lt(sessions.deletedAt, olderThan)))
-      .returning({ id: sessions.id });
-    return removed.length;
+  async purgeExpiredDeletedSessions(_olderThan: Date): Promise<number> {
+    // SOMR-469: age and reporting windows never authorize permanent deletion.
+    // Keep the old seam explicitly refusing so stale callers cannot erase rows.
+    throw new Error("Automatic age-based deletion is disabled; historical data is retained.");
   }
 
   // ----- Deviations -----

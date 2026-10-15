@@ -120,7 +120,7 @@ export function RecentlyDeletedSection() {
               className="text-center py-8 text-sm text-muted-foreground font-medium"
               data-testid="text-recently-deleted-empty"
             >
-              Nothing here. Deleted sessions appear here within the retention window.
+              Nothing here. Practices you delete remain available here for restoration.
             </div>
           )}
 

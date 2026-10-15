@@ -1,45 +1,32 @@
-/** SOMR-459: preservation is the deliberate startup default. */
-export const SESSION_RETENTION_DAYS = 42;
-const SESSION_RETENTION_MS = SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-
+/** SOMR-469: retain historical data regardless of age or reporting window. */
 interface RetentionStorage {
   purgeExpiredDeletedSessions(cutoff: Date): Promise<number>;
 }
 
 interface StartupRetentionOptions {
+  /** Retired environment flag: accepted only to report an obsolete setting. */
   optIn: string | undefined;
-  storage: RetentionStorage;
   log: (message: string, source?: string) => void;
+  /** Deprecated compatibility dependencies. They are never accessed or called. */
+  storage?: RetentionStorage;
   now?: () => number;
   reportError?: (message: string, error: unknown) => void;
 }
 
 /**
- * Only SESSION_RETENTION_PURGE_ENABLED=true (exact lowercase literal) enables
- * expiry deletion. No trimming, coercion or other truthy spellings are accepted.
- * The caller intentionally does not await this: opted-in behavior retains the
- * previous cutoff, logging and non-blocking rejection handling.
+ * Automatic age-based deletion is retired. Even the former exact opt-in cannot
+ * run maintenance, open storage, inspect records or calculate an expiry cutoff.
+ * Soft deletion/restoration remain separate authenticated user actions.
  */
 export function runStartupRetention({
   optIn,
-  storage,
   log,
-  now = Date.now,
-  reportError = (message, error) => console.error(message, error),
-}: StartupRetentionOptions): Promise<void> | undefined {
-  if (optIn !== "true") return;
-
-  const cutoff = new Date(now() - SESSION_RETENTION_MS);
-  return storage
-    .purgeExpiredDeletedSessions(cutoff)
-    .then((count) => {
-      log(
-        `purged ${count} soft-deleted session${count === 1 ? "" : "s"} ` +
-          `older than ${SESSION_RETENTION_DAYS}d`,
-        "retention",
-      );
-    })
-    .catch((err) => {
-      reportError("[retention] purgeExpiredDeletedSessions failed:", err);
-    });
+}: StartupRetentionOptions): undefined {
+  if (optIn === "true") {
+    log(
+      "SESSION_RETENTION_PURGE_ENABLED is retired and ignored; historical data is preserved.",
+      "retention",
+    );
+  }
+  return undefined;
 }
