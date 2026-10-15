@@ -20,6 +20,12 @@ The first helper lock is users(id) FOR UPDATE before invoking the callback. Exis
 
 The counter row is inserted/locked lazily only when admitMutation is called. PostgreSQL serializes independent connections and server instances. Counter changes, business changes and audit appends commit or roll back together. Resource/operation failures poison the same SQL transaction with a static failed SELECT, then preserve the original typed error, so catching a JavaScript error cannot commit earlier writes. The existing transaction owner still performs rollback and expires its handles.
 
+## Text boundaries retained by the integrations
+
+Legacy new/changed notes and anomalyNote share one limit: 4,000 UTF-16 code units and 16 KiB of UTF-8 text. New reason fields retain their 500-unit limit. Generic context descriptions retain their existing separate 2,000-unit limit; generic activity notes retain the existing 4,000 UTF-16 limit.
+
+Omitted or exactly unchanged historical oversized text is grandfathered. A legacy oversized field may also be strictly shortened when both its UTF-16 length and UTF-8 byte count do not increase and at least one decreases. This does not authorize trimming, truncation, normalization, or rewriting stored history. Old audit/history validators remain unchanged. Generic immutable raw-observation exact retries reconcile the saved payload before applying stricter new-input bounds; this does not widen the ordinary generic edit envelope.
+
 ## Rate and capacity policy
 
 - Default rate: 30 accepted external mutations per UTC fixed minute; 500 per UTC day. These are fixed calendar buckets, not a rolling 60-second limit. An operation with multiple audited row writes consumes one admission. Exact replay/no-op consumes none when the caller does not admit.
