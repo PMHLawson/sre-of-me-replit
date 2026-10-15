@@ -30,6 +30,25 @@ type State = {
 const scopes = new WeakMap<Transaction, State>();
 const validOwner = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
   value.length <= 200 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value) && value !== "__proto__";
+// The temporary maintenance adapter permits only these exact operational-row
+// updates. Exporting their identity avoids widening its business UPDATE ban.
+export const OWNER_WRITE_BUDGET_ADMISSION_UPDATE = "UPDATE public.owner_write_resource_budgets SET minute_started_at=$2::timestamptz,minute_count=$3,day_date=$4::date,day_count=$5,updated_at=$6::timestamptz WHERE owner_user_id=$1";
+export const OWNER_WRITE_BUDGET_OBSERVATION_UPDATE = "UPDATE public.owner_write_resource_budgets SET observed_bytes=$2,observed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE owner_user_id=$1";
+const canonicalInstant = (value: unknown): value is string => typeof value === "string" &&
+  Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+const utcDate = (value: unknown): value is string => typeof value === "string" &&
+  /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value + "T00:00:00Z")) &&
+  new Date(value + "T00:00:00Z").toISOString().slice(0,10) === value;
+export function isOwnerWriteBudgetCounterUpdate(text: string, values: unknown[]): boolean {
+  if (!Array.isArray(values) || !validOwner(values[0])) return false;
+  if (text === OWNER_WRITE_BUDGET_OBSERVATION_UPDATE)
+    return values.length === 2 && typeof values[1] === "number" && Number.isSafeInteger(values[1]) && values[1] >= 0;
+  return text === OWNER_WRITE_BUDGET_ADMISSION_UPDATE && values.length === 6 &&
+    canonicalInstant(values[1]) && Date.parse(values[1]) % 60000 === 0 &&
+    typeof values[2] === "number" && Number.isInteger(values[2]) && values[2] >= 1 && values[2] <= OWNER_WRITE_LIMITS.minute &&
+    utcDate(values[3]) && typeof values[4] === "number" && Number.isInteger(values[4]) && values[4] >= 1 && values[4] <= OWNER_WRITE_LIMITS.day &&
+    canonicalInstant(values[5]);
+}
 function optionsFor(input: OwnerWriteBudgetOptions = {}): Options {
   if (!input || typeof input !== "object" || Object.keys(input).some(k => !["capacityBytes","enforceCapacity"].includes(k)) ||
     (input.enforceCapacity !== undefined && typeof input.enforceCapacity !== "boolean")) throw new BoundaryError(503);
@@ -109,7 +128,7 @@ async function admit(state: State): Promise<void> {
     throw new WriteResourceLimitError("rate", Math.max(1, Math.ceil((reset - Date.parse(now)) / 1000)));
   }
   state.beforeBytes = await measure(state);
-  await query(state, "UPDATE public.owner_write_resource_budgets SET minute_started_at=$2::timestamptz,minute_count=$3,day_date=$4::date,day_count=$5,updated_at=$6::timestamptz WHERE owner_user_id=$1",
+  await query(state, OWNER_WRITE_BUDGET_ADMISSION_UPDATE,
     [state.owner, minuteStart, minuteCount + 1, dayDate, dayCount + 1, now]);
 }
 /** Authenticated server seam. Call inside the SAME business/audit transaction.
@@ -159,7 +178,7 @@ export async function withOwnerWriteBudget<T>(tx: Transaction, ownerUserId: stri
       if (before === undefined) throw new BoundaryError(503);
       if (options.enforceCapacity && after > options.capacityBytes && after > before)
         throw new WriteResourceLimitError("capacity");
-      await query(current, "UPDATE public.owner_write_resource_budgets SET observed_bytes=$2,observed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE owner_user_id=$1", [ownerUserId, after]);
+      await query(current, OWNER_WRITE_BUDGET_OBSERVATION_UPDATE, [ownerUserId, after]);
     }
     if (performance.now() >= current.deadline) throw new BoundaryError(503);
     return value;

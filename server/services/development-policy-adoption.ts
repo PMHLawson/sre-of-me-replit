@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Express, Request, RequestHandler } from "express";
 import type { Pool, PoolClient } from "pg";
 import { BoundaryError, type OwnershipDatabase, type Transaction } from "../lib/org-context";
+import { isOwnerWriteBudgetCounterUpdate } from "../lib/write-resource-budget";
 
 export const adoptionPath = "/_internal/policy-v2-adoption";
 export interface AdoptionConfig {
@@ -60,7 +61,7 @@ export function createAdoptionDatabase(pool: Pick<Pool, "connect">, binding: Non
     const tx: Transaction = Object.freeze({ query(sql: string, values: unknown[] = []) {
       if (!active) return refused();
       if (typeof sql !== "string" || sql.includes(";") ||
-        (!/^\s*(SELECT|INSERT|LOCK)\b/i.test(sql) && sql !== "SET LOCAL TIME ZONE 'UTC'")) {
+        (!/^\s*(SELECT|INSERT|LOCK)\b/i.test(sql) && sql !== "SET LOCAL TIME ZONE 'UTC'" && !isOwnerWriteBudgetCounterUpdate(sql, values))) {
         failed = true; return track(refused());
       }
       return track(Promise.resolve().then(() => client!.query(sql, values)));
