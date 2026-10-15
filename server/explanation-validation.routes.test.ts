@@ -2,10 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer } from "node:http";
 import { BoundaryError } from "./lib/org-context";
+import { ResourceLimitError } from "./lib/read-budget";
+import { WriteResourceLimitError } from "./lib/write-resource-budget";
 
 const fake = vi.hoisted(() => ({
   owner: "invented-explanation-owner-ALPHA" as string | null,
   storage: {
+    getUserSettings:vi.fn(),upsertUserSettings:vi.fn(),
     updateSession: vi.fn(), createDeviation: vi.fn(), updateDeviation: vi.fn(),
     endDeviation: vi.fn(), softDeleteDeviation: vi.fn(),
   },
@@ -141,4 +144,19 @@ describe("real explanation request handlers with invented auth/storage boundarie
       expect(fake.storage[method]).toHaveBeenCalledExactlyOnceWith(owner, id);
     });
   }
+});
+describe("settings resource errors remain explicit and owner scoped",()=>{
+ for(const method of ["GET","PATCH"] as const)for(const kind of ["rate","capacity","read"] as const){
+  it(method+" settings "+kind+" denial never reports generic500 or success",async()=>{
+   const failure=kind==="read"?new ResourceLimitError():new WriteResourceLimitError(kind,kind==="rate"?17:null);
+   const call=method==="GET"?fake.storage.getUserSettings:fake.storage.upsertUserSettings;call.mockRejectedValue(failure);
+   const response=await fetch(origin+"/api/settings?userId=forged",{method,
+    headers:{"Content-Type":"application/json"},...(method==="PATCH"?{body:JSON.stringify({windowDays:14,userId:"forged"})}:{})});
+   expect(response.status).toBe(kind==="read"?503:429);
+   const body=await response.json();expect(body).toMatchObject({message:failure.message,code:failure.code});
+   expect(response.headers.get("Retry-After")).toBe(kind==="rate"?"17":null);
+   if(method==="GET")expect(call).toHaveBeenCalledExactlyOnceWith(owners[0]);
+   else expect(call).toHaveBeenCalledExactlyOnceWith(owners[0],{windowDays:14});
+  });
+ }
 });

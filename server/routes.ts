@@ -118,6 +118,7 @@ export async function registerRoutes(
       res.json(settings);
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to fetch settings" });
     }
   });
@@ -134,6 +135,7 @@ export async function registerRoutes(
       res.json(row);
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to update settings" });
     }
   });
