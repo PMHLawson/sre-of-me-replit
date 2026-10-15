@@ -1,5 +1,6 @@
 import { Router, json, type RequestHandler } from "express";
 import { BoundaryError } from "../lib/org-context";
+import { ResourceLimitError } from "../lib/read-budget";
 import { DomainInputError, type createDomainServiceV2 } from "../services/domain-service-v2";
 
 type Service = ReturnType<typeof createDomainServiceV2>;
@@ -21,6 +22,7 @@ export function createPolicyV2Router(options: { service: Service; authenticate: 
     }).then(value => response.status(status).json(value)).catch(error => {
       const safe = error instanceof BoundaryError ? error : new BoundaryError(503);
       response.status(safe.status).json({ message: safe.message,
+        ...(safe instanceof ResourceLimitError ? { code: safe.code } : {}),
         ...(safe instanceof DomainInputError ? { issues: safe.issues } : {}) });
     });
   };

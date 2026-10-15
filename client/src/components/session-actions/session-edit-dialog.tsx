@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { sessionEditFields } from "@/lib/legacy-session-edit";
+import React, { useEffect, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -20,7 +21,8 @@ import {
 } from '@/components/ui/select';
 import { AlertTriangle } from 'lucide-react';
 import type { AnomalyCheckResponse } from '@shared/schema';
-import type { Session, SessionPatch, Domain } from '@/store';
+import { useAppStore, type Session, type SessionPatch, type Domain } from '@/store';
+import { SessionText } from '@/components/session-text';
 import { checkAnomaly, anomalyFieldsForSave, type AnomalySaveDecision } from '@/lib/anomaly-preflight';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -58,11 +60,36 @@ interface SessionEditDialogProps {
   onSubmit: (patch: SessionPatch, reason: string) => Promise<Session | null>;
 }
 
-export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: SessionEditDialogProps) {
+export function SessionEditDialog(props: SessionEditDialogProps) {
+  const detail = useAppStore(s => props.session ? s.sessionDetails[props.session.id] : undefined);
+  const fetchDetail = useAppStore(s => s.fetchSessionDetail);
+  const demo = useAppStore(s => s.demoState !== "default");
+  const [freshOpen, setFreshOpen] = useState(false);
+  useEffect(() => {
+    let active = true; setFreshOpen(false);
+    if (props.open && props.session && !demo)
+      void fetchDetail(props.session.id).then(() => { if (active) setFreshOpen(true); });
+    return () => { active = false; };
+  }, [props.open, props.session?.id, demo, fetchDetail]);
+  if (props.open && props.session && !demo && (!freshOpen || detail?.status !== "ready")) {
+    return <Dialog open={props.open} onOpenChange={props.onOpenChange}><DialogContent>
+      <DialogHeader><DialogTitle>Load saved session</DialogTitle><DialogDescription>
+        The complete original text is required before editing; your saved notes have not been changed.
+      </DialogDescription></DialogHeader><SessionText session={{ ...props.session, textComplete: false }} force />
+      <Button disabled>Save changes</Button>
+    </DialogContent></Dialog>;
+  }
+  return <SessionEditForm {...props} session={!demo && props.session ? detail?.value ?? null : props.session} />;
+}
+function SessionEditForm({ open, onOpenChange, session, onSubmit }: SessionEditDialogProps) {
   const [domain, setDomain] = useState<Domain>('fitness');
   const [duration, setDuration] = useState('30');
   const [timestampLocal, setTimestampLocal] = useState('');
   const [notes, setNotes] = useState('');
+  const [notesDirty, setNotesDirty] = useState(false);
+  const detail = useAppStore(s => session ? s.sessionDetails[session.id] : undefined);
+  const fullSession = session?.textComplete === false ? detail?.value : session;
+  const detailReady = !!fullSession && fullSession.textComplete !== false;
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -76,13 +103,18 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
     setDomain(session.domain);
     setDuration(String(session.durationMinutes));
     setTimestampLocal(toLocalInputValue(session.timestamp));
-    setNotes(session.notes ?? '');
+    setNotes(fullSession?.notes ?? '');
+    setNotesDirty(false);
     setReason('');
     setError(null);
     setStage('idle');
     setAnomalyResult(null);
     setAnomalyNote('');
-  }, [open, session]);
+  }, [open, session?.id]);
+
+  useEffect(() => {
+    if (open && detailReady && !notesDirty) setNotes(fullSession?.notes ?? '');
+  }, [open, detailReady, fullSession?.notes, notesDirty]);
 
   /** Validate form fields; returns parsed durationNum or null on failure. */
   function validateForm(): number | null {
@@ -98,12 +130,11 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
 
   /** Final PATCH — called after any anomaly decision is resolved. */
   const doSubmit = async (durationNum: number, decision: AnomalySaveDecision) => {
-    if (!session) return;
+    if (!session || !detailReady) return;
     const patch: SessionPatch = {
-      domain,
-      durationMinutes: durationNum,
-      timestamp: fromLocalInputValue(timestampLocal),
-      notes: notes.trim() ? notes.trim() : null,
+      ...sessionEditFields(fullSession!, { domain, durationMinutes: durationNum,
+        ...(timestampLocal !== toLocalInputValue(fullSession!.timestamp) ? { timestamp: fromLocalInputValue(timestampLocal) } : {}),
+        ...(notesDirty ? { notes } : {}) }),
       ...anomalyFieldsForSave(decision, true),
     };
     setStage('saving');
@@ -123,11 +154,15 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
 
   /** Primary save button handler: validate → anomaly preflight → submit. */
   const handleSubmit = async () => {
-    if (!session) return;
+    if (!session || !detailReady) return;
     setError(null);
     const durationNum = validateForm();
     if (durationNum === null) return;
 
+    if (domain === fullSession!.domain && durationNum === fullSession!.durationMinutes) {
+      await doSubmit(durationNum, { kind: 'unavailable' });
+      return;
+    }
     setStage('checking');
 
     const check = await checkAnomaly({
@@ -230,6 +265,10 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
           </DialogDescription>
         </DialogHeader>
 
+        {!detailReady && session && <div className="space-y-2" data-testid="edit-detail-required">
+          <p>Load the complete saved text before editing. Existing notes will remain unchanged unless you edit them.</p>
+          <SessionText session={session} force />
+        </div>}
         <div className="space-y-4 py-2">
           <div className="space-y-2">
             <Label htmlFor="session-edit-domain">Domain</Label>
@@ -278,7 +317,8 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
               id="session-edit-notes"
               placeholder="What did you do?"
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={(e) => { setNotes(e.target.value); setNotesDirty(true); }}
+              disabled={!detailReady}
               rows={2}
               data-testid="input-session-edit-notes"
             />
@@ -317,7 +357,7 @@ export function SessionEditDialog({ open, onOpenChange, session, onSubmit }: Ses
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={busy}
+            disabled={busy || !detailReady}
             data-testid="button-session-edit-submit"
           >
             {stage === 'checking' ? 'Checking…' : stage === 'saving' ? 'Saving…' : 'Save changes'}

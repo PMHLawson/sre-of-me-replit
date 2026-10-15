@@ -1,4 +1,7 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryConfig } from "pg";
+import { performance } from "node:perf_hooks";
+import { withTransactionReadBudget } from "./transaction-read-budget";
+import { ResourceLimitError, READ_TIMEOUT_MS } from "./read-budget";
 import { BoundaryError, createOrgContextResolver,
   type OwnershipDatabase, type OrgContext, type Transaction } from "./org-context";
 
@@ -38,6 +41,21 @@ export function createPinnedOwnershipUnit(pool: Pick<Pool, "connect">) {
       let began = false, committed = false, destroy = false, active = false, commitAttempted = false;
       let failed = false;
       const pending: Promise<unknown>[] = [];
+      const deadline=performance.now()+READ_TIMEOUT_MS*6;
+      const nativeQuery=async(sql:string,values:unknown[]=[],cleanup=false)=>{
+        const remaining=cleanup?READ_TIMEOUT_MS:Math.floor(deadline-performance.now());
+        if(remaining<1)throw new ResourceLimitError();
+        const config:QueryConfig & {query_timeout:number}={text:sql,values,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
+        try{return await client!.query(config);}catch(error){
+          const code=String((error as {code?:unknown})?.code??"");
+          if((error as Error)?.message==="Query read timeout"){destroy=true;throw new ResourceLimitError();}
+          if(!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){
+            destroy=true;throw new BoundaryError(503);
+          }
+          if(["57014","55P03"].includes(code))throw new ResourceLimitError();
+          throw error;
+        }
+      };
       const track = <V>(promise: Promise<V>) => {
         pending.push(promise);
         // Observe even an unawaited rejection, but preserve the caller's result.
@@ -58,27 +76,37 @@ export function createPinnedOwnershipUnit(pool: Pick<Pool, "connect">) {
             failed = true;
             return track(refused());
           }
-          return track(Promise.resolve().then(() => client!.query(sql, values)));
+          return track(Promise.resolve().then(() => nativeQuery(sql, values)));
         },
       });
+      let currentTx=tx;
       const db: OwnershipDatabase = Object.freeze({
         transaction<V>(nested: (transaction: Transaction) => Promise<V>): Promise<V> {
           if (!active) return refused();
-          return track(Promise.resolve().then(() => nested(tx)));
+          return track(Promise.resolve().then(() => nested(currentTx)));
         },
       });
       try {
         client = await pool.connect();
-        await client.query("BEGIN"); began = true; active = true;
-        // Pass the ORIGINAL Passport request, never a reconstructed principal.
-        const context = await createOrgContextResolver(db)(request);
-        if (context.actorUserId !== actor) throw new BoundaryError(401);
-        const result = await operation(Object.freeze({ db, tx, context }));
+        await nativeQuery("BEGIN"); began = true; active = true;
+        // Context, nested repositories and the caller share one allowance.
+        const result=await withTransactionReadBudget(tx,async guardedTx=>{
+          currentTx=guardedTx;
+          // Pass the ORIGINAL Passport request, never a reconstructed principal.
+          const context=await createOrgContextResolver(db)(request);
+          if(context.actorUserId!==actor)throw new BoundaryError(401);
+          const value=await operation(Object.freeze({db,tx:guardedTx,context}));
+          // Await queued work before the shared guard expires. This preserves
+          // the existing promise-drain/poisoning behavior for unawaited writes.
+          await Promise.allSettled(pending);
+          if(failed)throw new BoundaryError(503);
+          return value;
+        },deadline);
         active = false;
         await Promise.allSettled(pending);
         if (failed) throw new BoundaryError(503);
         commitAttempted = true;
-        const commit = await client.query("COMMIT");
+        const commit = await nativeQuery("COMMIT");
         // PostgreSQL can answer an aborted transaction's COMMIT with ROLLBACK.
         if (commit.command !== "COMMIT") throw new BoundaryError(503);
         committed = true;
@@ -86,13 +114,13 @@ export function createPinnedOwnershipUnit(pool: Pick<Pool, "connect">) {
       } catch (error) {
         active = false;
         await Promise.allSettled(pending);
-        if (client && began && !committed) {
-          try { await client.query("ROLLBACK"); }
+        if (client && began && !committed && !destroy) {
+          try { await nativeQuery("ROLLBACK",[],true); }
           catch { destroy = true; }
         }
         // A failed/ambiguous COMMIT must never put its client back in circulation.
         if (client && ((!began) || (commitAttempted && !committed))) destroy = true;
-        throw destroy ? new BoundaryError(503) : sanitized(error);
+        throw error instanceof ResourceLimitError ? error : destroy ? new BoundaryError(503) : sanitized(error);
       } finally {
         active = false;
         if (client) {

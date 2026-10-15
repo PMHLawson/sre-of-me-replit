@@ -1,3 +1,5 @@
+import React from "react";
+import { SessionText } from '@/components/session-text';
 import { format, parseISO } from 'date-fns';
 import { Pencil, Trash2, Clock, PlayCircle, StopCircle } from 'lucide-react';
 import { DOMAIN_POLICY, type Domain, type Session } from '@/store';
@@ -173,17 +175,7 @@ function SessionRow({ entry, variant, onEdit, onDelete }: SessionRowProps) {
               </span>
             )}
           </div>
-          {session.notes && (
-            <div
-              className={
-                isHistory
-                  ? 'text-sm text-muted-foreground mt-1 line-clamp-1'
-                  : 'text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2'
-              }
-            >
-              {session.notes}
-            </div>
-          )}
+          <SessionText session={session} />
         </div>
       </div>
       <div className="flex items-center gap-2 ml-3 shrink-0">

@@ -50,6 +50,8 @@ const buildPolicyState = (actualMinutes: number): PolicyStateResponse => {
     services: { [DOMAIN]: svc } as PolicyStateResponse['services'],
     composite_score: 50,
     composite_color: 'green',
+    windowSets: { w7: [], w14: [], w28: [], w42: [], prev7: ['previous'], deviationDayMap: {}, todayKey: 'today' },
+    sessionDays: { 's-1': 'previous' },
   };
 };
 

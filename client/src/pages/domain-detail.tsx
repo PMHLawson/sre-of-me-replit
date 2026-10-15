@@ -1,3 +1,5 @@
+import { SessionText, DeviationText } from '@/components/session-text';
+import { CurrentReadBoundary } from "@/components/current-read-boundary";
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { useLocation, useRoute } from 'wouter';
 import { format, parseISO } from 'date-fns';
@@ -445,7 +447,8 @@ const DomainIcon = ({ domain, className, style }: { domain: Domain; className?: 
 const formatDomainName = (d: string) =>
   d.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-export default function DomainDetail() {
+export default function DomainDetail() { return <CurrentReadBoundary><DomainDetailContent /></CurrentReadBoundary>; }
+function DomainDetailContent() {
   const [_, setLocation] = useLocation();
   const [, params] = useRoute('/domain/:domain');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -496,7 +499,8 @@ export default function DomainDetail() {
   // History range for the per-day tier strip — re-fetches /api/escalation-state
   // with ?days= so the timeline reflects the user's chosen lookback.
   // HISTORY_RANGE_OPTIONS is defined at module level and exported for testing.
-  const [historyDays, setHistoryDays] = useState(14);
+  const savedHistoryDays = useAppStore(s => s.escalationRangeDays);
+  const [historyDays, setHistoryDays] = useState(savedHistoryDays);
   useEffect(() => {
     fetchEscalationState(historyDays);
   }, [historyDays, fetchEscalationState]);
@@ -696,12 +700,12 @@ export default function DomainDetail() {
                   </span>
                 )}
               </div>
-              <p
+              <div
                 className="text-sm font-medium text-foreground mt-1 break-words"
                 data-testid="text-deviation-reason"
               >
-                {activeDeviation.reason}
-              </p>
+                <DeviationText deviation={activeDeviation} />
+              </div>
               <p className="text-xs text-muted-foreground mt-1 font-mono">
                 Since {format(parseISO(activeDeviation.startAt), 'MMM d, h:mm a')}
                 {activeDeviation.endAt
@@ -999,8 +1003,8 @@ export default function DomainDetail() {
                   {todaySessions.map((s) => (
                     <li key={s.id}>
                       <span className="font-semibold text-foreground">{s.durationMinutes}m</span>
-                      {s.notes ? (
-                        <span className="text-muted-foreground"> · {s.notes}</span>
+                      {s.notes || s.hasNotes || s.hasAnomalyNote ? (
+                        <div className="text-muted-foreground"><SessionText session={s} /></div>
                       ) : null}
                     </li>
                   ))}

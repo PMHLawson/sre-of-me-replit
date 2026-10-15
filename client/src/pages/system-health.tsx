@@ -1,7 +1,8 @@
+import { CurrentReadBoundary } from "@/components/current-read-boundary";
 import { useLocation } from 'wouter';
 import { useAppStore, Domain } from '@/store';
 import { ArrowLeft, Activity, BrainCircuit, Dumbbell, Music, ChevronRight, TrendingUp, TrendingDown, Minus } from 'lucide-react';
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { OverachievementBadge } from '@/components/overachievement-badge';
 
@@ -38,7 +39,8 @@ function escalationRationale(state: EscalationState, critDomains: string[], degD
   }
 }
 
-export default function SystemHealth() {
+export default function SystemHealth() { return <CurrentReadBoundary><SystemHealthContent /></CurrentReadBoundary>; }
+function SystemHealthContent() {
   const [_, setLocation] = useLocation();
   const sessions = useAppStore(state => state.sessions);
   const getDomainStatus = useAppStore(state => state.getDomainStatus);

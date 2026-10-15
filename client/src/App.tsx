@@ -4,7 +4,7 @@ import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import React, { useEffect, useMemo, useState } from "react";
-import { useAppStore } from "@/store";
+import { useAppStore, bindLegacyOwner } from "@/store";
 import { useAuth } from "@/hooks/use-auth";
 import { sanitizeDeepLinkPath } from "@/lib/notification-deeplink";
 import { createWorkspaceEntrySession, parseOnboardingStatus, type WorkspaceEntrySnapshot } from "@/lib/onboarding-api";
@@ -87,10 +87,7 @@ function WorkspaceGate({ ownerId }: { ownerId: string }) {
 }
 /** The fixed-domain store, effects and routes mount only after the owned legacy discriminator. */
 function LegacyShell({ ownerId }: { ownerId: string }) {
-  const fetchSessions = useAppStore(state => state.fetchSessions);
-  const fetchPolicyState = useAppStore(state => state.fetchPolicyState);
-  const fetchEscalationState = useAppStore(state => state.fetchEscalationState);
-  const fetchDeviations = useAppStore(state => state.fetchDeviations);
+  const refreshCurrent = useAppStore(state => state.refreshCurrent);
   const demoState = useAppStore(state => state.demoState);
   const setNotificationPermission = useAppStore(state => state.setNotificationPermission);
   const [, setLocation] = useLocation();
@@ -108,14 +105,15 @@ function LegacyShell({ ownerId }: { ownerId: string }) {
     }
   }, [setNotificationPermission, setLocation]);
   useEffect(() => {
-    if (demoState === "default") { void fetchSessions(); void fetchPolicyState(); void fetchEscalationState(); void fetchDeviations(); }
-  }, [ownerId, demoState, fetchSessions, fetchPolicyState, fetchEscalationState, fetchDeviations]);
+    if (demoState === "default") void refreshCurrent();
+  }, [ownerId, demoState, refreshCurrent]);
   return <><LegacyRouter/><p className="fixed bottom-2 left-1/2 -translate-x-1/2 text-[10px] italic text-muted-foreground/50 pointer-events-none select-none z-50"
     data-testid="text-anchor-shell">Protect what grows you.</p></>;
 }
 function AuthGate() {
   const { user, isLoading } = useAuth();
   const ownerId = user?.id;
+  bindLegacyOwner(ownerId ?? null);
   const queries = useQueryClient();
   try { bindActivityOwner(ownerId ?? null); } catch { bindActivityOwner(null); }
   useEffect(() => {
@@ -130,9 +128,8 @@ function AuthGate() {
   useEffect(() => {
     // Reset visible legacy state on owner departure. Personal routes never read it.
     // A complete legacy mutation/read generation refactor is separate work.
-    useAppStore.setState({ sessions: [], sessionsLoaded: false, policyState: null, policyStateLoaded: false,
-      escalationState: null, escalationStateLoaded: false, deviations: [], deviationsLoaded: false,
-      deletedSessions: [], deletedSessionsLoaded: false, deletedSessionsError: null, pendingNotifications: [], snoozeUntil: null, demoState: "default" });
+    useAppStore.getState().resetLegacyReads();
+    useAppStore.setState({ pendingNotifications: [], snoozeUntil: null, demoState: "default" });
     void queries.cancelQueries({ predicate: query => query.queryKey[0] !== "/api/auth/user" });
     queries.removeQueries({ predicate: query => query.queryKey[0] !== "/api/auth/user" });
   }, [ownerId, queries]);

@@ -1,3 +1,4 @@
+import { readSessionState, readHistoryPage, asSession, asDeviation, mergeById, readDetailStep, type DetailState } from "@/lib/legacy-history-api";
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
@@ -11,6 +12,11 @@ import type {
 export type Domain = 'martial-arts' | 'meditation' | 'fitness' | 'music';
 
 export interface Session {
+  textComplete?: boolean;
+  hasNotes?: boolean;
+  hasAnomalyNote?: boolean;
+  notesBytes?: number;
+  anomalyNoteBytes?: number;
   id: string;
   domain: Domain;
   durationMinutes: number;
@@ -71,6 +77,8 @@ export interface DomainStatus {
  * serialized to ISO strings (matches the wire format from /api/deviations).
  */
 export interface Deviation extends Omit<ServerDeviation, 'startAt' | 'endAt' | 'endedAt' | 'deletedAt'> {
+  textComplete?: boolean;
+  hasReason?: boolean;
   startAt: string;
   endAt: string | null;
   endedAt: string | null;
@@ -93,6 +101,39 @@ export interface DeviationPatch {
 }
 
 interface AppState {
+  dataOwner: string | null;
+  currentAsOf: string | null;
+  escalationRangeDays: number;
+  contextFrom: string | null;
+  sessionsError: string | null;
+  policyStateError: string | null;
+  escalationStateError: string | null;
+  deviationsError: string | null;
+  historySessions: Session[];
+  historyLoaded: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+  historyCursor: string | null;
+  historyComplete: boolean;
+  deletedLoading: boolean;
+  deletedCursor: string | null;
+  deletedComplete: boolean;
+  deviationPages: Deviation[];
+  deviationPagesLoaded: boolean;
+  deviationPagesLoading: boolean;
+  deviationPagesError: string | null;
+  deviationPagesCursor: string | null;
+  deviationPagesComplete: boolean;
+  sessionDetails: Record<string, DetailState<Session>>;
+  deviationDetails: Record<string, DetailState<Deviation>>;
+  unsavedSessionDraft: Omit<Session, 'id'> | null;
+  refreshCurrent: (days?: number) => Promise<void>;
+  fetchHistory: (more?: boolean) => Promise<void>;
+  fetchDeviationPages: (more?: boolean) => Promise<void>;
+  fetchSessionDetail: (id: string, more?: boolean) => Promise<void>;
+  fetchDeviationDetail: (id: string, more?: boolean) => Promise<void>;
+  invalidateAfterMutation: () => Promise<void>;
+  resetLegacyReads: () => void;
   sessions: Session[];
   sessionsLoaded: boolean;
   policyState: PolicyStateResponse | null;
@@ -111,7 +152,7 @@ interface AppState {
   deletedSessionsLoaded: boolean;
   /** Non-null when the last fetchDeletedSessions call failed. */
   deletedSessionsError: string | null;
-  fetchDeletedSessions: () => Promise<void>;
+  fetchDeletedSessions: (more?: boolean) => Promise<void>;
   restoreSession: (id: string) => Promise<boolean>;
   fetchDeviations: () => Promise<void>;
   createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
@@ -298,12 +339,17 @@ export const apiBackedDomainStatus = (
   const svc = policyState.services[domain];
   if (!svc) {
     // Defensive fallback if API omits a domain
-    return calculateDomainStatus(sessions, domain);
+    throw new Error('Current domain result unavailable');
   }
   // Use API actual_minutes as the displayed "current 7d" total, and pair it with
   // the locally computed previous-window total for trend. This keeps the trend
   // arrow consistent with the displayed (recentMinutes - previousWeekMinutes) delta.
-  const { previousWeekMinutes } = computeWindowMinutes(sessions, domain);
+  const keys = policyState.windowSets?.prev7;
+  const mapping = policyState.sessionDays;
+  if (!keys || !mapping) throw new Error('Current window metadata unavailable');
+  const previous = new Set(keys);
+  const previousWeekMinutes = sessions.filter(row => row.domain === domain && previous.has(mapping[row.id]))
+    .reduce((total, row) => total + row.durationMinutes, 0);
   const recentMinutes = svc.actual_minutes;
   return {
     score: Math.round(svc.service_score),
@@ -346,242 +392,229 @@ export function findActiveDeviationAt(
   return deviations.find((d) => isDeviationActiveAt(d, domain, at));
 }
 
-let policyStateRequestCounter = 0;
-let policyStateAbortController: AbortController | null = null;
+let legacyOwner: string | null = null;
+let ownerGeneration = 0;
+let selectedHistoryDays = 14;
+const requests = new Map<string, { id: symbol; controller: AbortController }>();
+function cancelReads() { for (const r of Array.from(requests.values())) r.controller.abort(); requests.clear(); }
+export function bindLegacyOwner(owner: string | null) {
+  if (owner === legacyOwner) return;
+  legacyOwner = owner; ownerGeneration += 1; selectedHistoryDays = 14; cancelReads();
+}
+export const boundLegacyOwner = () => legacyOwner;
+function requestScope(key: string) {
+  requests.get(key)?.controller.abort();
+  const id = Symbol(key), controller = new AbortController(), generation = ownerGeneration, owner = legacyOwner;
+  requests.set(key, { id, controller });
+  return { signal: controller.signal, owner,
+    current: () => owner !== null && owner === legacyOwner && generation === ownerGeneration &&
+      requests.get(key)?.id === id && !controller.signal.aborted };
+}
+const initialReads = () => ({
+  dataOwner: null as string | null, currentAsOf: null as string | null, contextFrom: null as string | null, escalationRangeDays: 14,
+  sessions: [] as Session[], sessionsLoaded: false, sessionsError: null as string | null,
+  policyState: null as PolicyStateResponse | null, policyStateLoaded: false, policyStateError: null as string | null,
+  escalationState: null as EscalationStateResponse | null, escalationStateLoaded: false, escalationStateError: null as string | null,
+  deviations: [] as Deviation[], deviationsLoaded: false, deviationsError: null as string | null,
+  historySessions: [] as Session[], historyLoaded: false, historyLoading: false, historyError: null as string | null,
+  historyCursor: null as string | null, historyComplete: false,
+  deletedSessions: [] as Session[], deletedSessionsLoaded: false, deletedSessionsError: null as string | null,
+  deletedLoading: false, deletedCursor: null as string | null, deletedComplete: false,
+  deviationPages: [] as Deviation[], deviationPagesLoaded: false, deviationPagesLoading: false,
+  deviationPagesError: null as string | null, deviationPagesCursor: null as string | null, deviationPagesComplete: false,
+  sessionDetails: {} as Record<string, DetailState<Session>>, deviationDetails: {} as Record<string, DetailState<Deviation>>,
+  unsavedSessionDraft: null as Omit<Session, "id"> | null,
+});
 
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
-      sessions: [],
-      sessionsLoaded: false,
-      policyState: null,
-      policyStateLoaded: false,
-      escalationState: null,
-      escalationStateLoaded: false,
-      deviations: [],
-      deviationsLoaded: false,
+      ...initialReads(),
       theme: 'dark',
       demoState: 'default',
 
-      fetchSessions: async () => {
+      resetLegacyReads: () => set(initialReads()),
+      refreshCurrent: async (days?: number) => {
+        if (get().demoState !== "default") return;
+        if (days !== undefined && days === selectedHistoryDays && get().sessionsLoaded && !get().sessionsError) return;
+        if (days !== undefined) { selectedHistoryDays = days; set({ escalationRangeDays: days }); }
+        const scope = requestScope("current");
+        if (!scope.owner) return;
+        set({ sessionsLoaded: false, policyStateLoaded: false, escalationStateLoaded: false, deviationsLoaded: false,
+          sessionsError: null, policyStateError: null, escalationStateError: null, deviationsError: null });
         try {
-          const res = await fetch('/api/sessions');
-          if (!res.ok) throw new Error('Failed to fetch sessions');
-          const data: Session[] = await res.json();
-          set({ sessions: data, sessionsLoaded: true });
-        } catch (err) {
-          console.error('fetchSessions error:', err);
-          set({ sessionsLoaded: true });
+          const bundle = await readSessionState(selectedHistoryDays, scope.signal, scope.owner);
+          if (!scope.current()) return;
+          set({ dataOwner: scope.owner, currentAsOf: bundle.asOf, contextFrom: bundle.context.fromInclusive,
+            sessions: bundle.context.sessions.map(asSession), deviations: bundle.context.deviations.map(asDeviation),
+            policyState: bundle.policyState, escalationState: bundle.escalationState,
+            sessionsLoaded: true, policyStateLoaded: true, escalationStateLoaded: true, deviationsLoaded: true });
+        } catch {
+          if (!scope.current()) return;
+          const message = "The complete current window could not be verified. Please retry.";
+          set({ sessionsLoaded: false, policyStateLoaded: false, escalationStateLoaded: false, deviationsLoaded: false,
+            sessionsError: message, policyStateError: message, escalationStateError: message, deviationsError: message });
         }
       },
+      fetchSessions: async () => get().refreshCurrent(),
+      fetchPolicyState: async () => get().refreshCurrent(),
+      fetchEscalationState: async (days) => get().refreshCurrent(days),
+      fetchDeviations: async () => get().refreshCurrent(),
 
-      fetchPolicyState: async () => {
-        const requestId = ++policyStateRequestCounter;
-        if (policyStateAbortController) {
-          policyStateAbortController.abort();
-        }
-        const controller = new AbortController();
-        policyStateAbortController = controller;
+      fetchHistory: async (more = false) => {
+        if (get().demoState !== "default") return;
+        if (get().historyLoading || (more && (!get().historyLoaded || get().historyComplete))) return;
+        const scope = requestScope("history"), cursor = more ? get().historyCursor : null;
+        if (!scope.owner) return;
+        set({ historyLoading: true, historyError: null });
         try {
-          const res = await fetch('/api/policy-state', { signal: controller.signal });
-          if (!res.ok) throw new Error('Failed to fetch policy state');
-          const data: PolicyStateResponse = await res.json();
-          if (requestId !== policyStateRequestCounter) return;
-          set({ policyState: data, policyStateLoaded: true });
-        } catch (err) {
-          if ((err as { name?: string })?.name === 'AbortError') return;
-          if (requestId !== policyStateRequestCounter) return;
-          console.error('fetchPolicyState error:', err);
-          set({ policyStateLoaded: true });
+          const page = await readHistoryPage("sessions", cursor, scope.signal, scope.owner);
+          if (!scope.current()) return;
+          const rows = page.items.map(row => asSession(row as Parameters<typeof asSession>[0]));
+          set({ historySessions: more ? mergeById(get().historySessions, rows) : rows, historyLoading: false,
+            historyLoaded: true, historyCursor: page.nextCursor, historyComplete: page.complete });
+        } catch {
+          if (scope.current()) set({ historyLoading: false, historyError: "Could not load practice history." });
         }
       },
-
-      fetchEscalationState: async (days?: number) => {
+      fetchDeletedSessions: async (more = false) => {
+        if (get().deletedLoading || (more && (!get().deletedSessionsLoaded || get().deletedComplete))) return;
+        const scope = requestScope("deleted"), cursor = more ? get().deletedCursor : null;
+        if (!scope.owner) return;
+        set({ deletedLoading: true, deletedSessionsError: null });
         try {
-          const url = typeof days === 'number'
-            ? `/api/escalation-state?days=${days}`
-            : '/api/escalation-state';
-          const res = await fetch(url);
-          if (!res.ok) throw new Error('Failed to fetch escalation state');
-          const data: EscalationStateResponse = await res.json();
-          set({ escalationState: data, escalationStateLoaded: true });
-        } catch (err) {
-          console.error('fetchEscalationState error:', err);
-          set({ escalationStateLoaded: true });
+          const page = await readHistoryPage("deleted", cursor, scope.signal, scope.owner);
+          if (!scope.current()) return;
+          const rows = page.items.map(row => asSession(row as Parameters<typeof asSession>[0]));
+          set({ deletedSessions: more ? mergeById(get().deletedSessions, rows) : rows, deletedLoading: false,
+            deletedSessionsLoaded: true, deletedCursor: page.nextCursor, deletedComplete: page.complete });
+        } catch {
+          if (scope.current()) set({ deletedLoading: false, deletedSessionsError: "Could not load deleted practices." });
         }
       },
-
+      fetchDeviationPages: async (more = false) => {
+        if (get().deviationPagesLoading || (more && (!get().deviationPagesLoaded || get().deviationPagesComplete))) return;
+        const scope = requestScope("deviationPages"), cursor = more ? get().deviationPagesCursor : null;
+        if (!scope.owner) return;
+        set({ deviationPagesLoading: true, deviationPagesError: null });
+        try {
+          const page = await readHistoryPage("deviations", cursor, scope.signal, scope.owner);
+          if (!scope.current()) return;
+          const rows = page.items.map(row => asDeviation(row as Parameters<typeof asDeviation>[0]));
+          set({ deviationPages: more ? mergeById(get().deviationPages, rows) : rows, deviationPagesLoading: false,
+            deviationPagesLoaded: true, deviationPagesCursor: page.nextCursor, deviationPagesComplete: page.complete });
+        } catch {
+          if (scope.current()) set({ deviationPagesLoading: false, deviationPagesError: "Could not load deviation history." });
+        }
+      },
+      fetchSessionDetail: async (id, more = false) => {
+        const previous = more ? get().sessionDetails[id] : undefined;
+        if (more && get().sessionDetails[id]?.status === "loading") return;
+        const scope = requestScope("sessionDetail:" + id);
+        if (!scope.owner) return;
+        set(state => ({ sessionDetails: { ...state.sessionDetails, [id]: { ...previous, status: "loading" } } }));
+        try {
+          const result = await readDetailStep("sessions", id, previous, scope.signal, scope.owner) as DetailState<Session>;
+          if (scope.current()) set(state => ({ sessionDetails: { ...state.sessionDetails, [id]: result } }));
+        } catch {
+          if (scope.current()) set(state => ({ sessionDetails: { ...state.sessionDetails,
+            [id]: { status: "error", error: "Could not verify this saved text. Restart loading." } } }));
+        }
+      },
+      fetchDeviationDetail: async (id, more = false) => {
+        const previous = more ? get().deviationDetails[id] : undefined;
+        if (more && get().deviationDetails[id]?.status === "loading") return;
+        const scope = requestScope("deviationDetail:" + id);
+        if (!scope.owner) return;
+        set(state => ({ deviationDetails: { ...state.deviationDetails, [id]: { ...previous, status: "loading" } } }));
+        try {
+          const result = await readDetailStep("deviations", id, previous, scope.signal, scope.owner) as DetailState<Deviation>;
+          if (scope.current()) set(state => ({ deviationDetails: { ...state.deviationDetails, [id]: result } }));
+        } catch {
+          if (scope.current()) set(state => ({ deviationDetails: { ...state.deviationDetails,
+            [id]: { status: "error", error: "Could not verify this saved reason. Restart loading." } } }));
+        }
+      },
+      invalidateAfterMutation: async () => {
+        const historyWasLoaded = get().historyLoaded, deletedWasLoaded = get().deletedSessionsLoaded,
+          deviationsWereLoaded = get().deviationPagesLoaded;
+        cancelReads();
+        set({ sessionDetails: {}, deviationDetails: {}, historyLoading: false, deletedLoading: false,
+          deviationPagesLoading: false, historyComplete: false, deletedComplete: false, deviationPagesComplete: false,
+          historyLoaded: false, historyCursor: null, historySessions: [],
+          deletedSessionsLoaded: false, deletedCursor: null, deletedSessions: [],
+          deviationPagesLoaded: false, deviationPagesCursor: null, deviationPages: [] });
+        await Promise.all([get().refreshCurrent(),
+          ...(historyWasLoaded ? [get().fetchHistory()] : []),
+          ...(deletedWasLoaded ? [get().fetchDeletedSessions()] : []),
+          ...(deviationsWereLoaded ? [get().fetchDeviationPages()] : [])]);
+      },
       updateSession: async (id, patch, reason) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/sessions/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...patch, reason }),
-          });
-          if (!res.ok) throw new Error('Failed to update session');
+          const res = await fetch("/api/sessions/" + encodeURIComponent(id), { method: "PATCH",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, reason }) });
+          if (!res.ok) return null;
           const saved: Session = await res.json();
-          // Refresh server-authoritative session list + derived state so the
-          // dashboard, policy, and escalation surfaces all reflect the edit
-          // (ordering, filters, and computed fields stay consistent).
-          await Promise.all([
-            get().fetchSessions(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return saved;
-        } catch (err) {
-          console.error('updateSession error:', err);
-          return null;
-        }
+          if (owner !== legacyOwner || generation !== ownerGeneration) return null;
+          await get().invalidateAfterMutation(); return saved;
+        } catch { return null; }
       },
-
       deleteSession: async (id) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
-          if (!res.ok) throw new Error('Failed to delete session');
-          await Promise.all([
-            get().fetchSessions(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          // If the deleted-sessions list was already loaded, refresh it so the
-          // newly-deleted row appears in Recently Deleted without a manual reopen.
-          if (get().deletedSessionsLoaded) {
-            await get().fetchDeletedSessions();
-          }
-          return true;
-        } catch (err) {
-          console.error('deleteSession error:', err);
-          return false;
-        }
+          const res = await fetch("/api/sessions/" + encodeURIComponent(id), { method: "DELETE" });
+          if (!res.ok || owner !== legacyOwner || generation !== ownerGeneration) return false;
+          await get().invalidateAfterMutation(); return true;
+        } catch { return false; }
       },
-
-      deletedSessions: [],
-      deletedSessionsLoaded: false,
-      deletedSessionsError: null,
-
-      fetchDeletedSessions: async () => {
-        // Reset loaded + error so the panel returns to its loading state on
-        // the initial fetch and on every explicit retry.
-        set({ deletedSessionsLoaded: false, deletedSessionsError: null });
-        try {
-          const res = await fetch('/api/sessions/deleted');
-          if (!res.ok) throw new Error('Failed to fetch deleted sessions');
-          const data: Session[] = await res.json();
-          set({ deletedSessions: data, deletedSessionsLoaded: true });
-        } catch (err) {
-          console.error('fetchDeletedSessions error:', err);
-          set({
-            deletedSessionsLoaded: true,
-            deletedSessionsError: 'Could not load deleted sessions.',
-          });
-        }
-      },
-
       restoreSession: async (id) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/sessions/${id}/restore`, { method: 'POST' });
-          if (!res.ok) throw new Error('Failed to restore session');
-          // Refresh active + deleted lists and derived state so the restored
-          // row is back in History and the SLO/escalation surfaces re-include it.
-          await Promise.all([
-            get().fetchSessions(),
-            get().fetchDeletedSessions(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return true;
-        } catch (err) {
-          console.error('restoreSession error:', err);
-          return false;
-        }
+          const res = await fetch("/api/sessions/" + encodeURIComponent(id) + "/restore", { method: "POST" });
+          if (!res.ok || owner !== legacyOwner || generation !== ownerGeneration) return false;
+          await get().invalidateAfterMutation(); return true;
+        } catch { return false; }
       },
-
-      fetchDeviations: async () => {
-        try {
-          const res = await fetch('/api/deviations');
-          if (!res.ok) throw new Error('Failed to fetch deviations');
-          const data: Deviation[] = await res.json();
-          set({ deviations: data, deviationsLoaded: true });
-        } catch (err) {
-          console.error('fetchDeviations error:', err);
-          set({ deviationsLoaded: true });
-        }
-      },
-
       createDeviation: async (draft) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch('/api/deviations', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(draft),
-          });
-          if (!res.ok) throw new Error('Failed to create deviation');
+          const res = await fetch("/api/deviations", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(draft) });
+          if (!res.ok) return null;
           const saved: Deviation = await res.json();
-          await Promise.all([
-            get().fetchDeviations(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return saved;
-        } catch (err) {
-          console.error('createDeviation error:', err);
-          return null;
-        }
+          if (owner !== legacyOwner || generation !== ownerGeneration) return null;
+          await get().invalidateAfterMutation(); return saved;
+        } catch { return null; }
       },
-
       updateDeviation: async (id, patch) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/deviations/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch),
-          });
-          if (!res.ok) throw new Error('Failed to update deviation');
+          const res = await fetch("/api/deviations/" + encodeURIComponent(id), { method: "PATCH",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+          if (!res.ok) return null;
           const saved: Deviation = await res.json();
-          await Promise.all([
-            get().fetchDeviations(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return saved;
-        } catch (err) {
-          console.error('updateDeviation error:', err);
-          return null;
-        }
+          if (owner !== legacyOwner || generation !== ownerGeneration) return null;
+          await get().invalidateAfterMutation(); return saved;
+        } catch { return null; }
       },
-
       endDeviation: async (id) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/deviations/${id}/end`, { method: 'POST' });
-          if (!res.ok) throw new Error('Failed to end deviation');
+          const res = await fetch("/api/deviations/" + encodeURIComponent(id) + "/end", { method: "POST" });
+          if (!res.ok) return null;
           const saved: Deviation = await res.json();
-          await Promise.all([
-            get().fetchDeviations(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return saved;
-        } catch (err) {
-          console.error('endDeviation error:', err);
-          return null;
-        }
+          if (owner !== legacyOwner || generation !== ownerGeneration) return null;
+          await get().invalidateAfterMutation(); return saved;
+        } catch { return null; }
       },
-
       deleteDeviation: async (id) => {
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch(`/api/deviations/${id}`, { method: 'DELETE' });
-          if (!res.ok) throw new Error('Failed to delete deviation');
-          await Promise.all([
-            get().fetchDeviations(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-          ]);
-          return true;
-        } catch (err) {
-          console.error('deleteDeviation error:', err);
-          return false;
-        }
+          const res = await fetch("/api/deviations/" + encodeURIComponent(id), { method: "DELETE" });
+          if (!res.ok || owner !== legacyOwner || generation !== ownerGeneration) return false;
+          await get().invalidateAfterMutation(); return true;
+        } catch { return false; }
       },
 
       snoozeUntil: null,
@@ -637,15 +670,10 @@ export const useAppStore = create<AppState>()(
 
       setDemoState: (demoState) => {
         if (demoState === 'default') {
-          Promise.all([
-            get().fetchSessions(),
-            get().fetchPolicyState(),
-            get().fetchEscalationState(),
-            get().fetchDeviations(),
-          ]).then(() => {
-            set({ demoState });
-          });
+          set({ demoState });
+          void get().refreshCurrent();
         } else {
+          cancelReads();
           set({
             demoState,
             sessions: generateMockSessions(demoState),
@@ -671,43 +699,32 @@ export const useAppStore = create<AppState>()(
       },
 
       addSession: async (session) => {
-        const { demoState } = get();
-        if (demoState !== 'default') {
-          const local: Session = { ...session, id: crypto.randomUUID() } as Session;
-          set((state) => ({ sessions: [local, ...state.sessions] }));
-          return local;
+        if (get().demoState !== "default") {
+          const local = { ...session, id: crypto.randomUUID() } as Session;
+          set(state => ({ sessions: [local, ...state.sessions] })); return local;
         }
+        const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch('/api/sessions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(session),
-          });
-          if (!res.ok) throw new Error('Failed to save session');
+          const res = await fetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(session) });
+          if (!res.ok) throw new Error();
           const saved: Session = await res.json();
-          set((state) => ({ sessions: [saved, ...state.sessions] }));
-          // Refresh API-backed policy + escalation state so server-computed surfaces reflect the new session.
-          get().fetchPolicyState();
-          get().fetchEscalationState();
-          return saved;
-        } catch (err) {
-          console.error('addSession error:', err);
-          // Fail-soft: still surface the new entry locally so the user
-          // doesn't lose their input. The toast caller treats `null` as
-          // "saved-but-not-confirmed" and will skip the Undo affordance.
-          set((state) => ({
-            sessions: [{ ...session, id: crypto.randomUUID() } as Session, ...state.sessions]
-          }));
+          if (owner !== legacyOwner || generation !== ownerGeneration) return null;
+          set({ unsavedSessionDraft: null }); await get().invalidateAfterMutation(); return saved;
+        } catch {
+          if (owner === legacyOwner && generation === ownerGeneration) set({ unsavedSessionDraft: session });
           return null;
         }
       },
 
       getDomainStatus: (domain: Domain) => {
         const { sessions, policyState, demoState } = get();
-        if (demoState === 'default' && policyState) {
+        if (demoState === 'default' && policyState && get().sessionsLoaded && !get().sessionsError &&
+            get().dataOwner === legacyOwner && get().escalationStateLoaded && get().deviationsLoaded) {
           return apiBackedDomainStatus(policyState, sessions, domain);
         }
-        return calculateDomainStatus(sessions, domain);
+        if (demoState !== 'default') return calculateDomainStatus(sessions, domain);
+        throw new Error('Current results unavailable');
       },
 
       getWeakestDomain: () => {
@@ -718,6 +735,8 @@ export const useAppStore = create<AppState>()(
         let isDegradedOrCritical = false;
 
         const useApi = demoState === 'default' && policyState;
+        if (demoState === 'default' && (!useApi || !get().sessionsLoaded || get().sessionsError ||
+          get().dataOwner !== legacyOwner || !get().escalationStateLoaded || !get().deviationsLoaded)) throw new Error('Current results unavailable');
 
         domains.forEach(d => {
           const ds = useApi

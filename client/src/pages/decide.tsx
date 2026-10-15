@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { CurrentReadBoundary } from "@/components/current-read-boundary";
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, AlertTriangle, ShieldCheck, HelpCircle, Check, Info } from 'lucide-react';
 import { useAppStore } from '@/store';
@@ -11,7 +12,8 @@ type Priority = 'P1' | 'P2' | 'P3' | null;
 // so the user re-classifies the demand from scratch.
 const DECIDE_INACTIVITY_MS = 30_000;
 
-export default function Decide() {
+export default function Decide() { return <CurrentReadBoundary><DecideContent /></CurrentReadBoundary>; }
+function DecideContent() {
   const [_, setLocation] = useLocation();
   const [priority, setPriority] = useState<Priority>(null);
 

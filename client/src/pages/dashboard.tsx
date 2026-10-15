@@ -1,3 +1,4 @@
+import { CurrentReadBoundary } from "@/components/current-read-boundary";
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
@@ -280,7 +281,8 @@ function ConnectedDomainCard({ domain }: { domain: Domain }) {
   );
 }
 
-export default function Dashboard() {
+export default function Dashboard() { return <CurrentReadBoundary><DashboardContent /></CurrentReadBoundary>; }
+function DashboardContent() {
   const [_, setLocation] = useLocation();
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);

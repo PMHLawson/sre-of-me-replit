@@ -2,8 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import express from "express";
 import { createServer } from "node:http";
 
-const mocks = vi.hoisted(() => ({ updateSession: vi.fn(), getSessionsSince: vi.fn() }));
-vi.mock("./storage", () => ({ storage: mocks }));
+const mocks = vi.hoisted(() => ({ updateSession: vi.fn(), baseline: vi.fn() }));
+vi.mock("./storage", () => ({ storage: mocks, historyReads: { baseline:mocks.baseline } }));
 vi.mock("./replit_integrations/auth/storage", () => ({ authStorage: {} }));
 // Synthetic principal only: this exercises the real route, not the auth provider.
 vi.mock("./replit_integrations/auth", () => ({
@@ -37,7 +37,7 @@ afterAll(async () => {
 });
 beforeEach(() => {
   mocks.updateSession.mockReset();
-  mocks.getSessionsSince.mockReset();
+  mocks.baseline.mockReset();
   mocks.updateSession.mockImplementation(async (_user, _id, { reason: _reason, ...patch }) => ({
     ...existing, ...patch,
     timestamp: patch.timestamp ? new Date(patch.timestamp) : existing.timestamp,
@@ -143,7 +143,7 @@ describe("mature anomaly-check HTTP serialization", () => {
     vi.setSystemTime(now);
     try {
       expect(detectAnomaly("music", 60, samples, { now }).zScore).toBe(Infinity);
-      mocks.getSessionsSince.mockResolvedValue(samples);
+      mocks.baseline.mockResolvedValue(samples);
       const response = await fetch(`${base}/api/sessions/anomaly-check`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ domain: "music", durationMinutes: 60 }),
@@ -155,9 +155,7 @@ describe("mature anomaly-check HTTP serialization", () => {
         mean: 30, stdDev: 0, zScore: 9999,
       });
       expect(Number.isFinite(body.zScore)).toBe(true);
-      expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(
-        existing.userId, new Date("2026-08-22T12:00:00Z"),
-      );
+      expect(mocks.baseline).toHaveBeenCalledExactlyOnceWith(existing.userId,now,"music",undefined);
       expect(mocks.updateSession).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -192,8 +190,9 @@ describe("edited-session anomaly baseline exclusion", () => {
       { ...existing, id: "other-domain", domain: "fitness", durationMinutes: 900 },
     ];
     // Synthetic storage obeys the real history query's user/deletion/cutoff contract.
-    mocks.getSessionsSince.mockImplementation(async (userId: string, cutoff: Date) =>
-      rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= cutoff));
+    mocks.baseline.mockImplementation(async (userId: string, at: Date, domain:string, excludeId?:string) =>
+      rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= new Date(at.getTime()-42*86400000) &&
+        s.timestamp<=at && s.domain===domain && s.id!==excludeId));
   });
   afterEach(() => vi.useRealTimers());
 
@@ -201,14 +200,16 @@ describe("edited-session anomaly baseline exclusion", () => {
     expect(await preview({ excludeSessionId: flagged.id, userId: "forged-user" })).toEqual({
       status: 200, body: { isAnomaly: true, coldStart: false, sampleCount: 8, mean: 30, stdDev: 10, zScore: 2.1 },
     });
-    expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+    expect(mocks.baseline).toHaveBeenCalledOnce();
+    expect(mocks.baseline.mock.calls[0].slice(0,3)).toEqual([existing.userId,now,"music"]);
   });
   it.each([undefined, "unmatched-session", "other-owner-session"])(
     "preserves existing create behavior for missing/unmatched/other-owner exclusion %s", async excludeSessionId => {
       expect(await preview({ excludeSessionId })).toEqual({
         status: 200, body: detectAnomaly("music", 51, [...peers, flagged], { now }),
       });
-      expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+      expect(mocks.baseline).toHaveBeenCalledOnce();
+    expect(mocks.baseline.mock.calls[0].slice(0,3)).toEqual([existing.userId,now,"music"]);
     },
   );
   it("independently demonstrates the original self-dilution from2.10 to1.62", () => {
@@ -222,14 +223,16 @@ describe("edited-session anomaly baseline exclusion", () => {
     "excludes an exact matching opaque identifier %# without an alphabet or length policy", async id => {
       const rows = [...peers, { ...flagged, id },
         { ...flagged, id, userId: "another-synthetic-user", durationMinutes: 900 }];
-      mocks.getSessionsSince.mockImplementation(async (userId: string, cutoff: Date) =>
-        rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= cutoff));
+      mocks.baseline.mockImplementation(async (userId: string, at: Date, domain:string, excludeId?:string) =>
+        rows.filter(s => s.userId === userId && !s.deletedAt && s.timestamp >= new Date(at.getTime()-42*86400000) &&
+          s.timestamp<=at && s.domain===domain && s.id!==excludeId));
       expect(await preview({ excludeSessionId: id, userId: "forged-user" })).toEqual({
         status: 200, body: { isAnomaly: true, coldStart: false, sampleCount: 8, mean: 30, stdDev: 10, zScore: 2.1 },
       });
       // Only the existing scoped history query runs; the ID is not a query
       // argument, an ownership lookup, or interpolated SQL.
-      expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+      expect(mocks.baseline).toHaveBeenCalledOnce();
+    expect(mocks.baseline.mock.calls[0].slice(0,3)).toEqual([existing.userId,now,"music"]);
       expect(mocks.updateSession).not.toHaveBeenCalled();
     },
   );
@@ -237,7 +240,8 @@ describe("edited-session anomaly baseline exclusion", () => {
     expect(await preview({ excludeSessionId: "'); DROP TABLE sessions; --" })).toEqual({
       status: 200, body: detectAnomaly("music", 51, [...peers, flagged], { now }),
     });
-    expect(mocks.getSessionsSince).toHaveBeenCalledExactlyOnceWith(existing.userId, new Date("2026-08-22T12:00:00Z"));
+    expect(mocks.baseline).toHaveBeenCalledOnce();
+    expect(mocks.baseline.mock.calls[0].slice(0,3)).toEqual([existing.userId,now,"music"]);
     expect(mocks.updateSession).not.toHaveBeenCalled();
   });
   it.each([null, "", {}, [], 123, true])(
@@ -245,7 +249,7 @@ describe("edited-session anomaly baseline exclusion", () => {
       const result = await preview({ excludeSessionId });
       expect(result.status).toBe(400);
       expect(result.body.message).toBe("Invalid anomaly-check request");
-      expect(mocks.getSessionsSince).not.toHaveBeenCalled();
+      expect(mocks.baseline).not.toHaveBeenCalled();
     },
   );
 });

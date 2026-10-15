@@ -46,7 +46,7 @@ describe("pinned ownership unit: actual owned PostgreSQL", () => {
         return (await tx.query("SELECT pg_backend_pid() pid,txid_current() tx")).rows[0];
       });
       expect(nested).toEqual(before);
-      expect(Object.isFrozen(u)).toBe(true);
+      expect(Object.isFrozen(u)).toBe(true);expect(Object.isFrozen(u.tx)).toBe(true);
       return "committed";
     });
     expect(result).toBe("committed");expect(connects).toBe(1);
@@ -134,7 +134,9 @@ describe("pinned unit connection failure cleanup (injected transport only)",()=>
   it("destroys uncertain BEGIN/COMMIT and failed rollback clients exactly once without ending the caller's pool",async()=>{
     for(const failure of ["BEGIN","COMMIT","ROLLBACK"]){
       const releases:boolean[]=[],calls:string[]=[];
-      const client:any={query:async(sql:string)=>{
+      const client:any={query:async(input:string|{text:string;query_timeout:number})=>{
+        const sql=typeof input==="string"?input:input.text;
+        if(typeof input!=="string"){expect(input.query_timeout).toBeGreaterThan(0);expect(input.query_timeout).toBeLessThanOrEqual(2500);}
         calls.push(sql);if(sql===failure)throw Error("private transport");
         if(sql.startsWith("SELECT id FROM"))return {rows:[{id:"test"}],rowCount:1};
         if(sql.includes("FROM public.organization_members"))return {rows:[{org_id:"org",user_id:"test",role:"owner",created_at:0,updated_at:0}],rowCount:1};
@@ -148,7 +150,9 @@ describe("pinned unit connection failure cleanup (injected transport only)",()=>
     }
   });
   it("never treats PostgreSQL's ROLLBACK response to COMMIT as a successful write",async()=>{
-    const releases:boolean[]=[],client:any={query:async(sql:string)=>{
+    const releases:boolean[]=[],client:any={query:async(input:string|{text:string;query_timeout:number})=>{
+      const sql=typeof input==="string"?input:input.text;
+      if(typeof input!=="string"){expect(input.query_timeout).toBeGreaterThan(0);expect(input.query_timeout).toBeLessThanOrEqual(2500);}
       if(sql.startsWith("SELECT id FROM"))return {rows:[{id:"test"}]};
       if(sql.includes("FROM public.organization_members"))return {rows:[{org_id:"org",user_id:"test",role:"owner",created_at:0,updated_at:0}]};
       if(sql.includes("FROM public.organizations"))return {rows:[{org_id:"org",rollout_mode:"legacy"}]};

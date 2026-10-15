@@ -282,7 +282,16 @@ describe("actual scoped repositories and atomic audit",()=>{
     await unchangedOnReject(()=>stores.c.domains.create({domainId:"collision",slug:"same-slug",displayName:"collision"},reason),503);
   });
   it("generated query scope includes both org and owner, and composite keys in complete predicates",()=>{
-    for(const {sql,parameters} of f.queries.filter(q=>/^(SELECT \*|UPDATE|DELETE)/.test(q.sql.trim())&&!q.sql.includes("audit_events"))){
+    for(const {sql:wrapped,parameters} of f.queries){
+      // Classify the real repository SELECT, not the admission projection or
+      // its timeout-control statements. Keep both owner and actor boundaries.
+      const marker="WITH __bounded AS MATERIALIZED (";
+      const sql=wrapped.includes(marker)?wrapped.split(marker)[1].split("),\n    __measured AS")[0]:wrapped;
+      if(!/^(SELECT \*|UPDATE|DELETE)/.test(sql.trim()))continue;
+      if(sql.includes("FROM public.audit_events")){
+        expect(sql).toContain("org_id=$1 AND actor_kind='user' AND actor_user_id=$2");
+        expect(parameters[0]).toMatch(/^(one|two)$/);expect(parameters[1]).toMatch(/^[abc]$/);continue;
+      }
       expect(sql).toContain("org_id=$1 AND owner_user_id=$2");expect(parameters[0]).toMatch(/^(one|two)$/);expect(parameters[1]).toMatch(/^[abc]$/);
       if(/FROM public.dimension_definitions.*measurement_id=\$4/s.test(sql))expect(sql).toContain("policy_version_id=$3 AND measurement_id=$4");
       if(/FROM public.deviation_domains.*domain_id=\$4/s.test(sql))expect(sql).toContain("deviation_id=$3 AND domain_id=$4");
@@ -347,7 +356,7 @@ describe("personal practice repository preserves the legacy surface and fails cl
   it("captures the trusted clock only after locked owned history, dimensions and writer lookup",async()=>{
     const context=await createOrgContextResolver(f.db)(request);let calls=0;
     const checked=createPolicyV2Storage(f.db,context,{clock:()=>{
-      calls++;const recent=f.queries.slice(-5).map(q=>q.sql);
+      calls++;const recent=f.queries.filter(q=>!q.sql.startsWith("SELECT set_config(")).slice(-5).map(q=>q.sql);
       expect(recent.some(sql=>sql.includes("policy_versions")&&sql.includes("FOR SHARE"))).toBe(true);
       expect(recent.some(sql=>sql.includes("dimension_definitions")&&sql.includes("FOR SHARE"))).toBe(true);
       expect(recent.at(-1)).toContain("source_bindings");return time();

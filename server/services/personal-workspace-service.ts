@@ -9,7 +9,7 @@ type Units = ReturnType<typeof createAuthenticatedBootstrapUnit>;
 type Request = Parameters<Units["run"]>[0];
 async function memberships(unit: BootstrapUnit) {
   return (await unit.tx.query(
-    "SELECT org_id,user_id,role,created_at,updated_at FROM public.organization_members WHERE user_id=$1 ORDER BY org_id FOR SHARE",
+    "SELECT org_id,user_id,role,created_at,updated_at FROM public.organization_members WHERE user_id=$1 ORDER BY org_id LIMIT 2 FOR SHARE",
     [unit.actorUserId])).rows;
 }
 async function ready(unit: BootstrapUnit, context: OrgContext): Promise<OnboardingReady> {

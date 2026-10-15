@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
+import { ResourceLimitError, MAX_READ_ROWS } from "../lib/read-budget";
+import { withTransactionReadBudget, readComplete, assertReadBytesAvailable } from "../lib/transaction-read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, bounded, createOrgContextResolver, revalidate,
   type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
@@ -42,16 +44,31 @@ function ticks(value: string): bigint {
   return BigInt(ms) * BigInt(1000) + BigInt(fraction.padEnd(6,"0").slice(3));
 }
 const json = (v: unknown) => JSON.parse(JSON.stringify(v));
+// Transfer large text/JSON once. Only these native Date values are additionally
+// selected, because instant() independently checks the decoded PG timestamp
+// against the exact microsecond string in raw. Other columns come from raw.
+const nativeDates: Record<string, readonly string[]> = {
+  policy_versions:["effective_from"],sessions:["timestamp","deleted_at"],session_edits:["edited_at"],
+};
 async function rows(tx: Transaction, table: string, where: string, values: unknown[], order: string) {
-  return (await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} FOR SHARE`, values)).rows as Row[];
+  const dates=nativeDates[table]??[],columns=["raw",...dates];
+  const projection=["to_jsonb(t) AS raw",...dates.map(column=>`t."${column}"`)].join(",");
+  const result=await readComplete(tx,
+    `SELECT ${projection} FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT $${values.length+1} FOR SHARE`,
+    [...values,MAX_READ_ROWS+1],columns);
+  return result.map(row=>({...row.raw,...row,raw:row.raw})) as Row[];
 }
 type State = Awaited<ReturnType<typeof read>>;
 async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext) {
   await revalidate(tx,db,context);
   const { orgId: org, actorUserId: actor } = context, scope = [org,actor];
   if (context.role !== "owner" || context.rolloutMode !== "legacy") throw new BoundaryError(403);
-  const organization = (await tx.query("SELECT * FROM public.organizations WHERE org_id=$1 FOR UPDATE",[org])).rows[0];
-  const members = await rows(tx,"organization_members","t.org_id=$1",[org],"t.user_id");
+  const organization = (await readComplete(tx,
+    "SELECT display_name,rollout_mode FROM public.organizations WHERE org_id=$1 FOR UPDATE",
+    [org],["display_name","rollout_mode"],1))[0];
+  const members = await readComplete(tx,
+    "SELECT user_id,role FROM public.organization_members WHERE org_id=$1 ORDER BY user_id LIMIT 2 FOR SHARE",
+    [org],["user_id","role"],2);
   if (organization?.display_name !== "Personal legacy workspace" || organization.rollout_mode !== "legacy" ||
     members.length !== 1 || members[0].user_id !== actor || members[0].role !== "owner") throw new BoundaryError(403);
   const scoped = (table: string, order: string) => rows(tx,table,"t.org_id=$1 AND t.owner_user_id=$2",scope,order);
@@ -172,6 +189,31 @@ function event(s: State,p: Planned,edit?: Row): Row {
     ...(edit ? {occurred_at:edit.raw.edited_at} : {}),
   };
 }
+/**
+ * Reserve, without consuming, the complete post-import reread before the first
+ * insert. JSONB formatting/timestamp metadata are conservatively covered by 2x
+ * UTF-8 canonical JSON plus 512 bytes per row. The SQL admission remains the
+ * authoritative check on every actual read; no rows are truncated or deleted.
+ * Check each expansion immediately instead of retaining a second audit set.
+ */
+function reserveImportReread(tx:Transaction,s:State,planned:Planned[]) {
+  let bytes=4096; // organization, singleton membership and scalar result metadata
+  const add=(value:unknown)=>{
+    bytes+=2*Buffer.byteLength(JSON.stringify(value),"utf8")+512;
+    assertReadBytesAvailable(tx,bytes);
+  };
+  for(const collection of [s.domains,s.policies,s.dimensions,s.bindings,s.sessions,s.edits,s.observations,s.audits])
+    for(const row of collection)add(row.raw);
+  for(const p of planned){
+    add(p.row);
+    const importedEvent=event(s,p);
+    // The actual server timestamp has at most six fractional digits.
+    importedEvent.after.importedAt="9999-12-31T23:59:59.999999+00:00";
+    importedEvent.occurred_at="9999-12-31T23:59:59.999999+00:00";
+    add(importedEvent);
+    for(const edit of p.edits)add(event(s,p,edit));
+  }
+}
 function matchesEvent(actual: Row | undefined, expected: Row, historical: boolean) {
   if (!actual) return false;
   const raw = json(actual.raw);
@@ -253,9 +295,9 @@ async function insertAudit(tx: Transaction,e: Row,at: string) {
 }
 async function run(db: OwnershipDatabase,request: Request,write: boolean) {
   authenticate(request); // before ANY access to injected database
-  return bounded(() => db.transaction(async tx => {
+  return bounded(() => db.transaction(raw => withTransactionReadBudget(raw,async tx => {
     // Canonical SQL JSON date strings without sacrificing microseconds.
-    await tx.query("SET LOCAL TIME ZONE 'UTC'");
+    await tx.query("SELECT set_config('TimeZone','UTC',true)");
     const pinned: OwnershipDatabase = {transaction:async fn => fn(tx)};
     const context = await createOrgContextResolver(pinned)(request);
     let state = await read(tx,pinned,context), planned: Planned[];
@@ -270,6 +312,11 @@ async function run(db: OwnershipDatabase,request: Request,write: boolean) {
       // A partly imported or altered history is never repaired automatically.
       requireValid(imported(state).length === 0 && !state.audits.some(a =>
         types.includes(a.entity_type) || a.after?.version === version || a.before?.version === version));
+      // Check projected complete collections before the first insert. A later
+      // full read must not discover a self-created resource overflow.
+      if(state.observations.length+planned.length>MAX_READ_ROWS||
+        state.audits.length+planned.length+state.edits.length>MAX_READ_ROWS)throw new ResourceLimitError();
+      reserveImportReread(tx,state,planned);
       for (const p of planned) {
         await revalidate(tx,pinned,context);
         const r = p.row;
@@ -287,7 +334,7 @@ async function run(db: OwnershipDatabase,request: Request,write: boolean) {
     const final = report(state,plan(state));requireValid(final.clean);
     return {importBatchId:state.batch,mapping:Object.fromEntries(planned.map(p => [p.source.id,p.row.observation_id])),
       reconciliation:final};
-  }));
+  })));
 }
 /** Internal server-only seams. Never connected to routes, hooks, startup or CLI. */
 export async function importLegacyObservations(db: OwnershipDatabase,request: Request) { return run(db,request,true); }
@@ -301,10 +348,11 @@ export async function reconcileLegacyObservations(db: OwnershipDatabase,request:
  */
 export async function verifyLegacyImportProvenance(db: OwnershipDatabase, request: Request) {
   authenticate(request);
-  return bounded(() => db.transaction(async tx => {
+  return bounded(() => db.transaction(raw => withTransactionReadBudget(raw,async tx => {
     await tx.query("SELECT set_config('TimeZone','UTC',true)");
-    const context = await createOrgContextResolver(db)(request);
-    const current = await read(tx,db,context);
+    const pinned:OwnershipDatabase={transaction:async operation=>operation(tx)};
+    const context = await createOrgContextResolver(pinned)(request);
+    const current = await read(tx,pinned,context);
     const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
       const r = a.after?.sourceSnapshot?.row;
       requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
@@ -326,5 +374,5 @@ export async function verifyLegacyImportProvenance(db: OwnershipDatabase, reques
     const preserved = {...current,sessions,edits,observations};
     requireValid(report(preserved,plan(preserved)).clean);
     return {importedSessions:sessions.length,importedEdits:edits.length};
-  }));
+  })));
 }

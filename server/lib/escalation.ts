@@ -371,22 +371,21 @@ export function computeEscalationState<T extends Session>(
  * (oldest → newest). Each day's entry reflects how `computeEscalationState` would
  * have classified that day, by sliding the `now` override across the range.
  */
+/** Exact legacy history anchors, reused by the bounded-input planner. */
+export function escalationHistoryAnchors(opts:PolicyEngineOptions,days:number):Date[] {
+  const todayKey=logicalDay(opts.now??new Date(),opts),[y,m,d]=todayKey.split("-").map(Number);
+  const anchor=Date.UTC(y,m-1,d),out:Date[]=[];
+  for(let i=days-1;i>=0;i--)out.push(new Date(anchor-i*86400000+12*3600000));
+  return out;
+}
 export function computeEscalationHistory<T extends Session>(
   allSessions: T[],
   opts: PolicyEngineOptions = {},
   days: number = DEFAULT_ESCALATION_HISTORY_DAYS
 ): EscalationHistoryEntry[] {
   if (days <= 0) return [];
-  const now = opts.now ?? new Date();
-  const todayKey = logicalDay(now, opts);
-  const [ty, tm, td] = todayKey.split("-").map((n) => parseInt(n, 10));
-  const anchorUtc = Date.UTC(ty, tm - 1, td);
-
   const out: EscalationHistoryEntry[] = [];
-  for (let i = days - 1; i >= 0; i--) {
-    // Noon UTC on the target calendar day — safely after `dayStartHour` in supported timezones,
-    // so the logical day for the slid `now` matches the intended calendar day.
-    const slidingNow = new Date(anchorUtc - i * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
+  for (const slidingNow of escalationHistoryAnchors(opts, days)) {
     const slidOpts: PolicyEngineOptions = { ...opts, now: slidingNow };
     const dayKey = logicalDay(slidingNow, slidOpts);
     const perDomainDay = {} as Record<Domain, EscalationHistoryDayDomain>;

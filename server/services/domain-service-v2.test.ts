@@ -162,13 +162,14 @@ describe("actual management service, pinned ownership and persistence", () => {
     const racing = createDomainServiceV2(createPinnedOwnershipUnit({ connect: async () => {
       const client = await pool.connect();
       return {
-        query: async (sql: string, values?: unknown[]) => {
+        query: async (input: any, values?: unknown[]) => {
+          const sql=typeof input==="string"?input:input.text;
           // Barrier only in this synthetic pool wrapper. Both real clients
           // reach BEGIN before either proceeds. The accepted unit's actor row
           // lock then serializes policy reads; a later list-query barrier would
           // deadlock by waiting for a client intentionally blocked by that lock.
           if (sql === "BEGIN") { begun++; if (begun === 2) release(); await bothConnected; }
-          return client.query(sql, values);
+          return client.query(input, values);
         },
         release: (destroy?: boolean) => client.release(destroy),
       } as any;

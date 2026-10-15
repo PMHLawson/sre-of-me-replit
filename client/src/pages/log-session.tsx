@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { SessionText } from "@/components/session-text";
+import { sessionEditFields } from "@/lib/legacy-session-edit";
+import React, { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowLeft, Check, Clock, CalendarClock, AlertTriangle, TrendingDown, Repeat, Undo2, Pencil } from 'lucide-react';
 import { useAppStore, Domain, DOMAIN_POLICY, type Session } from '@/store';
@@ -6,7 +8,7 @@ import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
 import { checkAnomaly, anomalyFieldsForSave, type AnomalySaveDecision } from '@/lib/anomaly-preflight';
 
-type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving' | 'saved';
+type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'frequency-unavailable' | 'saving' | 'saved';
 
 const POST_SAVE_TOAST_MS = 8000;
 
@@ -36,6 +38,8 @@ export default function LogSession() {
   const [domain, setDomain] = useState<Domain>(initialDomain);
   const [duration, setDuration] = useState(30);
   const [notes, setNotes] = useState('');
+  const [notesDirty, setNotesDirty] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>('idle');
   const [sessionDate, setSessionDate] = useState<string>(() => formatLocalDateTime(new Date()));
   // wouter's location hook tracks pathname only, so the toast Edit action
@@ -53,21 +57,26 @@ export default function LogSession() {
   const updateSession = useAppStore(state => state.updateSession);
   const deleteSession = useAppStore(state => state.deleteSession);
   const sessions = useAppStore(state => state.sessions);
-  const fetchSessions = useAppStore(state => state.fetchSessions);
-
-  // Edit-mode pre-population: re-runs once sessions arrive on cold deep-link.
+  const detail = useAppStore(state => editingSessionId ? state.sessionDetails[editingSessionId] : undefined);
+  const fetchDetail = useAppStore(state => state.fetchSessionDetail);
+  const contextFrom = useAppStore(state => state.contextFrom);
+  const contextReady = useAppStore(state => state.sessionsLoaded && !state.sessionsError);
+  const [freshEditId, setFreshEditId] = useState<string | null>(null);
   useEffect(() => {
-    if (!initialEditId) return;
-    const target = sessions.find(s => s.id === initialEditId);
-    if (target) {
-      setDomain(target.domain as Domain);
-      setDuration(target.durationMinutes);
-      setSessionDate(formatLocalDateTime(new Date(target.timestamp)));
-      setNotes(target.notes ?? '');
-    } else if (sessions.length === 0) {
-      void fetchSessions();
-    }
-  }, [initialEditId, sessions, fetchSessions]);
+    let active = true; setFreshEditId(null);
+    if (editingSessionId) void fetchDetail(editingSessionId).then(() => { if (active) setFreshEditId(editingSessionId); });
+    return () => { active = false; };
+  }, [editingSessionId, fetchDetail]);
+  const editSaved = editingSessionId === freshEditId && detail?.status === 'ready' ? detail.value : undefined;
+  const editReady = !editingSessionId || !!editSaved;
+
+  // An old deep link must load the complete owner-scoped record, not a recent summary.
+  useEffect(() => {
+    if (!editingSessionId || !editSaved) return;
+    setDomain(editSaved.domain); setDuration(editSaved.durationMinutes);
+    setSessionDate(formatLocalDateTime(new Date(editSaved.timestamp)));
+    setNotes(editSaved.notes ?? ""); setNotesDirty(false);
+  }, [editingSessionId, editSaved]);
 
   // Decisions accumulated across modal prompts; passed explicitly to avoid
   // stale-closure reads when handlers re-invoke runSaveFlow.
@@ -78,10 +87,13 @@ export default function LogSession() {
   }
 
   const runSaveFlow = async (decisions: SaveDecisions) => {
-    setStage('saving');
+    if (!editReady) return;
+    setSaveError(null); setStage('saving');
 
     // Step 1: unavailable checks fail open without clearing stored metadata.
     let anomalyDecision = decisions.anomaly;
+    if (!anomalyDecision && editSaved && domain === editSaved.domain && duration === editSaved.durationMinutes)
+      anomalyDecision = { kind: 'unavailable' };
     if (!anomalyDecision) {
       const check = await checkAnomaly({
         domain, durationMinutes: duration,
@@ -109,6 +121,10 @@ export default function LogSession() {
     // against itself.
     if (!decisions.frequencyAck) {
       const selected = resolveSessionTimestamp(sessionDate);
+      if (!contextReady || !contextFrom || selected.getTime() < Date.parse(contextFrom) + 24 * 60 * 60 * 1000) {
+        pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
+        setStage('frequency-unavailable'); return;
+      }
       const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
       const hasOnSelectedDay = sessions.some((s) => {
         if (s.deletedAt) return false;
@@ -126,22 +142,20 @@ export default function LogSession() {
     }
 
     const isoTimestamp = resolveSessionTimestamp(sessionDate).toISOString();
-    const trimmedNotes = notes.trim();
 
     if (editingSessionId) {
       const result = await updateSession(
         editingSessionId,
         {
-          domain,
-          durationMinutes: duration,
-          timestamp: isoTimestamp,
-          notes: trimmedNotes || null,
+          ...sessionEditFields(editSaved!, { domain, durationMinutes: duration,
+            ...(sessionDate !== formatLocalDateTime(new Date(editSaved!.timestamp)) ? { timestamp: isoTimestamp } : {}),
+            ...(notesDirty ? { notes } : {}) }),
           ...anomalyFieldsForSave(anomalyDecision, true),
         },
         'Post-save edit',
       );
       if (result) setLocation('/');
-      else setStage('idle');
+      else { setSaveError('Changes were not confirmed. Your draft remains here.'); setStage('idle'); }
       return;
     }
 
@@ -149,7 +163,7 @@ export default function LogSession() {
       domain,
       durationMinutes: duration,
       timestamp: isoTimestamp,
-      notes: trimmedNotes || undefined,
+      notes: notes === '' ? undefined : notes,
       ...anomalyFieldsForSave(anomalyDecision, false),
     });
 
@@ -159,8 +173,8 @@ export default function LogSession() {
       setToastNow(Date.now());
       setStage('saved');
     } else {
-      // No id to Undo against → skip the toast.
-      setLocation('/');
+      setSaveError('This practice was not confirmed as saved. Your draft remains here; retry when ready.');
+      setStage('idle');
     }
   };
 
@@ -299,7 +313,7 @@ export default function LogSession() {
   const durations = [5, 10, 15, 20, 30];
   const saving = stage === 'saving';
   // Lock the form during the post-save toast window to prevent a second save.
-  const formDisabled = saving || stage === 'saved';
+  const formDisabled = saving || stage === 'saved' || !editReady;
   const floor = DOMAIN_POLICY[domain].sessionFloor;
   const maxDateTime = formatLocalDateTime(new Date());
 
@@ -319,6 +333,9 @@ export default function LogSession() {
       </header>
 
       <main className="px-4 py-6 space-y-8">
+        {saveError && <p role="alert">{saveError}</p>}
+        {editingSessionId && !editReady && <div><p>Load the complete saved record before editing.</p>
+          <SessionText session={{ id: editingSessionId, textComplete: false } as Session} force /></div>}
         {/* Domain Selection */}
         <section className="space-y-3">
           <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Domain</label>
@@ -411,7 +428,7 @@ export default function LogSession() {
           <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Notes (Optional)</label>
           <textarea
             value={notes}
-            onChange={(e) => setNotes(e.target.value)}
+            onChange={(e) => { setNotes(e.target.value); setNotesDirty(true); }}
             disabled={formDisabled}
             placeholder="How did it go?"
             className="w-full bg-card border border-border/50 rounded-2xl p-4 min-h-[120px] resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground placeholder:text-muted-foreground/50 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
@@ -487,6 +504,11 @@ export default function LogSession() {
       )}
 
       {/* ── Frequency advisory ────────────────────────────────────────── */}
+      {stage === 'frequency-unavailable' && <PromptModal
+        icon={<Repeat className="w-6 h-6 text-status-advisory" />} tone="advisory"
+        title="Duplicate check unavailable" testId="modal-frequency-unavailable"
+        body={<p>This date is outside the complete loaded context, or that context could not be verified. We have not assumed there are no other practices on this date. You may review history or save this record anyway.</p>}
+        confirmLabel="Save anyway" onConfirm={onFrequencyConfirm} onCancel={onFrequencyCancel} />}
       {stage === 'frequency' && (
         <PromptModal
           icon={<Repeat className="w-6 h-6 text-status-advisory" />}

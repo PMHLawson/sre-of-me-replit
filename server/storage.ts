@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { LegacyHistoryReads } from "./lib/legacy-history";
 import {
   sessions,
   sessionEdits,
@@ -423,3 +424,9 @@ export class DatabaseStorage implements IStorage {
 }
 
 export const storage = new DatabaseStorage();
+
+// Resolve the existing application pool only when a bounded read is requested.
+// Importing unrelated storage methods must not acquire an eager pool dependency.
+export const historyReads = new LegacyHistoryReads({
+  connect: async () => (await import("./db")).pool.connect(),
+});

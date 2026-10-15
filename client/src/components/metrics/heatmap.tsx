@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { format, subDays, startOfWeek, parseISO, isSameDay } from 'date-fns';
 import type { Session } from '@/store';
 
