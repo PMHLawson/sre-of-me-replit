@@ -2,6 +2,7 @@ import {beforeAll,afterAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {drizzle} from "drizzle-orm/node-postgres";
 import {Pool} from "pg";
 import * as schema from "@shared/schema";
+import {ObservationSchema} from "@shared/domain-config";
 import {startFixture} from "./lib/ownership-fixture";
 vi.mock("./db",()=>({db:{}}));
 import {DatabaseStorage} from "./storage";
@@ -133,6 +134,17 @@ describe("actual legacy session edits, bounded responses and durable admission",
   const text=" \t"+space+"\n";await f.client.query("UPDATE sessions SET anomaly_note=$2 WHERE id=$1",[id,text]);
   await expect(store.updateSession(owner,id,{isAnomaly:true,reason:"blank historical explanation"})).rejects.toMatchObject({status:400});
   expect(await row()).toMatchObject({is_anomaly:false,anomaly_note:text});expect(await edits()).toEqual([]);expect(await counts()).toEqual([]);
+ });
+
+ it("serializes exact prior audit instants as accepted ISO UTC even from a historical seconds-offset PG session",async()=>{
+  await f.client.query("UPDATE sessions SET timestamp='1800-01-01T00:00:00.123456Z' WHERE id=$1",[id]);
+  const parisPool={connect:async()=>{const client=await pool.connect();await client.query("SET TIME ZONE 'Europe/Paris'");return client;}};
+  const parisStore=new DatabaseStorage(drizzle(f.client,{schema}),parisPool as any);
+  await parisStore.updateSession(owner,id,{timestamp:"1801-01-01T00:00:00.654321Z",reason:"exact historical timestamp"});
+  const prior=JSON.parse((await edits())[0].changed_fields).timestamp;
+  expect(ObservationSchema.shape.observedAt.safeParse(prior).success).toBe(true);
+  expect(prior).toBe("1800-01-01T00:00:00.123456+00:00");
+  expect((await row()).timestamp).toBe("1801-01-01T00:00:00.654321+00:00");
  });
 
 });

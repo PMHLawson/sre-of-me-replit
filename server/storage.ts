@@ -134,7 +134,11 @@ export class DatabaseStorage implements IStorage {
       client=await pool.connect();
       await nativeQuery("BEGIN");began=true;active=true;
       const result=await withTransactionReadBudget(native,async tx=>{
-        const value=await withOwnerWriteBudget(tx,userId,budget=>operation(tx,budget));
+        const value=await withOwnerWriteBudget(tx,userId,async budget=>{
+          // Preserve ISO-compatible exact audit instants in every session zone.
+          await tx.query("SELECT set_config('TimeZone','UTC',true)");
+          return operation(tx,budget);
+        });
         await Promise.allSettled(pending);if(failed)throw new BoundaryError(503);
         return value;
       },deadline);
