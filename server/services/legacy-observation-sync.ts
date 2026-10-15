@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { ResourceLimitError, MAX_READ_ROWS } from "../lib/read-budget";
-import { withTransactionReadBudget, completeRead } from "../lib/transaction-read-budget";
+import { withTransactionReadBudget, readComplete, assertReadBytesAvailable } from "../lib/transaction-read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, bounded, createOrgContextResolver, revalidate,
   type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
@@ -44,17 +44,31 @@ function ticks(value: string): bigint {
   return BigInt(ms) * BigInt(1000) + BigInt(fraction.padEnd(6,"0").slice(3));
 }
 const json = (v: unknown) => JSON.parse(JSON.stringify(v));
+// Transfer large text/JSON once. Only these native Date values are additionally
+// selected, because instant() independently checks the decoded PG timestamp
+// against the exact microsecond string in raw. Other columns come from raw.
+const nativeDates: Record<string, readonly string[]> = {
+  policy_versions:["effective_from"],sessions:["timestamp","deleted_at"],session_edits:["edited_at"],
+};
 async function rows(tx: Transaction, table: string, where: string, values: unknown[], order: string) {
-  return completeRead((await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT $${values.length+1} FOR SHARE`,
-    [...values,MAX_READ_ROWS+1])).rows as Row[]);
+  const dates=nativeDates[table]??[],columns=["raw",...dates];
+  const projection=["to_jsonb(t) AS raw",...dates.map(column=>`t."${column}"`)].join(",");
+  const result=await readComplete(tx,
+    `SELECT ${projection} FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT $${values.length+1} FOR SHARE`,
+    [...values,MAX_READ_ROWS+1],columns);
+  return result.map(row=>({...row.raw,...row,raw:row.raw})) as Row[];
 }
 type State = Awaited<ReturnType<typeof read>>;
 async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext) {
   await revalidate(tx,db,context);
   const { orgId: org, actorUserId: actor } = context, scope = [org,actor];
   if (context.role !== "owner" || context.rolloutMode !== "legacy") throw new BoundaryError(403);
-  const organization = (await tx.query("SELECT * FROM public.organizations WHERE org_id=$1 FOR UPDATE",[org])).rows[0];
-  const members = (await tx.query("SELECT t.*,to_jsonb(t) AS raw FROM public.organization_members t WHERE t.org_id=$1 ORDER BY t.user_id LIMIT 2 FOR SHARE",[org])).rows;
+  const organization = (await readComplete(tx,
+    "SELECT display_name,rollout_mode FROM public.organizations WHERE org_id=$1 FOR UPDATE",
+    [org],["display_name","rollout_mode"],1))[0];
+  const members = await readComplete(tx,
+    "SELECT user_id,role FROM public.organization_members WHERE org_id=$1 ORDER BY user_id LIMIT 2 FOR SHARE",
+    [org],["user_id","role"],2);
   if (organization?.display_name !== "Personal legacy workspace" || organization.rollout_mode !== "legacy" ||
     members.length !== 1 || members[0].user_id !== actor || members[0].role !== "owner") throw new BoundaryError(403);
   const scoped = (table: string, order: string) => rows(tx,table,"t.org_id=$1 AND t.owner_user_id=$2",scope,order);
@@ -175,6 +189,31 @@ function event(s: State,p: Planned,edit?: Row): Row {
     ...(edit ? {occurred_at:edit.raw.edited_at} : {}),
   };
 }
+/**
+ * Reserve, without consuming, the complete post-import reread before the first
+ * insert. JSONB formatting/timestamp metadata are conservatively covered by 2x
+ * UTF-8 canonical JSON plus 512 bytes per row. The SQL admission remains the
+ * authoritative check on every actual read; no rows are truncated or deleted.
+ * Check each expansion immediately instead of retaining a second audit set.
+ */
+function reserveImportReread(tx:Transaction,s:State,planned:Planned[]) {
+  let bytes=4096; // organization, singleton membership and scalar result metadata
+  const add=(value:unknown)=>{
+    bytes+=2*Buffer.byteLength(JSON.stringify(value),"utf8")+512;
+    assertReadBytesAvailable(tx,bytes);
+  };
+  for(const collection of [s.domains,s.policies,s.dimensions,s.bindings,s.sessions,s.edits,s.observations,s.audits])
+    for(const row of collection)add(row.raw);
+  for(const p of planned){
+    add(p.row);
+    const importedEvent=event(s,p);
+    // The actual server timestamp has at most six fractional digits.
+    importedEvent.after.importedAt="9999-12-31T23:59:59.999999+00:00";
+    importedEvent.occurred_at="9999-12-31T23:59:59.999999+00:00";
+    add(importedEvent);
+    for(const edit of p.edits)add(event(s,p,edit));
+  }
+}
 function matchesEvent(actual: Row | undefined, expected: Row, historical: boolean) {
   if (!actual) return false;
   const raw = json(actual.raw);
@@ -277,6 +316,7 @@ async function run(db: OwnershipDatabase,request: Request,write: boolean) {
       // full read must not discover a self-created resource overflow.
       if(state.observations.length+planned.length>MAX_READ_ROWS||
         state.audits.length+planned.length+state.edits.length>MAX_READ_ROWS)throw new ResourceLimitError();
+      reserveImportReread(tx,state,planned);
       for (const p of planned) {
         await revalidate(tx,pinned,context);
         const r = p.row;
