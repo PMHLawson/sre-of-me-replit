@@ -5,7 +5,7 @@ import { domainEnum, updateSessionSchema } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase } from "../lib/org-context";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS } from "../lib/read-budget";
-import { withTransactionReadBudget, completeRead } from "../lib/transaction-read-budget";
+import { withTransactionReadBudget, readComplete } from "../lib/transaction-read-budget";
 import { createAuditService } from "../lib/audit-service";
 import { verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
@@ -15,6 +15,7 @@ type Row = Record<string, any>;
 type State = { legacy: Row; canonical: Row };
 type MappingEvidence={domain:Row;configurations:import("../../shared/domain-config").DomainConfiguration[]};
 type MutationUnit=OwnershipUnit & {readonly mappingEvidence:Map<string,Promise<MappingEvidence>>};
+const readColumns={"domain":["domain_id","org_id","owner_user_id","slug","display_name","deactivated_at","tombstoned_at"],"policy":["policy_version_id","org_id","owner_user_id","domain_id","revision","effective_from","previous_version_id","configuration","evaluation_policy","raw"],"dimension":["org_id","owner_user_id","domain_id","policy_version_id","measurement_id","definition"],"binding":["binding_id","org_id","owner_user_id","domain_id","source_kind","external_id","metadata"]} as const;
 const version = "legacy-activity-mutation-v1";
 const entity = "legacy_session_mutation";
 const id = z.string().min(1).max(200).refine(x => x.trim() === x && !/[\u0000-\u001f\u007f]/.test(x) && x !== "__proto__");
@@ -38,10 +39,10 @@ function ticks(value:unknown):bigint {
 }
 async function loadMappingEvidence(u:MutationUnit,slug:string):Promise<MappingEvidence> {
   const {orgId:org,actorUserId:actor}=u.context;
-  const ds=(await u.tx.query("SELECT * FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 AND slug=$3 LIMIT 2 FOR SHARE",[org,actor,slug])).rows;
+  const ds=await readComplete(u.tx,"SELECT * FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 AND slug=$3 LIMIT 2 FOR SHARE",[org,actor,slug],readColumns.domain,2);
   requireValid(ds.length===1&&ds[0].deactivated_at===null&&ds[0].tombstoned_at===null);const d=ds[0];
-  const ps=completeRead((await u.tx.query("SELECT p.*,to_jsonb(p) raw FROM public.policy_versions p WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1])).rows);
-  const dimensions=completeRead((await u.tx.query("SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY policy_version_id,measurement_id LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1])).rows);
+  const ps=await readComplete(u.tx,"SELECT p.*,to_jsonb(p) raw FROM public.policy_versions p WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1],readColumns.policy);
+  const dimensions=await readComplete(u.tx,"SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY policy_version_id,measurement_id LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1],readColumns.dimension);
   const configurations=ps.map(p=>{
     const c=parse(DomainConfigurationSchema,p.configuration);
     requireValid(c.organizationId===org&&c.ownerUserId===actor&&c.domainId===d.domain_id&&c.policyVersionId===p.policy_version_id&&
@@ -52,7 +53,7 @@ async function loadMappingEvidence(u:MutationUnit,slug:string):Promise<MappingEv
   });
   requireValid(configurations.length>0&&ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations,observations:[]}).success&&
     dimensions.length===configurations.reduce((n,c)=>n+c.measurements.length,0));
-  const bs=(await u.tx.query("SELECT * FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 AND source_kind='manual-legacy' AND external_id=$4 LIMIT 2 FOR SHARE",[org,actor,d.domain_id,slug])).rows;
+  const bs=await readComplete(u.tx,"SELECT * FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 AND source_kind='manual-legacy' AND external_id=$4 LIMIT 2 FOR SHARE",[org,actor,d.domain_id,slug],readColumns.binding,2);
   requireValid(bs.length===1&&equal(bs[0].metadata,{description:"existing-owner-seed-v1"}));
   return {domain:d,configurations};
 }
@@ -83,16 +84,16 @@ async function mapping(u:MutationUnit,source:Row):Promise<Row> {
     is_anomaly:source.is_anomaly,anomaly_note:source.anomaly_note,deleted_at:source.deleted_at,legacy_source_type:"sessions",legacy_source_id:source.id};
 }
 async function canonical(u:MutationUnit,source:Row) {
-  const expected=await mapping(u,source),r=(await u.tx.query(`SELECT to_jsonb(o) raw FROM public.observations o
+  const expected=await mapping(u,source),r=await readComplete(u.tx,`SELECT to_jsonb(o) raw FROM public.observations o
     WHERE org_id=$1 AND owner_user_id=$2 AND (legacy_source_id=$3 OR observation_id=$4 OR idempotency_key=$5) LIMIT 2 FOR UPDATE`,
-    [u.context.orgId,u.context.actorUserId,source.id,expected.observation_id,expected.idempotency_key])).rows;
+    [u.context.orgId,u.context.actorUserId,source.id,expected.observation_id,expected.idempotency_key],["raw"],2);
   requireValid(r.length===1&&equal(r[0].raw,expected));return r[0].raw as Row;
 }
 async function lineage(u:MutationUnit,current:State,writeIntent=false):Promise<number> {
   const {orgId:org,actorUserId:actor}=u.context,sourceId=current.legacy.id;
-  const audits=completeRead((await u.tx.query(`SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 AND entity_id=$2
+  const audits=(await readComplete(u.tx,`SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 AND entity_id=$2
     AND entity_type IN ('legacy_session_import','legacy_session_mutation') ORDER BY audit_event_id LIMIT $3 FOR SHARE`,
-    [org,JSON.stringify([sourceId]),MAX_READ_ROWS+1])).rows).map(r=>r.raw);
+    [org,JSON.stringify([sourceId]),MAX_READ_ROWS+1],["raw"])).map(r=>r.raw);
   if(writeIntent&&audits.length>=MAX_READ_ROWS)throw new ResourceLimitError();
   requireValid(audits.every(a=>a.org_id===org&&a.actor_kind==="user"&&a.actor_user_id===actor));
   const imports=audits.filter(a=>a.entity_type==="legacy_session_import"),mutations=audits.filter(a=>a.entity_type===entity);
@@ -137,7 +138,7 @@ async function lineage(u:MutationUnit,current:State,writeIntent=false):Promise<n
     }
     if(next.operation==="edit"){
       const e=next.legacyEdit;requireValid(e?.session_id===sourceId&&e.user_id===actor&&e.reason===a.reason&&typeof e.changed_fields==="string");
-      const edits=(await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE id=$1 AND session_id=$2 AND user_id=$3 FOR SHARE",[e.id,sourceId,actor])).rows;
+      const edits=await readComplete(u.tx,"SELECT to_jsonb(e) raw FROM public.session_edits e WHERE id=$1 AND session_id=$2 AND user_id=$3 LIMIT 2 FOR SHARE",[e.id,sourceId,actor],["raw"],1);
       requireValid(edits.length===1&&equal(edits[0].raw,e));
     } else requireValid(!Object.hasOwn(next,"legacyEdit"));
     previous=next.state;
@@ -145,7 +146,7 @@ async function lineage(u:MutationUnit,current:State,writeIntent=false):Promise<n
   requireValid(previous!==null&&equal(previous,current));return mutations.length;
 }
 async function get(u:MutationUnit,key:string):Promise<State> {
-  const r=(await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE id=$1 AND user_id=$2 FOR UPDATE",[key,u.context.actorUserId])).rows;
+  const r=await readComplete(u.tx,"SELECT to_jsonb(s) raw FROM public.sessions s WHERE id=$1 AND user_id=$2 LIMIT 2 FOR UPDATE",[key,u.context.actorUserId],["raw"],1);
   if(r.length!==1)throw new BoundaryError(404);const legacy=r[0].raw as Row;
   return {legacy,canonical:await canonical(u,legacy)};
 }
@@ -244,10 +245,10 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
         await u.tx.query("LOCK TABLE public.sessions, public.session_edits, public.observations, public.audit_events IN SHARE MODE");
         const provenance = await verifyLegacyImportProvenance(u.db,request);
         const {orgId:org,actorUserId:actor} = u.context;
-        const sessions = completeRead((await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE user_id=$1 ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
-        const observations = completeRead((await u.tx.query("SELECT to_jsonb(o) raw FROM public.observations o WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE",[org,actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
-        const edits = completeRead((await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE user_id=$1 OR session_id IN (SELECT id FROM public.sessions WHERE user_id=$1) ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
-        const audits = completeRead((await u.tx.query("SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 ORDER BY audit_event_id LIMIT $2 FOR SHARE",[org,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
+        const sessions = (await readComplete(u.tx,"SELECT to_jsonb(s) raw FROM public.sessions s WHERE user_id=$1 ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1],["raw"])).map(r=>r.raw as Row);
+        const observations = (await readComplete(u.tx,"SELECT to_jsonb(o) raw FROM public.observations o WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE",[org,actor,MAX_READ_ROWS+1],["raw"])).map(r=>r.raw as Row);
+        const edits = (await readComplete(u.tx,"SELECT to_jsonb(e) raw FROM public.session_edits e WHERE user_id=$1 OR session_id IN (SELECT id FROM public.sessions WHERE user_id=$1) ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1],["raw"])).map(r=>r.raw as Row);
+        const audits = (await readComplete(u.tx,"SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 ORDER BY audit_event_id LIMIT $2 FOR SHARE",[org,MAX_READ_ROWS+1],["raw"])).map(r=>r.raw as Row);
         const relevant = audits.filter(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) ||
           [version,"legacy-history-import-v1"].includes(a.after?.version) || [version,"legacy-history-import-v1"].includes(a.before?.version));
         requireValid(relevant.every(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) &&
@@ -267,7 +268,7 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
         }
         requireValid(canonicalIds.size === sessions.length && observations.length === sessions.length &&
           observations.every(o=>canonicalIds.has(o.observation_id)) && totalMutations === mutations.length);
-        const domains = completeRead((await u.tx.query("SELECT domain_id,slug FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY slug LIMIT $3 FOR SHARE",[org,actor,MAX_COLLECTION_ROWS+1])).rows,MAX_COLLECTION_ROWS);
+        const domains = await readComplete(u.tx,"SELECT domain_id,slug FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY slug LIMIT $3 FOR SHARE",[org,actor,MAX_COLLECTION_ROWS+1],["domain_id","slug"],MAX_COLLECTION_ROWS);
         const summaries = domains.map(d=>{
           const legacy = sessions.filter(s=>s.domain === d.slug), canonical = observations.filter(o=>o.domain_id === d.domain_id);
           const count = (rows:Row[],old:boolean)=>({total:rows.length,active:rows.filter(r=>r.deleted_at === null).length,

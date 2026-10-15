@@ -347,7 +347,7 @@ describe("personal practice repository preserves the legacy surface and fails cl
   it("captures the trusted clock only after locked owned history, dimensions and writer lookup",async()=>{
     const context=await createOrgContextResolver(f.db)(request);let calls=0;
     const checked=createPolicyV2Storage(f.db,context,{clock:()=>{
-      calls++;const recent=f.queries.slice(-5).map(q=>q.sql);
+      calls++;const recent=f.queries.filter(q=>!q.sql.startsWith("SELECT set_config(")).slice(-5).map(q=>q.sql);
       expect(recent.some(sql=>sql.includes("policy_versions")&&sql.includes("FOR SHARE"))).toBe(true);
       expect(recent.some(sql=>sql.includes("dimension_definitions")&&sql.includes("FOR SHARE"))).toBe(true);
       expect(recent.at(-1)).toContain("source_bindings");return time();

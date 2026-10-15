@@ -7,6 +7,7 @@ import { createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap
 import { createPersonalWorkspaceService } from "../services/personal-workspace-service";
 import { createPolicyV2Storage } from "./policy-v2-storage";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS, READ_TIMEOUT_MS } from "../lib/read-budget";
+import { MAX_READ_BYTES, readComplete, withTransactionReadBudget } from "../lib/transaction-read-budget";
 import { configurationFor, observationFor, MEASUREMENTS } from "../../shared/fixtures/domain-config-cases";
 import type { DomainConfiguration } from "../../shared/domain-config";
 
@@ -73,7 +74,7 @@ describe("generic repositories complete their bounded evidence or fail without w
     const q=fixture.queries.filter(q=>q.sql.includes("SELECT observation FROM public.observations")).at(-1)!;
     expect(q.sql).toContain("org_id=$1 AND owner_user_id=$2");
     expect(q.sql).toContain("LIMIT $4");
-    expect(q.parameters).toEqual(["bounds-one","bounds-a",configs["bounds-a"].domainId,MAX_READ_ROWS+1]);
+    expect(q.parameters.slice(0,-2)).toEqual(["bounds-one","bounds-a",configs["bounds-a"].domainId,MAX_READ_ROWS+1]);
   },15000);
 
   it("overflow is detected before any policy, dimension or audit insert",async()=>{
@@ -119,7 +120,7 @@ describe("generic repositories complete their bounded evidence or fail without w
     await noChange(()=>stores["bounds-a"].personalPractice.eligibility(c.domainId));
     await noChange(()=>stores["bounds-a"].policies.list(c.domainId));
     const reads=fixture.queries.slice(from).filter(q=>q.sql.includes("FROM public.policy_versions"));
-    expect(reads.some(q=>q.sql.includes("LIMIT $4")&&q.parameters.at(-1)===MAX_READ_ROWS+1)).toBe(true);
+    expect(reads.some(q=>q.sql.includes("LIMIT $4")&&q.parameters.at(-3)===MAX_READ_ROWS+1)).toBe(true);
     // Reset only this synthetic domain's extra policy rows, then independently
     // prove the saved-dimension budget, rather than a version-count failure.
     await fixture.client.query("DELETE FROM public.policy_versions WHERE policy_version_id LIKE 'many-policy-%'");
@@ -149,7 +150,7 @@ describe("generic repositories complete their bounded evidence or fail without w
     const offset=fixture.queries.length;
     expect((await stores["bounds-a"].personalPractice.list({})).activities).toHaveLength(3);
     const page=fixture.queries.slice(offset).find(q=>q.sql.includes("ORDER BY observed_at DESC,observation_id DESC LIMIT $6"))!;
-    expect(page.parameters.at(-1)).toBe(51); // existing default50 + lookahead
+    expect(page.parameters.at(-3)).toBe(51); // existing default50 + lookahead
     // A later transaction sees changed saved evidence; the page cache cannot
     // conceal corruption or cross a request/owner boundary.
     await fixture.client.query("UPDATE dimension_definitions SET definition=jsonb_set(definition,'{meaning}','\"Changed\"') WHERE policy_version_id=$1",[c.policyVersionId]);
@@ -161,12 +162,12 @@ describe("generic repositories complete their bounded evidence or fail without w
     expect((await stores["bounds-a"].observations.list())).toEqual([]);
     const all=fixture.queries.slice(from).find(q=>q.sql.includes("SELECT * FROM public.observations"))!;
     expect(all.sql).toContain("LIMIT $3");
-    expect(all.parameters).toEqual([configs["bounds-a"].organizationId,configs["bounds-a"].ownerUserId,MAX_READ_ROWS+1]);
+    expect(all.parameters.slice(0,-2)).toEqual([configs["bounds-a"].organizationId,configs["bounds-a"].ownerUserId,MAX_READ_ROWS+1]);
     const scopedFrom=fixture.queries.length;
     expect((await stores["bounds-a"].policies.list(configs["bounds-a"].domainId))).toHaveLength(1);
     const scoped=fixture.queries.slice(scopedFrom).find(q=>q.sql.includes("SELECT * FROM public.policy_versions"))!;
     expect(scoped.sql).toContain("domain_id=$3");expect(scoped.sql).toContain("LIMIT $4");
-    expect(scoped.parameters.at(-1)).toBe(MAX_READ_ROWS+1);
+    expect(scoped.parameters.at(-3)).toBe(MAX_READ_ROWS+1);
   });
 
   it("bounds every generic owner list and actor audit list without deleting or truncating",async()=>{
@@ -184,9 +185,46 @@ describe("generic repositories complete their bounded evidence or fail without w
     expect((await stores["bounds-c"].domains.list())).toHaveLength(1);
   });
 
+  it("PostgreSQL withholds an oversized existing JSON payload before pg decodes it or any policy write starts",async()=>{
+    await observations("bounds-a",1,"large-existing");
+    const huge="界".repeat(Math.ceil(MAX_READ_BYTES/3)+100);
+    await fixture.client.query("UPDATE observations SET observation=jsonb_set(observation,'{notes}',to_jsonb($2::text)) WHERE owner_user_id=$1",["bounds-a",huge]);
+    const digest=async()=>(await fixture.client.query("SELECT encode(sha256(convert_to(observation::text,'UTF8')),'hex') digest FROM observations WHERE owner_user_id=$1",["bounds-a"])).rows;
+    const before=await digest(),witness:any[]=[];
+    const monitored:OwnershipDatabase={transaction:fn=>fixture.db.transaction(tx=>fn({query:async(sql,values)=>{
+      const result=await tx.query(sql,values);
+      if(sql.includes("SELECT observation FROM public.observations"))witness.push(...result.rows);
+      return result;
+    }}))};
+    const context=await createOrgContextResolver(monitored)(request());
+    const store=createPolicyV2Storage(monitored,context,{clock}),from=fixture.queries.length;
+    await expect(store.policies.append(next(),"Synthetic byte refusal")).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(witness).toHaveLength(1);expect(Number(witness[0].__read_bytes)).toBeGreaterThan(MAX_READ_BYTES);
+    expect(witness[0].observation).toBeNull();
+    expect(fixture.queries.slice(from).some(q=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(q.sql))).toBe(false);
+    expect(await digest()).toEqual(before);expect(await stores["bounds-c"].observations.list()).toEqual([]);
+  },20000);
+
+  it("shares one byte allowance across repeated complete reads and nested guards",async()=>{
+    await observations("bounds-a",1,"shared-bytes");
+    await fixture.client.query("UPDATE observations SET observation=jsonb_set(observation,'{notes}',to_jsonb($2::text)) WHERE owner_user_id=$1",["bounds-a","é".repeat(1572864)]);
+    const witness:any[]=[];
+    await expect(fixture.db.transaction(raw=>withTransactionReadBudget({query:async(sql,values)=>{
+      const result=await raw.query(sql,values);if(sql.includes("__admitted"))witness.push(...result.rows);return result;
+    }},async tx=>{
+      const source="SELECT observation FROM public.observations WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE";
+      const values=["bounds-one","bounds-a",2];
+      expect(await readComplete(tx,source,values,["observation"],1)).toHaveLength(1);
+      await withTransactionReadBudget(tx,async nested=>{expect(await readComplete(nested,source,values,["observation"],1)).toHaveLength(1);});
+      return readComplete(tx,source,values,["observation"],1);
+    }))).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(witness).toHaveLength(3);expect(witness[0].observation.notes.length).toBe(1572864);
+    expect(witness[1].observation.notes.length).toBe(1572864);expect(witness[2].observation).toBeNull();
+  },20000);
+
   it("PostgreSQL actually cancels a slow bounded read and restores the prior session settings",async()=>{
     const wrapped:OwnershipDatabase={transaction:fn=>fixture.db.transaction(tx=>fn({
-      query:(sql,values)=>sql.startsWith("SELECT observation FROM public.observations")
+      query:(sql,values)=>sql.includes("SELECT observation FROM public.observations")
         ?tx.query("SELECT pg_sleep($1)",[(READ_TIMEOUT_MS+1000)/1000]):tx.query(sql,values),
     }))};
     const context=await createOrgContextResolver(wrapped)(request());

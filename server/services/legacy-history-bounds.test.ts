@@ -7,7 +7,7 @@ import { createLegacyActivityMutations } from "./legacy-activity-mutations";
 import { createLegacySessionAdapter } from "./legacy-session-adapter";
 import { importLegacyObservations,reconcileLegacyObservations,verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { ResourceLimitError,MAX_READ_ROWS,READ_TIMEOUT_MS } from "../lib/read-budget";
-import { withTransactionReadBudget } from "../lib/transaction-read-budget";
+import { withTransactionReadBudget,MAX_READ_BYTES } from "../lib/transaction-read-budget";
 
 const timer=vi.hoisted(()=>({at:0}));
 vi.mock("node:perf_hooks",()=>({performance:{now:()=>timer.at}}));
@@ -17,6 +17,7 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
   const request=(actor="legacy-bound-a")=>({isAuthenticated:()=>true,user:{claims:{sub:actor}}});
   const slugs=["martial-arts","meditation","fitness","music"];
   const statements:Array<{sql:string;values:unknown[];rows:number}>=[];
+  const byteWitness:Array<{sql:string;raw:unknown;bytes:number}>=[];
   const payload={domain:"music",durationMinutes:1,timestamp:"2026-01-01T01:02:03.123456Z"};
   async function state(){
     const result:Record<string,unknown>={};
@@ -27,7 +28,7 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
   }
   async function owner(actor:string){
     await f.client.query("INSERT INTO users(id) VALUES($1)",[actor]);
-    await f.client.query("INSERT INTO user_settings(user_id,timezone,day_start_hour,window_days) VALUES($1,'America/New_York',6,14)",[actor]);
+    await f.client.query("INSERT INTO user_settings(user_id,timezone,day_start_hour,window_days) VALUES($1,'America/New_York',6,14) ON CONFLICT(user_id) DO UPDATE SET timezone=EXCLUDED.timezone,day_start_hour=EXCLUDED.day_start_hour,window_days=EXCLUDED.window_days",[actor]);
     for(const slug of slugs)await f.client.query(
       "INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note) "+
       "VALUES($1,$2,$3,1,'2020-01-01T00:00:00.123456Z',NULL,false,'retained old anomaly note')",[actor+"-"+slug,actor,slug]);
@@ -71,16 +72,18 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
       max:4,connectionTimeoutMillis:5000,options:"-c statement_timeout=10000 -c lock_timeout=5000"});
     const connect=async()=>{
       const client=await pool.connect();
-      return {query:async(sql:string,values:unknown[]=[])=>{
-        const result=await client.query(sql,values);
+      return {query:async(input:any,parameters:unknown[]=[])=>{
+        const sql=typeof input==="string"?input:input.text,values=typeof input==="string"?parameters:input.values??[];
+        const result=await client.query(input,typeof input==="string"?values:undefined);
         statements.push({sql,values:structuredClone(values),rows:result.rows.length});
+        if(sql.includes("__admitted"))for(const row of result.rows)if(Number(row.__read_bytes)>MAX_READ_BYTES)byteWitness.push({sql,raw:row.raw,bytes:Number(row.__read_bytes)});
         return result;
       },release:(destroy?:boolean)=>client.release(destroy)} as unknown as PoolClient;
     };
     service=createLegacyActivityMutations(createPinnedOwnershipUnit({connect:connect as Pool["connect"]}));
   },60000);
   beforeEach(async()=>{
-    timer.at=0;statements.length=0;
+    timer.at=0;statements.length=0;byteWitness.length=0;
     await f.client.query("TRUNCATE users,organizations CASCADE");
     await owner("legacy-bound-a");await owner("legacy-bound-b");
   });
@@ -107,7 +110,7 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     expect(report.clean).toBe(false);expect(report.counts.ownedSessions).toBe(MAX_READ_ROWS);
     expect(report.drift.missing).toBe(MAX_READ_ROWS-4);expect(await state()).toBe(before);
     const nativeRead=f.queries.find(q=>q.sql.includes("FROM public.sessions t WHERE t.user_id=$1")&&q.sql.includes("ORDER BY t.domain,t.timestamp,t.id"))!;
-    expect(nativeRead.sql).toContain("LIMIT $2 FOR SHARE");expect(nativeRead.parameters).toEqual(["legacy-bound-a",MAX_READ_ROWS+1]);
+    expect(nativeRead.sql).toContain("LIMIT $2 FOR SHARE");expect(nativeRead.parameters.slice(0,-2)).toEqual(["legacy-bound-a",MAX_READ_ROWS+1]);
     await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp) VALUES('one-over','legacy-bound-a','music',1,'2020-02-01')");
     await refused(()=>service.reconcile(request()));
     const count=await f.client.query("SELECT count(*)::integer n FROM sessions WHERE user_id='legacy-bound-a'");
@@ -170,6 +173,29 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     await expect(importLegacyObservations(f.db,request())).rejects.toBeInstanceOf(ResourceLimitError);
     expect(await state()).toBe(before);
   });
+
+  it("withholds a hostile old note before transfer and refuses an edit before any write",async()=>{
+    const huge="界".repeat(Math.ceil(MAX_READ_BYTES/3)+100);
+    await f.client.query("UPDATE sessions SET notes=$2 WHERE id=$1",["legacy-bound-a-music",huge]);
+    const digest=async()=>(await f.client.query("SELECT encode(sha256(convert_to(to_jsonb(s)::text,'UTF8')),'hex') digest FROM sessions s WHERE id=$1",["legacy-bound-a-music"])).rows;
+    const before=await digest(),from=statements.length;
+    await expect(service.edit(request(),"legacy-bound-a-music",{notes:"must not replace the old note",reason:"Synthetic byte refusal"}))
+      .rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(byteWitness.some(w=>w.sql.includes("SELECT to_jsonb(s) raw")&&w.raw===null)).toBe(true);
+    expect(statements.slice(from).some(q=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(q.sql))).toBe(false);
+    expect(await digest()).toEqual(before);
+  },20000);
+
+  it("withholds an oversized audit lineage before validating or mutating a smaller current record",async()=>{
+    await f.client.query("UPDATE audit_events SET after=jsonb_set(after,'{oversizedSyntheticEvidence}',to_jsonb($2::text)) WHERE actor_user_id=$1 AND entity_type='legacy_session_import' AND entity_id=$3",
+      ["legacy-bound-a","界".repeat(Math.ceil(MAX_READ_BYTES/3)+100),JSON.stringify(["legacy-bound-a-music"])]);
+    const from=statements.length;
+    await expect(service.edit(request(),"legacy-bound-a-music",{notes:"must not be saved",reason:"Synthetic lineage byte refusal"}))
+      .rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(byteWitness.some(w=>w.sql.includes("SELECT to_jsonb(a) raw")&&w.raw===null)).toBe(true);
+    expect(statements.slice(from).some(q=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(q.sql))).toBe(false);
+    expect((await f.client.query("SELECT notes FROM sessions WHERE id='legacy-bound-a-music'")).rows[0].notes).toBeNull();
+  },20000);
 
   it("nested provenance work inherits the original monotonic deadline and remaining SQL timeout",async()=>{
     const before=await state(),from=f.queries.length;

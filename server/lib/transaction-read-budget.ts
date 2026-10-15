@@ -85,3 +85,9 @@ export function readBytesRemaining(tx:Transaction):number{
 export function assertReadBytesAvailable(tx:Transaction,bytes:number):void{
   if(!Number.isSafeInteger(bytes)||bytes<0||bytes>readBytesRemaining(tx))throw new ResourceLimitError();
 }
+
+/** Charge derived copies as they are built, after SQL admitted their inputs. */
+export function chargeReadBytes(tx:Transaction,bytes:number):void{
+  assertReadBytesAvailable(tx,bytes);
+  guarded.get(tx)!.bytes+=bytes;
+}

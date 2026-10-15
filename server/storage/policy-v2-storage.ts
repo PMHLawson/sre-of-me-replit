@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { withTransactionReadBudget, readComplete } from "../lib/transaction-read-budget";
+import { withTransactionReadBudget, readComplete, chargeReadBytes } from "../lib/transaction-read-budget";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS, READ_TIMEOUT_MS } from "../lib/read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema,
   validateProspectiveRevision, validateObservationContext, type DomainConfiguration } from "../../shared/domain-config";
@@ -360,7 +360,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       deletedAt:row.deleted_at===null?null:persistedTime(row.deleted_at),configuration,
       stateFingerprint:fingerprint(row),
       scoreAvailability:"not_calculated",attainmentAvailability:"not_calculated"});
-    if(!view.success)throw new BoundaryError(503);return view.data;
+    if(!view.success)throw new BoundaryError(503);
+    chargeReadBytes(tx,Buffer.byteLength(JSON.stringify(view.data),"utf8")+128);return view.data;
   }
   async function manualRows(tx:Transaction,extra:string,args:unknown[],lock=false) {
     return readComplete(tx,`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
