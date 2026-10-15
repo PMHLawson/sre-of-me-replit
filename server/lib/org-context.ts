@@ -32,12 +32,13 @@ export async function bounded<T>(operation: () => Promise<T>): Promise<T> {
   catch (error) { if (error instanceof BoundaryError) throw error; throw new BoundaryError(503); }
 }
 async function membership(tx: Transaction, actor: string) {
-  // Lock the actor row before scanning ALL memberships. This also blocks a new
+  // Lock the actor row before checking membership cardinality. Two rows prove
+  // ambiguity without loading an arbitrary membership collection. This blocks a new
   // FK-backed membership for the actor while an authorized operation commits.
   const user = await tx.query("SELECT id FROM public.users WHERE id=$1 FOR UPDATE", [actor]);
   if (user.rows.length !== 1) throw new BoundaryError(403);
   const memberships = await tx.query(
-    "SELECT org_id,user_id,role,created_at,updated_at FROM public.organization_members WHERE user_id=$1 ORDER BY org_id FOR SHARE", [actor]);
+    "SELECT org_id,user_id,role,created_at,updated_at FROM public.organization_members WHERE user_id=$1 ORDER BY org_id LIMIT 2 FOR SHARE", [actor]);
   if (memberships.rows.length !== 1) throw new BoundaryError(403);
   const m = memberships.rows[0];
   if (!opaqueId(m.org_id) || m.user_id !== actor || !["owner","member"].includes(m.role)) throw new BoundaryError(403);

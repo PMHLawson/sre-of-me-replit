@@ -138,8 +138,8 @@ function serverClock(clock: () => Date): Date {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new BoundaryError(503);
   return value;
 }
-async function view(store: Store, domain: Record<string, any>, asOf: Date) {
-  const policies = (await store.policies.list()).filter(p => p.domain_id === domain.domain_id).sort((a, b) => a.revision - b.revision);
+async function view(store: Store, domain: Record<string, any>, asOf: Date, suppliedPolicies?:Record<string,any>[]) {
+  const policies = (suppliedPolicies ?? await store.policies.list(domain.domain_id)).sort((a, b) => a.revision - b.revision);
   const versions = policies.map(p => {
     const parsed = DomainConfigurationSchema.safeParse(p.configuration);
     if (!parsed.success) throw new BoundaryError(503);
@@ -160,7 +160,13 @@ export function createDomainServiceV2(unit: Unit, options: { clock?: () => Date 
     list: (request: Request) => unit.run(request, async ownership => {
       const store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       const at = serverClock(clock), result = [];
-      for (const domain of await store.domains.list()) result.push(await view(store, domain, at));
+      const domains=await store.domains.list(),byDomain=new Map<string,Record<string,any>[]>();
+      // One complete bounded owner query, instead of rescanning every owner
+      // policy for each domain. No partial list is ever presented as complete.
+      for(const policy of await store.policies.list()) {
+        const group=byDomain.get(policy.domain_id)??[];group.push(policy);byDomain.set(policy.domain_id,group);
+      }
+      for (const domain of domains) result.push(await view(store, domain, at,byDomain.get(domain.domain_id)??[]));
       return { domains: result };
     }),
     read: (request: Request, key: unknown) => unit.run(request, async ownership => {
@@ -176,7 +182,7 @@ export function createDomainServiceV2(unit: Unit, options: { clock?: () => Date 
     configure: (request: Request, key: unknown, input: unknown) => unit.run(request, async ownership => {
       const domainId = parse(id, key), p = parse(configureInput, input), store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       const domain = await store.domains.get([domainId]);
-      const previous = (await store.policies.list()).filter(policy => policy.domain_id === domainId).sort((a, b) => a.revision - b.revision).at(-1);
+      const previous = (await store.policies.list(domainId)).at(-1);
       if (!previous || previous.policy_version_id !== p.expectedPolicyVersionId)
         return invalid("expectedPolicyVersionId", "version_conflict", "Reload this domain before saving a new policy version.");
       const c = configuration(p.configuration, ownership, domainId, previous.revision + 1, previous.policy_version_id);

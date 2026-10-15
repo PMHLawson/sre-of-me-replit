@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS, READ_TIMEOUT_MS } from "../lib/read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema,
-  validateProspectiveRevision, validateObservationContext } from "../../shared/domain-config";
+  validateProspectiveRevision, validateObservationContext, type DomainConfiguration } from "../../shared/domain-config";
 import { createAuditService } from "../lib/audit-service";
 import { ActivityCreateInputSchema, ActivityIdSchema, ActivitySubmissionKeySchema, ActivityListInputSchema,
   ActivityCursorPayloadSchema, ActivityTimestampSchema, ActivityViewSchema, validatePracticeValues,
@@ -65,9 +67,42 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     (Object.hasOwn(options,"clock")&&typeof options.clock!=="function"))throw new BoundaryError(503);
   const clock=options.clock??(()=>new Date());
   const scope=[context.orgId,context.actorUserId];
-  const run=<T>(fn:(tx:Transaction)=>Promise<T>) => bounded(() => db.transaction(async tx => {
-    await revalidate(tx,db,context); return fn(tx);
+  // One budget is reused when nested repository calls share the pinned
+  // request transaction. Standalone transactions receive their own budget.
+  // Caches and limits belong to this authenticated store, never global state.
+  const operationBudgets=new WeakMap<Transaction,{deadline:number;statements:number}>();
+  const run=<T>(fn:(tx:Transaction)=>Promise<T>) => bounded(() => db.transaction(async raw => {
+    let budget=operationBudgets.get(raw);
+    if(!budget){budget={deadline:performance.now()+READ_TIMEOUT_MS*6,statements:0};operationBudgets.set(raw,budget);}
+    const current=budget;
+    const remaining=()=>Math.floor(current.deadline-performance.now());
+    const tx:Transaction={query:async(sql,values)=>{
+      if(++current.statements>2048||remaining()<1)throw new ResourceLimitError();
+      // Reapply transaction-local deadlines using the monotonic remaining
+      // allowance, so a final query cannot start a fresh full time budget.
+      const timeout=Math.max(1,Math.min(READ_TIMEOUT_MS,remaining()));
+      try{
+        await raw.query("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout',$2,true)",
+          [String(timeout),String(Math.min(1000,timeout))]);
+        if(remaining()<1)throw new ResourceLimitError();
+        return await raw.query(sql,values);
+      } catch(error){
+        if(["57014","55P03"].includes(String((error as {code?:unknown})?.code)))throw new ResourceLimitError();
+        throw error;
+      }
+    }};
+    await revalidate(tx,db,context);
+    const result=await fn(tx);
+    if(remaining()<1)throw new ResourceLimitError();
+    return result;
   }));
+  // These are complete-result safety budgets, not truncation or retention.
+  // A caller receives all matching rows or an explicit unavailable result.
+  const rowBudget=(kind:Kind)=>kind==="policy"||kind==="observation"||kind==="evaluation"?MAX_READ_ROWS:MAX_COLLECTION_ROWS;
+  function complete<T>(rows:T[],maximum:number):T[]{
+    if(rows.length>maximum)throw new ResourceLimitError();
+    return rows;
+  }
   function identity(kind:Kind, input:unknown): string[] {
     return parse(z.array(id).length(tables[kind].keys.length),input);
   }
@@ -78,8 +113,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     if(r.rows.length!==1)throw new BoundaryError(404);return r.rows[0];
   }
   async function list(tx:Transaction,kind:Kind,extra="",args:unknown[]=[]) {
-    return (await tx.query(`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
-      ORDER BY ${tables[kind].keys.join(",")}`,[...scope,...args])).rows;
+    const maximum=rowBudget(kind);
+    return complete((await tx.query(`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
+      ORDER BY ${tables[kind].keys.join(",")} LIMIT ${args.length+3}`,[...scope,...args,maximum+1])).rows,maximum);
   }
   async function insert(tx:Transaction,kind:Kind,values:Record<string,unknown>,reason:string) {
     const row={org_id:scope[0],owner_user_id:scope[1],...values},columns=Object.keys(row);
@@ -113,12 +149,14 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   async function appendPolicy(tx:Transaction,input:unknown,reason:unknown) {
     const c=parse(DomainConfigurationSchema,input),r=parse(reasonSchema,reason);owned(c);
     const previous=await history(tx,c.domainId),last=previous.at(-1);
+    if(previous.length>=MAX_READ_ROWS||c.measurements.length>MAX_COLLECTION_ROWS)throw new ResourceLimitError();
     // Capture actual server time only AFTER acquiring domain/history locks.
     const now=clock();
     if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
     if(Date.parse(c.effectiveFrom)<now.getTime())throw new BoundaryError(400);
     if(last?!validateProspectiveRevision(last.configuration,c,c.effectiveFrom).success:c.revision!==1)throw new BoundaryError(400);
-    const persisted=await list(tx,"observation"," AND domain_id=$3",[c.domainId]);
+    const persisted=complete((await tx.query(`SELECT observation FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
+      AND domain_id=$3 ORDER BY observation_id LIMIT $4`,[...scope,c.domainId,MAX_READ_ROWS+1])).rows,MAX_READ_ROWS);
     if(!ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:[...previous.map(p=>p.configuration),c],observations:persisted.map(o=>o.observation)}).success)
     throw new BoundaryError(400);
     const result=await insert(tx,"policy",{policy_version_id:c.policyVersionId,domain_id:c.domainId,revision:c.revision,
@@ -159,11 +197,24 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const result=ActivityTimestampSchema.safeParse(candidate);
     if(!result.success)throw new BoundaryError(503);return result.data;
   }
-  async function practiceHistory(tx:Transaction,domainId:string) {
+  type PracticeHistory={domain:any;configurations:DomainConfiguration[]};
+  // A page may reference the same version many times. Reuse only inside this
+  // operation's transaction, while the original domain/history locks are held.
+  const practiceHistories=new WeakMap<Transaction,Map<string,Promise<PracticeHistory>>>();
+  const practicePolicies=new WeakMap<Transaction,Map<string,Promise<{domain:any;configuration:DomainConfiguration;next:DomainConfiguration|undefined}>>>();
+  async function practiceHistory(tx:Transaction,domainId:string):Promise<PracticeHistory> {
+    let cache=practiceHistories.get(tx);
+    if(!cache){cache=new Map();practiceHistories.set(tx,cache);}
+    let pending=cache.get(domainId);
+    if(!pending){pending=loadPracticeHistory(tx,domainId);cache.set(domainId,pending);}
+    return pending;
+  }
+  async function loadPracticeHistory(tx:Transaction,domainId:string):Promise<PracticeHistory> {
     const domain=await get(tx,"domain",[domainId],true);
     const versions=(await tx.query(`SELECT *,effective_from=date_trunc('milliseconds',effective_from) AS __personal_millisecond_time
       FROM public.policy_versions WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 ORDER BY revision FOR SHARE`,[...scope,domainId])).rows;
+      AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE`,[...scope,domainId,MAX_READ_ROWS+1])).rows;
+    complete(versions,MAX_READ_ROWS);
     if(!versions.length)return {domain,configurations:[] as import("../../shared/domain-config").DomainConfiguration[]};
     const bundle=ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:versions.map(p=>p.configuration),observations:[]});
     if(!bundle.success)throw new BoundaryError(503);
@@ -177,12 +228,21 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     return {domain,configurations:bundle.data.configurations};
   }
   async function practicePolicy(tx:Transaction,domainId:string,policyId:string) {
+    let cache=practicePolicies.get(tx);
+    if(!cache){cache=new Map();practicePolicies.set(tx,cache);}
+    const key=JSON.stringify([domainId,policyId]);
+    let pending=cache.get(key);
+    if(!pending){pending=loadPracticePolicy(tx,domainId,policyId);cache.set(key,pending);}
+    return pending;
+  }
+  async function loadPracticePolicy(tx:Transaction,domainId:string,policyId:string) {
     const {domain,configurations}=await practiceHistory(tx,domainId);
     const index=configurations.findIndex(p=>p.policyVersionId===policyId);
     if(index<0)throw new BoundaryError(404);
     const configuration=configurations[index];
     const dimensions=(await tx.query(`SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 AND policy_version_id=$4 ORDER BY measurement_id FOR SHARE`,[...scope,domainId,policyId])).rows;
+      AND domain_id=$3 AND policy_version_id=$4 ORDER BY measurement_id LIMIT $5 FOR SHARE`,[...scope,domainId,policyId,MAX_COLLECTION_ROWS+1])).rows;
+    complete(dimensions,MAX_COLLECTION_ROWS);
     if(dimensions.length!==configuration.measurements.length||configuration.measurements.some(m=>
       dimensions.filter(d=>d.measurement_id===m.measurementId&&semanticEqual(d.definition,m)).length!==1))throw new BoundaryError(503);
     return {domain,configuration,next:configurations[index+1]};
@@ -202,7 +262,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function originalPractice(tx:Transaction,row:any) {
     const audits=(await tx.query(`SELECT "after" FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2
-      AND entity_type='observations' AND entity_id=$3 AND action='create' ORDER BY audit_event_id`,[...scope,JSON.stringify([row.observation_id])])).rows;
+      AND entity_type='observations' AND entity_id=$3 AND action='create' ORDER BY audit_event_id LIMIT 2`,[...scope,JSON.stringify([row.observation_id])])).rows;
     if(audits.length!==1)throw new BoundaryError(503);
     const original=audits[0].after;
     if(!original||original.deleted_at!==null||original.idempotency_key!==row.idempotency_key||
@@ -237,7 +297,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     return (await tx.query(`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
       (deleted_at IS NULL OR deleted_at=date_trunc('milliseconds',deleted_at)) AS __personal_deleted_millisecond_time
       FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
-      AND idempotency_key LIKE 'personal-practice:v1:%' AND legacy_source_type IS NULL AND legacy_source_id IS NULL${extra}${lock?" FOR UPDATE":""}`,
+      AND idempotency_key LIKE 'personal-practice:v1:%' AND legacy_source_type IS NULL AND legacy_source_id IS NULL${extra} LIMIT 2${lock?" FOR UPDATE":""}`,
       [...scope,...args])).rows;
   }
   type MutationOperation="edit"|"delete"|"restore";
@@ -257,7 +317,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const identities=mutationIdentities(row.observation_id,key);
     const audits=(await tx.query(`SELECT entity_id,reason,"before","after" FROM public.audit_events
       WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND entity_type='observations' AND action='update'
-      AND entity_id=ANY($3::text[]) ORDER BY audit_event_id`,[...scope,identities.map(value=>JSON.stringify(value.identity))])).rows;
+      AND entity_id=ANY($3::text[]) ORDER BY audit_event_id LIMIT 2`,[...scope,identities.map(value=>JSON.stringify(value.identity))])).rows;
     if(audits.length>1)throw new BoundaryError(503);if(!audits.length)return null;
     const audit=audits[0],identity=identities.find(value=>JSON.stringify(value.identity)===audit.entity_id);
     if(!identity||!reasonSchema.safeParse(audit.reason).success||audit.reason!==audit.reason.trim())throw new BoundaryError(503);
@@ -284,7 +344,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const policy=await practicePolicy(tx,row.domain_id,observation.policyVersionId);
     if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
     const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 AND source_kind='manual-legacy' FOR SHARE`,[...scope,row.domain_id])).rows;
+      AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,row.domain_id])).rows;
     if(legacy.length)throw new BoundaryError(400);
     const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
     const p=parse(ActivityCreateInputSchema,{submissionKey:"mutation-validation",domainId:row.domain_id,policyVersionId:observation.policyVersionId,
@@ -351,7 +411,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     eligibility:(input:unknown)=>run(async tx=>{
       const domainId=parse(ActivityIdSchema,input),history=await practiceHistory(tx,domainId);
       const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-        AND domain_id=$3 AND source_kind='manual-legacy' FOR SHARE`,[...scope,domainId])).rows;
+        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,domainId])).rows;
       const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
       if(history.domain.deactivated_at!==null||history.domain.tombstoned_at!==null)
         return {domainId,canCreate:false as const,reason:"inactive" as const};
@@ -378,7 +438,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       }
       if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
       const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-        AND domain_id=$3 AND source_kind='manual-legacy' FOR SHARE`,[...scope,p.domainId])).rows;
+        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,p.domainId])).rows;
       if(legacy.length)throw new BoundaryError(400);
       const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
       if(Date.parse(p.observedAt)>now.getTime()||Date.parse(policy.configuration.effectiveFrom)>now.getTime()||
@@ -439,6 +499,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       // Used by the management service only after injecting authenticated identities.
       createWithPolicy:(input:unknown,configuration:unknown,reason:unknown)=>run(async tx=>{
         const p=parse(domainInput,input),c=parse(DomainConfigurationSchema,configuration),r=parse(reasonSchema,reason);owned(c);
+        if(c.measurements.length>MAX_COLLECTION_ROWS)throw new ResourceLimitError();
         if(c.domainId!==p.domainId||c.displayName!==p.displayName||c.revision!==1||c.previousVersionId!==undefined)
           throw new BoundaryError(400);
         let domain;
@@ -462,6 +523,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       }),
     }),
     policies:Object.freeze({...reads("policy"),
+      // Optional server-owned domain filter; omitted input keeps the complete,
+      // bounded owner list. No new public cursor/authority is accepted.
+      list:(domainId?:unknown)=>run(tx=>domainId===undefined?list(tx,"policy"):history(tx,parse(id,domainId))),
       append:(input:unknown,reason:unknown)=>run(tx=>appendPolicy(tx,input,reason)),
     }),
     dimensions:reads("dimension"),
@@ -529,8 +593,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       delete:(keys:unknown,reason:unknown)=>run(tx=>remove(tx,"binding",identity("binding",keys),parse(reasonSchema,reason))),
     }),
     audit:Object.freeze({
-      list:()=>run(async tx=>(await tx.query(
-        "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 ORDER BY occurred_at,audit_event_id",scope)).rows),
+      list:()=>run(async tx=>complete((await tx.query(
+        "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 ORDER BY occurred_at,audit_event_id LIMIT $3",
+        [...scope,MAX_COLLECTION_ROWS+1])).rows,MAX_COLLECTION_ROWS)),
       get:(input:unknown)=>run(async tx=>{
         const key=parse(id,input),r=await tx.query(
           "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND audit_event_id=$3",[...scope,key]);
