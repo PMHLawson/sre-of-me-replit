@@ -5,12 +5,13 @@ import {normalizeComplianceWindowDays,type Session,type Deviation,type UserSetti
 import type {SessionSummary,DeviationSummary,HistoryPage,TextChunk,TextDetail} from "../../shared/legacy-history";
 import {ResourceLimitError,MAX_READ_ROWS,MAX_COLLECTION_ROWS,READ_TIMEOUT_MS} from "./read-budget";
 import {planHistoryInput} from "./history-input";
+import {withTransactionReadBudget,readComplete} from "./transaction-read-budget";
 import {logicalDay,withLogicalDayMemo,type PolicyEngineOptions} from "./policy-engine";
 
 export class HistoryInputError extends Error { readonly status=400; }
 export class HistoryNotFound extends Error { readonly status=404; }
 export class HistoryChanged extends Error { readonly status=409; }
-type Query=(sql:string,args?:unknown[])=>Promise<{rows:any[]}>;
+type Query=(sql:string,args:unknown[],columns:readonly string[],maximum:number)=>Promise<{rows:any[]}>;
 const iso=(value:any):string=>new Date(value).toISOString();
 const nullableIso=(value:any):string|null=>value===null?null:iso(value);
 const validId=(value:unknown):value is string=>typeof value==="string"&&value.length>0&&Buffer.byteLength(value,"utf8")<=2048&&!/\u0000/.test(value);
@@ -23,6 +24,10 @@ const sessionColumns=`s.id,s.user_id AS "userId",s.domain,s.duration_minutes AS 
 const deviationColumns=`d.id,d.user_id AS "userId",d.domain,d.start_at AS "startAt",d.end_at AS "endAt",
   d.ended_at AS "endedAt",d.deleted_at AS "deletedAt",d.exclude_from_composite AS "excludeFromComposite",
   d.reason IS NOT NULL AS "hasReason",COALESCE(octet_length(d.reason),0) AS "reasonBytes"`;
+const sessionFields=["id","userId","domain","durationMinutes","timestamp","deletedAt","isAnomaly",
+  "hasNotes","hasAnomalyNote","notesBytes","anomalyNoteBytes"] as const;
+const deviationFields=["id","userId","domain","startAt","endAt","endedAt","deletedAt","excludeFromComposite",
+  "hasReason","reasonBytes"] as const;
 const sessionSummary=(r:any):SessionSummary=>({...r,timestamp:iso(r.timestamp),deletedAt:nullableIso(r.deletedAt),
   notes:null,anomalyNote:null,notesAvailability:r.hasNotes?"not_loaded":"absent",
   anomalyNoteAvailability:r.hasAnomalyNote?"not_loaded":"absent"});
@@ -76,14 +81,17 @@ export class LegacyHistoryReads {
     };
     try{
       client=await this.pool.connect();await control("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");begun=true;
-      const query:Query=async(sql,args=[])=>{
-        const remaining=Math.floor(deadline-performance.now());if(remaining<=0||++statements>32)throw new ResourceLimitError();
-        await control("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout','1000',true)",
-          [String(Math.min(READ_TIMEOUT_MS,remaining))]);
-        return control(sql,args);
-      };
-      const now=this.clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new Error("Invalid read clock");
-      const result=await operation(query,now);if(performance.now()>deadline)throw new ResourceLimitError();
+      // Admission measures all variable metadata inside SQL before pg receives
+      // it. One serialized byte allowance belongs to this complete snapshot,
+      // including settings, context, scoring inputs and page lookahead rows.
+      const result=await withTransactionReadBudget({query:(sql,args)=>control(sql,args)},async tx=>{
+        const query:Query=async(sql,args,columns,maximum)=>{
+          if(performance.now()>=deadline||++statements>32)throw new ResourceLimitError();
+          return {rows:await readComplete(tx,sql,args,columns,maximum)};
+        };
+        const now=this.clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new Error("Invalid read clock");
+        return operation(query,now);
+      },deadline);
       await control("COMMIT");return result;
     }catch(error){
       const transportTimeout=(error as Error)?.message==="Query read timeout";
@@ -108,7 +116,8 @@ export class LegacyHistoryReads {
         WHERE ${alias}.user_id=$1 AND ${alias}.deleted_at ${deleted}
         AND ($2::timestamptz IS NULL OR (${alias}.${column},${alias}.id)<($2::timestamptz,$3::varchar))${filter}
         ORDER BY ${alias}.${column} DESC,${alias}.id DESC LIMIT $4`,
-        [user,cursor?.at??null,cursor?.id??null,input.limit+1,...(filter?[now]:[])])).rows;
+        [user,cursor?.at??null,cursor?.id??null,input.limit+1,...(filter?[now]:[])],
+        [...(deviation?deviationFields:sessionFields),"__cursorAt"],input.limit+1)).rows;
       const selected=rows.slice(0,input.limit),last=selected.at(-1),nextCursor=rows.length>input.limit&&last?
         encodedCursor(scope,last.__cursorAt,last.id):null;
       const items=selected.map(row=>{const {__cursorAt,...clean}=row;return deviation?deviationSummary(clean):sessionSummary(clean);});
@@ -119,14 +128,15 @@ export class LegacyHistoryReads {
     return this.snapshot(user,async(q,now)=>{
       const settingRows=(await q(`SELECT user_id AS "userId",day_start_hour AS "dayStartHour",timezone,window_days AS "windowDays",
         notifications_enabled AS "notificationsEnabled",notification_tier AS "notificationTier",updated_at AS "updatedAt"
-        FROM public.user_settings WHERE user_id=$1`,[user])).rows;
+        FROM public.user_settings WHERE user_id=$1`,[user],
+        ["userId","dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier","updatedAt"],1)).rows;
       if(settingRows.length>1)throw new Error("Ambiguous settings");
       // Same accepted defaults as getUserSettings, without writing in this
       // read-only snapshot. Normal settings access still persists its row.
       const source=settingRows[0]??{userId:user,dayStartHour:4,timezone:"America/New_York",windowDays:7,
         notificationsEnabled:false,notificationTier:"WARNING",updatedAt:now};
       const settings={...source,windowDays:normalizeComplianceWindowDays(source.windowDays)} as UserSettings;
-      const users=(await q('SELECT created_at AS "createdAt" FROM public.users WHERE id=$1',[user])).rows;
+      const users=(await q('SELECT created_at AS "createdAt" FROM public.users WHERE id=$1',[user],["createdAt"],1)).rows;
       const opts=withLogicalDayMemo({now,dayStartHour:settings.dayStartHour,timezone:settings.timezone,windowDays:settings.windowDays,
         userCreatedAt:users[0]?.createdAt??undefined});
       const plan=planHistoryInput(opts,days);
@@ -135,13 +145,14 @@ export class LegacyHistoryReads {
       // neither are silently discarded to meet a resource budget.
       const contextRows=checkedRows((await q(`SELECT ${sessionColumns} FROM public.sessions s
         WHERE s.user_id=$1 AND s.deleted_at IS NULL AND s.timestamp>=$2 ORDER BY s.timestamp DESC,s.id DESC LIMIT $3`,
-        [user,contextFrom,MAX_READ_ROWS+1])).rows,MAX_READ_ROWS);
+        [user,contextFrom,MAX_READ_ROWS+1],sessionFields,MAX_READ_ROWS)).rows,MAX_READ_ROWS);
       const scoreRows=checkedRows((await q(`SELECT s.id,s.user_id AS "userId",s.domain,s.duration_minutes AS "durationMinutes",s.timestamp,s.is_anomaly AS "isAnomaly"
         FROM public.sessions s WHERE s.user_id=$1 AND s.deleted_at IS NULL AND s.timestamp>=$2 AND s.timestamp<$3
-        ORDER BY s.timestamp DESC,s.id DESC LIMIT $4`,[user,plan.fromInclusive,plan.untilExclusive,MAX_READ_ROWS+1])).rows,MAX_READ_ROWS);
+        ORDER BY s.timestamp DESC,s.id DESC LIMIT $4`,[user,plan.fromInclusive,plan.untilExclusive,MAX_READ_ROWS+1],
+        ["id","userId","domain","durationMinutes","timestamp","isAnomaly"],MAX_READ_ROWS)).rows,MAX_READ_ROWS);
       const deviationRows=checkedRows((await q(`SELECT ${deviationColumns} FROM public.deviations d
         WHERE d.user_id=$1 AND d.deleted_at IS NULL AND COALESCE(d.ended_at,d.end_at,'infinity'::timestamptz)>=$2
-        ORDER BY d.start_at DESC,d.id DESC LIMIT $3`,[user,contextFrom,MAX_COLLECTION_ROWS+1])).rows,MAX_COLLECTION_ROWS);
+        ORDER BY d.start_at DESC,d.id DESC LIMIT $3`,[user,contextFrom,MAX_COLLECTION_ROWS+1],deviationFields,MAX_COLLECTION_ROWS)).rows,MAX_COLLECTION_ROWS);
       const active=deviationRows.filter(d=>d.endedAt===null&&new Date(d.startAt)<=now&&(d.endAt===null||new Date(d.endAt)>=now));
       const deviations=active.map(d=>({...d,startAt:new Date(d.startAt),endAt:d.endAt===null?null:new Date(d.endAt),
         endedAt:null,deletedAt:null,reason:""})) as Deviation[];
@@ -154,14 +165,16 @@ export class LegacyHistoryReads {
     return this.snapshot(user,async q=>checkedRows((await q(`SELECT s.id,s.user_id AS "userId",s.domain,s.duration_minutes AS "durationMinutes",s.timestamp
       FROM public.sessions s WHERE s.user_id=$1 AND s.deleted_at IS NULL AND s.timestamp>=$2 AND s.timestamp<=$3
       AND ($4::text IS NULL OR s.domain=$4) AND ($5::text IS NULL OR s.id<>$5)
-      ORDER BY s.timestamp DESC,s.id DESC LIMIT $6`,[user,new Date(now.getTime()-42*86400000),now,domain??null,excludeId??null,MAX_READ_ROWS+1])).rows,MAX_READ_ROWS).map(calcSession));
+      ORDER BY s.timestamp DESC,s.id DESC LIMIT $6`,[user,new Date(now.getTime()-42*86400000),now,domain??null,excludeId??null,MAX_READ_ROWS+1],
+      ["id","userId","domain","durationMinutes","timestamp"],MAX_READ_ROWS)).rows,MAX_READ_ROWS).map(calcSession));
   }
   detail(user:string,kind:"sessions"|"deviations",id:string):Promise<TextDetail<SessionSummary|DeviationSummary>>{
     own(id);return this.snapshot(user,async q=>{
       const d=kind==="deviations",a=d?"d":"s";
       const rows=(await q(`SELECT ${d?deviationColumns:sessionColumns},
         encode(sha256(convert_to(to_jsonb(${a})::text,'UTF8')),'hex') AS "textVersion"
-        FROM public.${kind} ${a} WHERE ${a}.user_id=$1 AND ${a}.id=$2 LIMIT 1`,[user,id])).rows;
+        FROM public.${kind} ${a} WHERE ${a}.user_id=$1 AND ${a}.id=$2 LIMIT 1`,[user,id],
+        [...(d?deviationFields:sessionFields),"textVersion"],1)).rows;
       if(!rows.length)throw new HistoryNotFound();
       const {textVersion,...row}=rows[0];return {...(d?deviationSummary(row):sessionSummary(row)),textVersion};
     });
@@ -175,12 +188,13 @@ export class LegacyHistoryReads {
       kind==="sessions"&&query.field==="notes"?"notes":kind==="sessions"&&query.field==="anomalyNote"?"anomaly_note":null;
     if(!field)throw new HistoryInputError();const offset=Number(query.offset??0);
     return this.snapshot(user,async q=>{
-      const rows=(await q(`WITH owned AS (SELECT t.${field} AS value,
+      const rows=(await q(`SELECT * FROM (WITH owned AS (SELECT t.${field} AS value,
         encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS version
         FROM public.${kind} t WHERE t.user_id=$1 AND t.id=$2)
         SELECT version,CASE WHEN version=$3 THEN substring(value FROM $4::int+1 FOR 2048) END AS text,
         CASE WHEN version=$3 THEN char_length(value) END AS characters,
-        CASE WHEN version=$3 THEN octet_length(value) END AS bytes FROM owned`,[user,id,query.version,offset])).rows;
+        CASE WHEN version=$3 THEN octet_length(value) END AS bytes FROM owned) AS text_chunk`,
+        [user,id,query.version,offset],["version","text","characters","bytes"],1)).rows;
       if(!rows.length)throw new HistoryNotFound();const row=rows[0];
       if(row.version!==query.version)throw new HistoryChanged();
       if(offset>(row.characters??0))throw new HistoryInputError();

@@ -22,11 +22,19 @@ prevents mixing chunks across a change. Chunk bytes is the TOTAL field UTF8 leng
 ## Resource limits
 
 Each complete legacy calculation/context input allows2000 rows; relevant deviations
-allow1000. Each page allows100 rows. SQL statement and transport-query timeouts are
+allow1000. Each page allows100 rows plus its explicit one-row lookahead. All variable
+metadata, including stored IDs, domain names and settings, is admitted inside SQL
+before payload transfer. One serialized8MiB byte allowance covers the whole legacy
+snapshot, rather than resetting for context and scoring queries. SQL statement and transport-query timeouts are
 2500ms; lock timeout1000ms; the operation budget is15 seconds measured monotonically.
 Pool acquisition uses the existing finite application-pool connection timeout.
 Timeouts/overflow return503 with no partial score. These are availability safeguards,
 not data truncation or deletion. Existing mutation responses remain compatible.
+The readonly history/derived routes no longer call the settings persistence service
+before their bounded snapshot; the ordinary settings API still persists defaults
+and normalizes legacy selections as before. Detail/chunk version hashing examines
+the full old record inside PostgreSQL and is bounded by execution/transport time,
+not by a claim that PostgreSQL never materializes that full record.
 
 ## Additive index adoption
 

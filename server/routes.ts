@@ -72,7 +72,6 @@ export async function registerRoutes(
     res.setHeader("Cache-Control","no-store");
     try{
       const days=historyDays(req.query),userId:string=req.user.claims.sub;
-      await storage.getUserSettings(userId);
       res.json(stateBundle(await historyReads.current(userId,days),days));
     }catch(error){respondHistoryError(error,res);}
   });
@@ -85,7 +84,7 @@ export async function registerRoutes(
     res.setHeader("Cache-Control","no-store");
     try{
       if(Object.keys(req.query).length)throw new HistoryInputError();
-      const userId:string=req.user.claims.sub;await storage.getUserSettings(userId);
+      const userId:string=req.user.claims.sub;
       const input=await historyReads.current(userId,14);
       res.json({asOf:input.now.toISOString(),sessions:input.context,deviations:input.contextDeviations,
         fromInclusive:input.fromInclusive,complete:true});
@@ -96,7 +95,7 @@ export async function registerRoutes(
     res.setHeader("Cache-Control","no-store");
     try{
       if(Object.keys(req.query).length)throw new HistoryInputError();
-      const userId:string=req.user.claims.sub;await storage.getUserSettings(userId);
+      const userId:string=req.user.claims.sub;
       res.json(policyResponse(await historyReads.current(userId,14)));
     }catch(error){respondHistoryError(error,res);}
   });
@@ -104,7 +103,7 @@ export async function registerRoutes(
     res.setHeader("Cache-Control","no-store");
     try{
       const days=historyDays(req.query),userId:string=req.user.claims.sub;
-      await storage.getUserSettings(userId);const input=await historyReads.current(userId,days);
+      const input=await historyReads.current(userId,days);
       res.json(computeEscalationState(input.sessions,input.opts,days));
     }catch(error){respondHistoryError(error,res);}
   });
