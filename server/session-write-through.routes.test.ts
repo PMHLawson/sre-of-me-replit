@@ -127,8 +127,10 @@ it("creates actual synchronized rows through the registered route and returns bo
   const other = await raw("sessions", "user_id='api-b' OR user_id IS NULL");
   const r = await http("POST", "/api/sessions?owner=api-b", { ...payload, userId: "api-b", organizationId: "forged", notes: "" });
   expect(r.status).toBe(201); expect(r.body).toMatchObject({ userId: "api-a", domain: "music", durationMinutes: 1,
-    timestamp: "2026-01-01T01:02:03.123Z", notes: null, isAnomaly: false, anomalyNote: null, deletedAt: null });
-  expect(Object.keys(r.body).sort()).toEqual(["id", "userId", "domain", "durationMinutes", "timestamp", "notes", "isAnomaly", "anomalyNote", "deletedAt"].sort());
+    timestamp: "2026-01-01T01:02:03.123Z", notes: null, isAnomaly: false, anomalyNote: null, deletedAt: null,
+    hasNotes:true,hasAnomalyNote:false,notesBytes:0,anomalyNoteBytes:0,notesAvailability:"not_loaded",anomalyNoteAvailability:"absent" });
+  expect(Object.keys(r.body).sort()).toEqual(["id", "userId", "domain", "durationMinutes", "timestamp", "notes", "isAnomaly", "anomalyNote", "deletedAt",
+    "hasNotes","hasAnomalyNote","notesBytes","anomalyNoteBytes","notesAvailability","anomalyNoteAvailability"].sort());
   expect((await raw("sessions", "id=$1", [r.body.id]))[0].timestamp).toContain(".123456");
   expect((await raw("sessions","id=$1",[r.body.id]))[0].notes).toBe("");
   expect(await raw("observations", "legacy_source_id=$1", [r.body.id])).toHaveLength(1);
