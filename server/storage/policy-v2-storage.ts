@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { performance } from "node:perf_hooks";
+import { withTransactionReadBudget, readComplete } from "../lib/transaction-read-budget";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS, READ_TIMEOUT_MS } from "../lib/read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema,
   validateProspectiveRevision, validateObservationContext, type DomainConfiguration } from "../../shared/domain-config";
@@ -48,6 +48,101 @@ const tables = {
   association:{table:"deviation_domains",keys:["deviation_id","domain_id"]},
   binding:{table:"source_bindings",keys:["binding_id"]},
 } as const;
+const readColumns = {
+  "domain": [
+    "domain_id",
+    "org_id",
+    "owner_user_id",
+    "slug",
+    "display_name",
+    "deactivated_at",
+    "tombstoned_at"
+  ],
+  "policy": [
+    "policy_version_id",
+    "org_id",
+    "owner_user_id",
+    "domain_id",
+    "revision",
+    "effective_from",
+    "previous_version_id",
+    "configuration",
+    "evaluation_policy"
+  ],
+  "dimension": [
+    "org_id",
+    "owner_user_id",
+    "domain_id",
+    "policy_version_id",
+    "measurement_id",
+    "definition"
+  ],
+  "observation": [
+    "observation_id",
+    "org_id",
+    "owner_user_id",
+    "domain_id",
+    "policy_version_id",
+    "idempotency_key",
+    "observed_at",
+    "observation",
+    "is_anomaly",
+    "anomaly_note",
+    "deleted_at",
+    "legacy_source_type",
+    "legacy_source_id"
+  ],
+  "evaluation": [
+    "result_id",
+    "org_id",
+    "owner_user_id",
+    "domain_id",
+    "policy_version_id",
+    "window_start",
+    "window_end",
+    "timezone",
+    "day_start_hour",
+    "calculated_at",
+    "calculation_version",
+    "input_fingerprint",
+    "eligible_days",
+    "result",
+    "components",
+    "explanation",
+    "budget_snapshot",
+    "budget_enabled_snapshot"
+  ],
+  "deviation": [
+    "deviation_id",
+    "org_id",
+    "owner_user_id",
+    "start_at",
+    "end_at",
+    "ended_at",
+    "deleted_at",
+    "scope",
+    "type",
+    "reason",
+    "policy",
+    "provenance"
+  ],
+  "association": [
+    "org_id",
+    "owner_user_id",
+    "deviation_id",
+    "domain_id"
+  ],
+  "binding": [
+    "binding_id",
+    "org_id",
+    "owner_user_id",
+    "domain_id",
+    "source_kind",
+    "external_id",
+    "metadata"
+  ]
+} as const;
+const auditColumns=["audit_event_id","org_id","actor_kind","actor_user_id","entity_type","entity_id","action","occurred_at","reason","before","after"] as const;
 type Kind = keyof typeof tables;
 function semanticEqual(a:unknown,b:unknown):boolean {
   if(a===b)return true;
@@ -67,35 +162,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     (Object.hasOwn(options,"clock")&&typeof options.clock!=="function"))throw new BoundaryError(503);
   const clock=options.clock??(()=>new Date());
   const scope=[context.orgId,context.actorUserId];
-  // One budget is reused when nested repository calls share the pinned
-  // request transaction. Standalone transactions receive their own budget.
-  // Caches and limits belong to this authenticated store, never global state.
-  const operationBudgets=new WeakMap<Transaction,{deadline:number;statements:number}>();
-  const run=<T>(fn:(tx:Transaction)=>Promise<T>) => bounded(() => db.transaction(async raw => {
-    let budget=operationBudgets.get(raw);
-    if(!budget){budget={deadline:performance.now()+READ_TIMEOUT_MS*6,statements:0};operationBudgets.set(raw,budget);}
-    const current=budget;
-    const remaining=()=>Math.floor(current.deadline-performance.now());
-    const tx:Transaction={query:async(sql,values)=>{
-      if(++current.statements>2048||remaining()<1)throw new ResourceLimitError();
-      // Reapply transaction-local deadlines using the monotonic remaining
-      // allowance, so a final query cannot start a fresh full time budget.
-      const timeout=Math.max(1,Math.min(READ_TIMEOUT_MS,remaining()));
-      try{
-        await raw.query("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout',$2,true)",
-          [String(timeout),String(Math.min(1000,timeout))]);
-        if(remaining()<1)throw new ResourceLimitError();
-        return await raw.query(sql,values);
-      } catch(error){
-        if(["57014","55P03"].includes(String((error as {code?:unknown})?.code)))throw new ResourceLimitError();
-        throw error;
-      }
-    }};
-    await revalidate(tx,db,context);
-    const result=await fn(tx);
-    if(remaining()<1)throw new ResourceLimitError();
-    return result;
-  }));
+  // Nested calls reuse the pinned operation's monotonic deadline and byte budget.
+  const run=<T>(fn:(tx:Transaction)=>Promise<T>) => bounded(() => db.transaction(raw =>
+    withTransactionReadBudget(raw,async tx=>{await revalidate(tx,db,context);return fn(tx);}))); 
   // These are complete-result safety budgets, not truncation or retention.
   // A caller receives all matching rows or an explicit unavailable result.
   const rowBudget=(kind:Kind)=>kind==="policy"||kind==="observation"||kind==="evaluation"?MAX_READ_ROWS:MAX_COLLECTION_ROWS;
@@ -108,14 +177,14 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function get(tx:Transaction,kind:Kind,keys:string[],lock=false) {
     const spec=tables[kind];
-    const r=await tx.query(`SELECT * FROM public.${spec.table} WHERE org_id=$1 AND owner_user_id=$2 AND ${
-      spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")}${lock?" FOR UPDATE":""}`,[...scope,...keys]);
-    if(r.rows.length!==1)throw new BoundaryError(404);return r.rows[0];
+    const rows=await readComplete(tx,`SELECT * FROM public.${spec.table} WHERE org_id=$1 AND owner_user_id=$2 AND ${
+      spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")} LIMIT 2${lock?" FOR UPDATE":""}`,[...scope,...keys],readColumns[kind],1);
+    if(rows.length!==1)throw new BoundaryError(404);return rows[0];
   }
   async function list(tx:Transaction,kind:Kind,extra="",args:unknown[]=[]) {
     const maximum=rowBudget(kind);
-    return complete((await tx.query(`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
-      ORDER BY ${tables[kind].keys.join(",")} LIMIT $${args.length+3}`,[...scope,...args,maximum+1])).rows,maximum);
+    return readComplete(tx,`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
+      ORDER BY ${tables[kind].keys.join(",")} LIMIT $${args.length+3}`,[...scope,...args,maximum+1],readColumns[kind],maximum);
   }
   async function insert(tx:Transaction,kind:Kind,values:Record<string,unknown>,reason:string) {
     const row={org_id:scope[0],owner_user_id:scope[1],...values},columns=Object.keys(row);
@@ -155,8 +224,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
     if(Date.parse(c.effectiveFrom)<now.getTime())throw new BoundaryError(400);
     if(last?!validateProspectiveRevision(last.configuration,c,c.effectiveFrom).success:c.revision!==1)throw new BoundaryError(400);
-    const persisted=complete((await tx.query(`SELECT observation FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 ORDER BY observation_id LIMIT $4`,[...scope,c.domainId,MAX_READ_ROWS+1])).rows,MAX_READ_ROWS);
+    const persisted=await readComplete(tx,`SELECT observation FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
+      AND domain_id=$3 ORDER BY observation_id LIMIT $4`,[...scope,c.domainId,MAX_READ_ROWS+1],["observation"],MAX_READ_ROWS);
     if(!ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:[...previous.map(p=>p.configuration),c],observations:persisted.map(o=>o.observation)}).success)
     throw new BoundaryError(400);
     const result=await insert(tx,"policy",{policy_version_id:c.policyVersionId,domain_id:c.domainId,revision:c.revision,
@@ -211,9 +280,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function loadPracticeHistory(tx:Transaction,domainId:string):Promise<PracticeHistory> {
     const domain=await get(tx,"domain",[domainId],true);
-    const versions=(await tx.query(`SELECT *,effective_from=date_trunc('milliseconds',effective_from) AS __personal_millisecond_time
+    const versions=await readComplete(tx,`SELECT *,effective_from=date_trunc('milliseconds',effective_from) AS __personal_millisecond_time
       FROM public.policy_versions WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE`,[...scope,domainId,MAX_READ_ROWS+1])).rows;
+      AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE`,[...scope,domainId,MAX_READ_ROWS+1],[...readColumns.policy,"__personal_millisecond_time"],MAX_READ_ROWS);
     complete(versions,MAX_READ_ROWS);
     if(!versions.length)return {domain,configurations:[] as import("../../shared/domain-config").DomainConfiguration[]};
     const bundle=ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations:versions.map(p=>p.configuration),observations:[]});
@@ -240,8 +309,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const index=configurations.findIndex(p=>p.policyVersionId===policyId);
     if(index<0)throw new BoundaryError(404);
     const configuration=configurations[index];
-    const dimensions=(await tx.query(`SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 AND policy_version_id=$4 ORDER BY measurement_id LIMIT $5 FOR SHARE`,[...scope,domainId,policyId,MAX_COLLECTION_ROWS+1])).rows;
+    const dimensions=await readComplete(tx,`SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2
+      AND domain_id=$3 AND policy_version_id=$4 ORDER BY measurement_id LIMIT $5 FOR SHARE`,[...scope,domainId,policyId,MAX_COLLECTION_ROWS+1],readColumns.dimension,MAX_COLLECTION_ROWS);
     complete(dimensions,MAX_COLLECTION_ROWS);
     if(dimensions.length!==configuration.measurements.length||configuration.measurements.some(m=>
       dimensions.filter(d=>d.measurement_id===m.measurementId&&semanticEqual(d.definition,m)).length!==1))throw new BoundaryError(503);
@@ -261,8 +330,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     return o;
   }
   async function originalPractice(tx:Transaction,row:any) {
-    const audits=(await tx.query(`SELECT "after" FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2
-      AND entity_type='observations' AND entity_id=$3 AND action='create' ORDER BY audit_event_id LIMIT 2`,[...scope,JSON.stringify([row.observation_id])])).rows;
+    const audits=await readComplete(tx,`SELECT "after" FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2
+      AND entity_type='observations' AND entity_id=$3 AND action='create' ORDER BY audit_event_id LIMIT 2`,[...scope,JSON.stringify([row.observation_id])],["after"],2);
     if(audits.length!==1)throw new BoundaryError(503);
     const original=audits[0].after;
     if(!original||original.deleted_at!==null||original.idempotency_key!==row.idempotency_key||
@@ -294,11 +363,11 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     if(!view.success)throw new BoundaryError(503);return view.data;
   }
   async function manualRows(tx:Transaction,extra:string,args:unknown[],lock=false) {
-    return (await tx.query(`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
+    return readComplete(tx,`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
       (deleted_at IS NULL OR deleted_at=date_trunc('milliseconds',deleted_at)) AS __personal_deleted_millisecond_time
       FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
       AND idempotency_key LIKE 'personal-practice:v1:%' AND legacy_source_type IS NULL AND legacy_source_id IS NULL${extra} LIMIT 2${lock?" FOR UPDATE":""}`,
-      [...scope,...args])).rows;
+      [...scope,...args],[...readColumns.observation,"__personal_millisecond_time","__personal_deleted_millisecond_time"],2);
   }
   type MutationOperation="edit"|"delete"|"restore";
   function mutationIdentities(activityId:string,key:string) {
@@ -315,9 +384,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function savedMutation(tx:Transaction,row:any,key:string) {
     const identities=mutationIdentities(row.observation_id,key);
-    const audits=(await tx.query(`SELECT entity_id,reason,"before","after" FROM public.audit_events
+    const audits=await readComplete(tx,`SELECT entity_id,reason,"before","after" FROM public.audit_events
       WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND entity_type='observations' AND action='update'
-      AND entity_id=ANY($3::text[]) ORDER BY audit_event_id LIMIT 2`,[...scope,identities.map(value=>JSON.stringify(value.identity))])).rows;
+      AND entity_id=ANY($3::text[]) ORDER BY audit_event_id LIMIT 2`,[...scope,identities.map(value=>JSON.stringify(value.identity))],["entity_id","reason","before","after"],2);
     if(audits.length>1)throw new BoundaryError(503);if(!audits.length)return null;
     const audit=audits[0],identity=identities.find(value=>JSON.stringify(value.identity)===audit.entity_id);
     if(!identity||!reasonSchema.safeParse(audit.reason).success||audit.reason!==audit.reason.trim())throw new BoundaryError(503);
@@ -343,8 +412,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   async function activePractice(tx:Transaction,row:any,observation:any) {
     const policy=await practicePolicy(tx,row.domain_id,observation.policyVersionId);
     if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
-    const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-      AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,row.domain_id])).rows;
+    const legacy=await readComplete(tx,`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
+      AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,row.domain_id],["binding_id"],1);
     if(legacy.length)throw new BoundaryError(400);
     const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
     const p=parse(ActivityCreateInputSchema,{submissionKey:"mutation-validation",domainId:row.domain_id,policyVersionId:observation.policyVersionId,
@@ -410,8 +479,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     }),
     eligibility:(input:unknown)=>run(async tx=>{
       const domainId=parse(ActivityIdSchema,input),history=await practiceHistory(tx,domainId);
-      const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,domainId])).rows;
+      const legacy=await readComplete(tx,`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
+        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,domainId],["binding_id"],1);
       const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
       if(history.domain.deactivated_at!==null||history.domain.tombstoned_at!==null)
         return {domainId,canCreate:false as const,reason:"inactive" as const};
@@ -437,8 +506,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         return {created:false,submissionKey:p.submissionKey,activity:await practiceView(tx,existing[0])};
       }
       if(policy.domain.deactivated_at!==null||policy.domain.tombstoned_at!==null)throw new BoundaryError(400);
-      const legacy=(await tx.query(`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
-        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,p.domainId])).rows;
+      const legacy=await readComplete(tx,`SELECT binding_id FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2
+        AND domain_id=$3 AND source_kind='manual-legacy' LIMIT 1 FOR SHARE`,[...scope,p.domainId],["binding_id"],1);
       if(legacy.length)throw new BoundaryError(400);
       const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
       if(Date.parse(p.observedAt)>now.getTime()||Date.parse(policy.configuration.effectiveFrom)>now.getTime()||
@@ -471,12 +540,12 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         } catch {throw new BoundaryError(400);}
       }
       if(p.domainId)await get(tx,"domain",[p.domainId]);
-      const rows=(await tx.query(`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
+      const rows=await readComplete(tx,`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,
         (deleted_at IS NULL OR deleted_at=date_trunc('milliseconds',deleted_at)) AS __personal_deleted_millisecond_time
         FROM public.observations WHERE org_id=$1 AND owner_user_id=$2
         AND idempotency_key LIKE 'personal-practice:v1:%' AND legacy_source_type IS NULL AND legacy_source_id IS NULL
         AND ($3::text IS NULL OR domain_id=$3) AND ($4::timestamptz IS NULL OR (observed_at,observation_id)<($4::timestamptz,$5::text))
-        ORDER BY observed_at DESC,observation_id DESC LIMIT $6`,[...scope,p.domainId??null,cursor?.observedAt??null,cursor?.activityId??null,p.limit+1])).rows;
+        ORDER BY observed_at DESC,observation_id DESC LIMIT $6`,[...scope,p.domainId??null,cursor?.observedAt??null,cursor?.activityId??null,p.limit+1],[...readColumns.observation,"__personal_millisecond_time","__personal_deleted_millisecond_time"],p.limit+1);
       const selected=rows.slice(0,p.limit),activities:ActivityView[]=[];
       for(const row of selected)activities.push(await practiceView(tx,row));
       const last=activities.at(-1),nextCursor=rows.length>p.limit&&last?Buffer.from(JSON.stringify({version:1,scope:cursorScope,
@@ -487,8 +556,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   return Object.freeze({
     personalPractice,
     workspace: () => run(async tx => {
-      const organization=(await tx.query("SELECT org_id,display_name,rollout_mode FROM public.organizations WHERE org_id=$1",[context.orgId])).rows[0];
-      const membership=(await tx.query("SELECT org_id,user_id,role FROM public.organization_members WHERE org_id=$1 AND user_id=$2",scope)).rows[0];
+      const organization=(await readComplete(tx,"SELECT org_id,display_name,rollout_mode FROM public.organizations WHERE org_id=$1",[context.orgId],["org_id","display_name","rollout_mode"],1))[0];
+      const membership=(await readComplete(tx,"SELECT org_id,user_id,role FROM public.organization_members WHERE org_id=$1 AND user_id=$2",scope,["org_id","user_id","role"],1))[0];
       return {organization,membership};
     }),
     domains:Object.freeze({...reads("domain"),
@@ -593,13 +662,13 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       delete:(keys:unknown,reason:unknown)=>run(tx=>remove(tx,"binding",identity("binding",keys),parse(reasonSchema,reason))),
     }),
     audit:Object.freeze({
-      list:()=>run(async tx=>complete((await tx.query(
+      list:()=>run(tx=>readComplete(tx,
         "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 ORDER BY occurred_at,audit_event_id LIMIT $3",
-        [...scope,MAX_COLLECTION_ROWS+1])).rows,MAX_COLLECTION_ROWS)),
+        [...scope,MAX_COLLECTION_ROWS+1],auditColumns,MAX_COLLECTION_ROWS)),
       get:(input:unknown)=>run(async tx=>{
-        const key=parse(id,input),r=await tx.query(
-          "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND audit_event_id=$3",[...scope,key]);
-        if(r.rows.length!==1)throw new BoundaryError(404);return r.rows[0];
+        const key=parse(id,input),rows=await readComplete(tx,
+          "SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND audit_event_id=$3 LIMIT 2",[...scope,key],auditColumns,1);
+        if(rows.length!==1)throw new BoundaryError(404);return rows[0];
       }),
     }),
   });
