@@ -129,4 +129,10 @@ describe("actual legacy session edits, bounded responses and durable admission",
   expect((await row()).notes).toBe("a".repeat(6000));expect(await counts()).toEqual([{minute_count:1,day_count:1}]);
  });
 
+ it.each(["\u00a0","\u2003","\ufeff"])("does not treat historical JavaScript-trim whitespace %s as an anomaly explanation",async space=>{
+  const text=" \t"+space+"\n";await f.client.query("UPDATE sessions SET anomaly_note=$2 WHERE id=$1",[id,text]);
+  await expect(store.updateSession(owner,id,{isAnomaly:true,reason:"blank historical explanation"})).rejects.toMatchObject({status:400});
+  expect(await row()).toMatchObject({is_anomaly:false,anomaly_note:text});expect(await edits()).toEqual([]);expect(await counts()).toEqual([]);
+ });
+
 });

@@ -192,7 +192,7 @@ export class DatabaseStorage implements IStorage {
       const current=await sessionMutation(tx,userId,id,"s.deleted_at IS NULL",
         `,s.notes IS NOT DISTINCT FROM $3::text AS "notesSame",
         s.anomaly_note IS NOT DISTINCT FROM $4::text AS "anomalyNoteSame",
-        COALESCE(s.anomaly_note ~ '[^[:space:]]',false) AS "anomalyNoteNonBlank",
+        COALESCE(length(btrim(s.anomaly_note,chr(9)||chr(10)||chr(11)||chr(12)||chr(13)||chr(32)||chr(160)||chr(5760)||chr(8192)||chr(8193)||chr(8194)||chr(8195)||chr(8196)||chr(8197)||chr(8198)||chr(8199)||chr(8200)||chr(8201)||chr(8202)||chr(8232)||chr(8233)||chr(8239)||chr(8287)||chr(12288)||chr(65279)))>0,false) AS "anomalyNoteNonBlank",
         ($5::timestamptz IS NULL OR s.timestamp=$5::timestamptz) AS "timestampSame",
         ($6::int <= char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) AND $7::int <= octet_length(s.notes) AND ($6::int < char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) OR $7::int < octet_length(s.notes))) AS "notesMayShorten",
         ($8::int <= char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) AND $9::int <= octet_length(s.anomaly_note) AND ($8::int < char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) OR $9::int < octet_length(s.anomaly_note))) AS "anomalyNoteMayShorten"`,
