@@ -133,7 +133,7 @@ it("refuses unmigrated or changed membership without seeding or importing",async
 it("uses one transaction and stable collection locks, with no DML or nested connection",async()=>{
  const actor=await owner("recon-transaction"),before=await snapshot(),queries:string[]=[];let connects=0,releases=0;
  const scoped=createLegacyActivityMutations(createPinnedOwnershipUnit({connect:async()=>{
-  connects++;const client=await pool.connect();return {query:(sql:string,values?:unknown[])=>{queries.push(sql);return client.query(sql,values);},
+  connects++;const client=await pool.connect();return {query:(input:any,values?:unknown[])=>{const sql=typeof input==="string"?input:input.text;queries.push(sql);return client.query(input,values);},
    release:(destroy?:boolean)=>{releases++;client.release(destroy);}} as any;
  }}));
  expect((await scoped.reconcile(request(actor))).clean).toBe(true);expect(connects).toBe(1);expect(releases).toBe(1);

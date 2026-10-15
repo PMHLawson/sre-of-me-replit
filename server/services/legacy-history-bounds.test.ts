@@ -128,7 +128,7 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     expect(await state()).toBe(before);
     await refused(()=>service.edit(request(),"legacy-bound-a-music",{notes:"must not be stored",reason:"Synthetic audit-cap refusal"}));
     const auditRead=statements.filter(q=>q.sql.includes("entity_type IN ('legacy_session_import','legacy_session_mutation')")).at(-1)!;
-    expect(auditRead.values.at(-1)).toBe(MAX_READ_ROWS+1);expect(auditRead.rows).toBe(MAX_READ_ROWS);
+    expect(auditRead.sql).toContain("LIMIT $3 FOR SHARE");expect(auditRead.values.at(-3)).toBe(MAX_READ_ROWS+1);expect(auditRead.rows).toBe(MAX_READ_ROWS);
     await addLineage("legacy-bound-a",1,MAX_READ_ROWS);
     await refused(()=>service.verify(request(),"legacy-bound-a-music"));
     await refused(()=>service.softDelete(request(),"legacy-bound-a-music"));
@@ -149,7 +149,7 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     await refused(()=>service.create(request(),payload));
     await refused(()=>service.edit(request(),"legacy-bound-a-music",{notes:"blocked mapping",reason:"Synthetic mapping refusal"}));
     const read=statements.filter(q=>q.sql.includes("SELECT p.*,to_jsonb(p) raw FROM public.policy_versions")).at(-1)!;
-    expect(read.values.at(-1)).toBe(MAX_READ_ROWS+1);expect(read.rows).toBe(MAX_READ_ROWS+1);
+    expect(read.sql).toContain("LIMIT $4 FOR SHARE");expect(read.values.at(-3)).toBe(MAX_READ_ROWS+1);expect(read.rows).toBe(MAX_READ_ROWS+1);
     expect((await service.create(request("legacy-bound-b"),payload)).user_id).toBe("legacy-bound-b");
   });
 

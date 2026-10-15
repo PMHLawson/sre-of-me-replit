@@ -218,11 +218,13 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
     let begun = 0, release!: () => void;
     const barrier = new Promise<void>(resolve => { release = resolve; });
     const racing = createActivityServiceV2(createPinnedOwnershipUnit({ connect: async () => {
-      const client = await pool.connect(); return { query: async (sql: string, values?: unknown[]) => {
-        if (sql === "BEGIN") { begun++; if (begun === 2) release(); await barrier; } return client.query(sql, values);
+      const client = await pool.connect(); return { query: async (input: any, values?: unknown[]) => {
+        const sql=typeof input==="string"?input:input.text;
+        if (sql === "BEGIN") { begun++; if (begun === 2) release(); await barrier; } return client.query(input, values);
       }, release: (destroy?: boolean) => client.release(destroy) } as any;
     } }), { clock: now });
     const results = await Promise.all([racing.create(request("practice-a"), p), racing.create(request("practice-a"), p)]);
+    expect(begun).toBe(2);
     expect(results.filter(r => r.created)).toHaveLength(1); expect(results[0].activity).toEqual(results[1].activity);
     const id = results[0].activity.activityId;
     expect((await f.client.query("SELECT observation_id FROM observations WHERE observation_id=$1", [id])).rows).toHaveLength(1);
@@ -231,8 +233,9 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
   it("actual COMMIT acknowledgement loss destroys the client, then owned lookup and deliberate equal retry reconcile one saved event", async () => {
     const c = await seed("practice-a", "lost-ack"), p = input(c, "lost-ack-key"); let destroyed = false;
     const losing = createActivityServiceV2(createPinnedOwnershipUnit({ connect: async () => {
-      const client = await pool.connect(); return { query: async (sql: string, values?: unknown[]) => {
-        const result = await client.query(sql, values); if (sql === "COMMIT") throw Error("Synthetic lost acknowledgement"); return result;
+      const client = await pool.connect(); return { query: async (input: any, values?: unknown[]) => {
+        const sql=typeof input==="string"?input:input.text;
+        const result = await client.query(input, values); if (sql === "COMMIT") throw Error("Synthetic lost acknowledgement"); return result;
       }, release: (destroy?: boolean) => { destroyed = destroy === true; client.release(destroy); } } as any;
     } }), { clock: now });
     await expect(losing.create(request("practice-a"), p)).rejects.toMatchObject({ status: 503 }); expect(destroyed).toBe(true);
@@ -345,7 +348,7 @@ describe("owned typed manual practice through actual pinned PostgreSQL service",
     const c=await seed("practice-a","mutation-lost-ack");let activity=(await service.create(request("practice-a"),input(c,"mutation-lost-create"))).activity;
     for(const operation of ["edit","delete","restore"] as const){
       let destroyed=false;const losing=createActivityServiceV2(createPinnedOwnershipUnit({connect:async()=>{const client=await pool.connect();return{
-        query:async(sql:string,values?:unknown[])=>{const result=await client.query(sql,values);if(sql==="COMMIT")throw Error("Synthetic lost mutation acknowledgement");return result;},
+        query:async(input:any,values?:unknown[])=>{const sql=typeof input==="string"?input:input.text;const result=await client.query(input,values);if(sql==="COMMIT")throw Error("Synthetic lost mutation acknowledgement");return result;},
         release:(destroy?:boolean)=>{destroyed=destroy===true;client.release(destroy);}} as any;}}),{clock:now});
       const p=operation==="edit"?correction(activity,"lost-"+operation):lifecycle(activity,"lost-"+operation);
       const apply=(s:typeof service)=>operation==="edit"?s.edit(request("practice-a"),activity.activityId,p):operation==="delete"?
