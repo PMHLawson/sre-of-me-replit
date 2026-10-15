@@ -22,7 +22,7 @@ const createSchema = z.object({ domain: z.enum(domainEnum), durationMinutes: z.n
   timestamp: z.string().datetime({offset:true}), notes: z.string().optional(),
   isAnomaly: z.boolean().optional(), anomalyNote: z.string().nullable().optional() }).strict();
 const editSchema = updateSessionSchema.strict();
-function parse<T>(schema:z.ZodType<T>,input:unknown):T {
+function parse<S extends z.ZodTypeAny>(schema:S,input:unknown):z.infer<S> {
   const r=schema.safeParse(input);if(!r.success)throw new BoundaryError(400);return r.data;
 }
 function requireValid(value:unknown):asserts value {if(!value)throw new BoundaryError(400);}
