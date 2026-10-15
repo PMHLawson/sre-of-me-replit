@@ -14,7 +14,7 @@ describe("pinned transport expiry",()=>{
   it("does not return a socket with an ambiguous connection failure to the pool",async()=>{
     const query=vi.fn(async()=>{throw Object.assign(Error("private socket detail"),{code:"ECONNRESET"});});
     const release=vi.fn(),unit=createPinnedOwnershipUnit({connect:async()=>({query,release})} as any);
-    await expect(unit.run(request,async()=>"unreachable")).rejects.toMatchObject({status:503,message:"Requested history is unavailable at this size. Your records have not been changed."});
+    await expect(unit.run(request,async()=>"unreachable")).rejects.toMatchObject({status:503,message:"Service unavailable"});
     expect(release).toHaveBeenCalledWith(true);expect(query).toHaveBeenCalledTimes(1);
   });
 });

@@ -48,8 +48,9 @@ export function createPinnedOwnershipUnit(pool: Pick<Pool, "connect">) {
         const config:QueryConfig & {query_timeout:number}={text:sql,values,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
         try{return await client!.query(config);}catch(error){
           const code=String((error as {code?:unknown})?.code??"");
-          if((error as Error)?.message==="Query read timeout"||!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){
-            destroy=true;throw new ResourceLimitError();
+          if((error as Error)?.message==="Query read timeout"){destroy=true;throw new ResourceLimitError();}
+          if(!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){
+            destroy=true;throw new BoundaryError(503);
           }
           if(["57014","55P03"].includes(code))throw new ResourceLimitError();
           throw error;

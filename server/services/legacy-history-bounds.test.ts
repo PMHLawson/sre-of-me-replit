@@ -84,7 +84,8 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
   },60000);
   beforeEach(async()=>{
     timer.at=0;statements.length=0;byteWitness.length=0;
-    await f.client.query("TRUNCATE users,organizations CASCADE");
+    // Legacy rows deliberately have no user FK; reset them explicitly in this disposable fixture.
+    await f.client.query("TRUNCATE sessions,session_edits,users,organizations CASCADE");
     await owner("legacy-bound-a");await owner("legacy-bound-b");
   });
   afterAll(async()=>{try{if(pool)await pool.end();}finally{if(f)await f.cleanup();}},60000);
