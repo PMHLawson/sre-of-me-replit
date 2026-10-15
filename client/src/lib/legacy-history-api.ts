@@ -25,6 +25,48 @@ function deviation(v: unknown): v is DeviationSummary {
     typeof v.hasReason === "boolean" && Number.isSafeInteger(v.reasonBytes) && v.reasonBytes >= 0 &&
     v.reasonAvailability === (v.hasReason ? "not_loaded" : "absent") && typeof v.userId === "string";
 }
+const calendarMs = 24 * 60 * 60 * 1000;
+function dayKey(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = Date.parse(value + "T00:00:00.000Z");
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+}
+function keysEndingAt(today: string, count: number, includeToday = false): string[] {
+  const anchor = Date.parse(today + "T00:00:00.000Z");
+  return Array.from({ length: count }, (_, index) =>
+    new Date(anchor - (count - index - (includeToday ? 1 : 0)) * calendarMs).toISOString().slice(0, 10));
+}
+const sameKeys = (a: readonly string[] | undefined, b: readonly string[]) =>
+  !!a && a.length === b.length && a.every((key, index) => key === b[index]);
+/** Verifies completeness/identity metadata, never recomputes scoring or timezone policy. */
+export function validWindowCoverage(bundle: SessionStateBundle, days: number): boolean {
+  const p = bundle.policyState, e = bundle.escalationState, w = p.windowSets, today = p.logical_day;
+  if (!Number.isSafeInteger(days) || days < 1 || days > 60 || !w || !dayKey(today) ||
+      w.todayKey !== today || e.logical_day !== today ||
+      !sameKeys(w.w7, keysEndingAt(today, 7)) || !sameKeys(w.w14, keysEndingAt(today, 14)) ||
+      !sameKeys(w.w28, keysEndingAt(today, 28)) || !sameKeys(w.w42, keysEndingAt(today, 42)) ||
+      !sameKeys(w.prev7, keysEndingAt(today, 14).slice(0, 7)) ||
+      p.window_days.length < 1 || p.window_days.length > 90 ||
+      !sameKeys(p.window_days, keysEndingAt(today, p.window_days.length)) ||
+      e.history.length !== days || e.history.some((row, index) => !dayKey(row.logical_day) ||
+        (index > 0 && e.history[index - 1].logical_day >= row.logical_day)) ||
+      !p.sessionDays || Object.values(p.sessionDays).some(value => !dayKey(value))) return false;
+  const from = Date.parse(bundle.context.fromInclusive), asOf = Date.parse(bundle.asOf);
+  if (!Number.isFinite(from) || !Number.isFinite(asOf) || from > asOf - 90 * calendarMs ||
+      Math.abs(asOf - Date.parse(today + "T00:00:00.000Z")) > 2 * calendarMs) return false;
+  for (const domain of Array.from(domains)) {
+    const service = p.services[domain as keyof typeof p.services];
+    if (!service || service.domain !== domain || service.logical_day !== today ||
+        !sameKeys(service.window_days, p.window_days) ||
+        e.history.some(row => !row.perDomain[domain as keyof typeof row.perDomain])) return false;
+  }
+  return bundle.context.sessions.every(row => {
+    const key = p.sessionDays![row.id];
+    return dayKey(key) && Date.parse(row.timestamp) >= from &&
+      Math.abs(Date.parse(row.timestamp) - Date.parse(key + "T00:00:00.000Z")) <= 2 * calendarMs;
+  });
+}
+
 export const asSession = (v: SessionSummary): Session => ({ ...v, textComplete: false });
 export const asDeviation = (v: DeviationSummary): Deviation => ({ ...v, textComplete: false });
 async function json(url: string, signal?: AbortSignal): Promise<any> {
@@ -33,46 +75,49 @@ async function json(url: string, signal?: AbortSignal): Promise<any> {
     "This record changed. Restart loading its text." : "Could not verify your saved records. Please retry.");
   return response.json();
 }
-export async function readSessionState(days: number, signal?: AbortSignal): Promise<SessionStateBundle> {
+export async function readSessionState(days: number, signal: AbortSignal | undefined, owner: string): Promise<SessionStateBundle> {
   const v = await json("/api/session-state?days=" + days, signal);
-  if (!object(v) || v.complete !== true || !instant(v.asOf) || !object(v.context) ||
+  if (!owner || !object(v) || v.ownerUserId !== owner || v.complete !== true || !instant(v.asOf) || !object(v.context) ||
       v.context.complete !== true || !instant(v.context.fromInclusive) ||
-      !Array.isArray(v.context.sessions) || !v.context.sessions.every(session) ||
-      !Array.isArray(v.context.deviations) || !v.context.deviations.every(deviation))
+      !Array.isArray(v.context.sessions) || v.context.sessions.length > 2000 || !v.context.sessions.every((row: unknown) => session(row) && row.userId === owner) ||
+      !Array.isArray(v.context.deviations) || v.context.deviations.length > 1000 || !v.context.deviations.every((row: unknown) => deviation(row) && row.userId === owner))
     throw new Error("The current window is incomplete or invalid. No result has been inferred.");
   const policy = policyStateResponseSchema.safeParse(v.policyState);
   const escalation = escalationStateResponseSchema.safeParse(v.escalationState);
   if (!policy.success || !escalation.success || !policy.data.windowSets || !policy.data.sessionDays ||
       (policy.success && v.context.sessions.some((row: SessionSummary) => !policy.data.sessionDays?.[row.id])) ||
       policy.data.logical_day !== escalation.data.logical_day ||
-      [...domains].some(d => !policy.data.services[d as keyof typeof policy.data.services] ||
+      Array.from(domains).some(d => !policy.data.services[d as keyof typeof policy.data.services] ||
         !escalation.data.perDomain[d as keyof typeof escalation.data.perDomain]))
     throw new Error("The current results could not be verified.");
-  return { ...v, policyState: policy.data, escalationState: escalation.data } as SessionStateBundle;
+  const bundle = { ...v, policyState: policy.data, escalationState: escalation.data } as SessionStateBundle;
+  if (!validWindowCoverage(bundle, days)) throw new Error("The current window coverage could not be verified.");
+  return bundle;
 }
 export async function readHistoryPage(kind: "sessions" | "deleted" | "deviations", cursor: string | null,
-  signal?: AbortSignal): Promise<HistoryPage<SessionSummary | DeviationSummary>> {
+  signal: AbortSignal | undefined, owner: string): Promise<HistoryPage<SessionSummary | DeviationSummary>> {
   const path = kind === "deleted" ? "/api/sessions/deleted" : "/api/" + kind;
   const v = await json(path + "?limit=50" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""), signal);
   const validate = kind === "deviations" ? deviation : session;
-  if (!object(v) || !Array.isArray(v.items) || !v.items.every(validate) ||
+  if (!owner || !object(v) || !Array.isArray(v.items) || v.items.length > 50 || !v.items.every((row: unknown) => validate(row) && row.userId === owner) ||
       !(v.nextCursor === null || (typeof v.nextCursor === "string" && v.nextCursor.length > 0)) ||
-      v.complete !== (v.nextCursor === null) || (cursor !== null && v.nextCursor === cursor)) throw new Error("History could not be verified.");
+      v.complete !== (v.nextCursor === null) || (v.items.length === 0 && v.nextCursor !== null) || (cursor !== null && v.nextCursor === cursor)) throw new Error("History could not be verified.");
   return v as HistoryPage<SessionSummary | DeviationSummary>;
 }
 export function mergeById<T extends { id: string }>(prior: T[], next: T[]): T[] {
   const map = new Map(prior.map(row => [row.id, row]));
   for (const row of next) map.set(row.id, row);
-  return [...map.values()];
+  return Array.from(map.values());
 }
 /** One user action advances at most one chunk of each field; never follows cursors in a loop. */
 export async function readDetailStep(kind: "sessions" | "deviations", id: string,
-  previous?: DetailState<Session | Deviation>, signal?: AbortSignal): Promise<DetailState<Session | Deviation>> {
+  previous: DetailState<Session | Deviation> | undefined, signal: AbortSignal | undefined, owner: string): Promise<DetailState<Session | Deviation>> {
   const base = "/api/" + kind + "/" + encodeURIComponent(id);
   const first = !previous?.value || !previous.textVersion;
   const raw = first ? await json(base, signal) : previous!.value;
   const validate = kind === "sessions" ? session : deviation;
-  if (first && (!validate(raw) || !/^[a-f0-9]{64}$/.test((raw as any).textVersion)))
+  if (!owner || raw?.id !== id || raw?.userId !== owner ||
+      (first && (!validate(raw) || !/^[a-f0-9]{64}$/.test((raw as any).textVersion))))
     throw new Error("The saved record could not be verified.");
   const version = first ? raw.textVersion : previous!.textVersion!;
   const fields = kind === "sessions" ? ["notes", "anomalyNote"] : ["reason"];

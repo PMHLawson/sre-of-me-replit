@@ -62,15 +62,24 @@ interface SessionEditDialogProps {
 
 export function SessionEditDialog(props: SessionEditDialogProps) {
   const detail = useAppStore(s => props.session ? s.sessionDetails[props.session.id] : undefined);
-  if (props.open && props.session?.textComplete === false && detail?.status !== "ready") {
+  const fetchDetail = useAppStore(s => s.fetchSessionDetail);
+  const demo = useAppStore(s => s.demoState !== "default");
+  const [freshOpen, setFreshOpen] = useState(false);
+  useEffect(() => {
+    let active = true; setFreshOpen(false);
+    if (props.open && props.session && !demo)
+      void fetchDetail(props.session.id).then(() => { if (active) setFreshOpen(true); });
+    return () => { active = false; };
+  }, [props.open, props.session?.id, demo, fetchDetail]);
+  if (props.open && props.session && !demo && (!freshOpen || detail?.status !== "ready")) {
     return <Dialog open={props.open} onOpenChange={props.onOpenChange}><DialogContent>
       <DialogHeader><DialogTitle>Load saved session</DialogTitle><DialogDescription>
         The complete original text is required before editing; your saved notes have not been changed.
-      </DialogDescription></DialogHeader><SessionText session={props.session} force />
+      </DialogDescription></DialogHeader><SessionText session={{ ...props.session, textComplete: false }} force />
       <Button disabled>Save changes</Button>
     </DialogContent></Dialog>;
   }
-  return <SessionEditForm {...props} session={props.session?.textComplete === false ? detail?.value ?? null : props.session} />;
+  return <SessionEditForm {...props} session={!demo && props.session ? detail?.value ?? null : props.session} />;
 }
 function SessionEditForm({ open, onOpenChange, session, onSubmit }: SessionEditDialogProps) {
   const [domain, setDomain] = useState<Domain>('fitness');

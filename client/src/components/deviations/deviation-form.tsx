@@ -60,14 +60,23 @@ const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
 
 export function DeviationForm(props: DeviationFormProps) {
   const detail = useAppStore(s => props.editing ? s.deviationDetails[props.editing.id] : undefined);
-  if (props.open && props.editing?.textComplete === false && detail?.status !== "ready") {
+  const fetchDetail = useAppStore(s => s.fetchDeviationDetail);
+  const demo = useAppStore(s => s.demoState !== "default");
+  const [freshOpen, setFreshOpen] = useState(false);
+  useEffect(() => {
+    let active = true; setFreshOpen(false);
+    if (props.open && props.editing && !demo)
+      void fetchDetail(props.editing.id).then(() => { if (active) setFreshOpen(true); });
+    return () => { active = false; };
+  }, [props.open, props.editing?.id, demo, fetchDetail]);
+  if (props.open && props.editing && !demo && (!freshOpen || detail?.status !== "ready")) {
     return <Dialog open={props.open} onOpenChange={props.onOpenChange}><DialogContent>
       <DialogHeader><DialogTitle>Load saved deviation</DialogTitle><DialogDescription>
         Load the complete original reason before editing.
-      </DialogDescription></DialogHeader><DeviationText deviation={props.editing} force />
+      </DialogDescription></DialogHeader><DeviationText deviation={{ ...props.editing, textComplete: false }} force />
       <Button disabled>Save changes</Button></DialogContent></Dialog>;
   }
-  return <DeviationFormFields {...props} editing={props.editing?.textComplete === false ? detail?.value ?? null : props.editing} />;
+  return <DeviationFormFields {...props} editing={!demo && props.editing ? detail?.value ?? null : props.editing} />;
 }
 function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: DeviationFormProps) {
   const isEdit = !!editing;

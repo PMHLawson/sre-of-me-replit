@@ -396,7 +396,7 @@ let legacyOwner: string | null = null;
 let ownerGeneration = 0;
 let selectedHistoryDays = 14;
 const requests = new Map<string, { id: symbol; controller: AbortController }>();
-function cancelReads() { for (const r of requests.values()) r.controller.abort(); requests.clear(); }
+function cancelReads() { for (const r of Array.from(requests.values())) r.controller.abort(); requests.clear(); }
 export function bindLegacyOwner(owner: string | null) {
   if (owner === legacyOwner) return;
   legacyOwner = owner; ownerGeneration += 1; selectedHistoryDays = 14; cancelReads();
@@ -443,7 +443,7 @@ export const useAppStore = create<AppState>()(
         set({ sessionsLoaded: false, policyStateLoaded: false, escalationStateLoaded: false, deviationsLoaded: false,
           sessionsError: null, policyStateError: null, escalationStateError: null, deviationsError: null });
         try {
-          const bundle = await readSessionState(selectedHistoryDays, scope.signal);
+          const bundle = await readSessionState(selectedHistoryDays, scope.signal, scope.owner);
           if (!scope.current()) return;
           set({ dataOwner: scope.owner, currentAsOf: bundle.asOf, contextFrom: bundle.context.fromInclusive,
             sessions: bundle.context.sessions.map(asSession), deviations: bundle.context.deviations.map(asDeviation),
@@ -468,7 +468,7 @@ export const useAppStore = create<AppState>()(
         if (!scope.owner) return;
         set({ historyLoading: true, historyError: null });
         try {
-          const page = await readHistoryPage("sessions", cursor, scope.signal);
+          const page = await readHistoryPage("sessions", cursor, scope.signal, scope.owner);
           if (!scope.current()) return;
           const rows = page.items.map(row => asSession(row as Parameters<typeof asSession>[0]));
           set({ historySessions: more ? mergeById(get().historySessions, rows) : rows, historyLoading: false,
@@ -483,7 +483,7 @@ export const useAppStore = create<AppState>()(
         if (!scope.owner) return;
         set({ deletedLoading: true, deletedSessionsError: null });
         try {
-          const page = await readHistoryPage("deleted", cursor, scope.signal);
+          const page = await readHistoryPage("deleted", cursor, scope.signal, scope.owner);
           if (!scope.current()) return;
           const rows = page.items.map(row => asSession(row as Parameters<typeof asSession>[0]));
           set({ deletedSessions: more ? mergeById(get().deletedSessions, rows) : rows, deletedLoading: false,
@@ -498,7 +498,7 @@ export const useAppStore = create<AppState>()(
         if (!scope.owner) return;
         set({ deviationPagesLoading: true, deviationPagesError: null });
         try {
-          const page = await readHistoryPage("deviations", cursor, scope.signal);
+          const page = await readHistoryPage("deviations", cursor, scope.signal, scope.owner);
           if (!scope.current()) return;
           const rows = page.items.map(row => asDeviation(row as Parameters<typeof asDeviation>[0]));
           set({ deviationPages: more ? mergeById(get().deviationPages, rows) : rows, deviationPagesLoading: false,
@@ -509,12 +509,12 @@ export const useAppStore = create<AppState>()(
       },
       fetchSessionDetail: async (id, more = false) => {
         const previous = more ? get().sessionDetails[id] : undefined;
-        if (get().sessionDetails[id]?.status === "loading") return;
+        if (more && get().sessionDetails[id]?.status === "loading") return;
         const scope = requestScope("sessionDetail:" + id);
         if (!scope.owner) return;
         set(state => ({ sessionDetails: { ...state.sessionDetails, [id]: { ...previous, status: "loading" } } }));
         try {
-          const result = await readDetailStep("sessions", id, previous, scope.signal) as DetailState<Session>;
+          const result = await readDetailStep("sessions", id, previous, scope.signal, scope.owner) as DetailState<Session>;
           if (scope.current()) set(state => ({ sessionDetails: { ...state.sessionDetails, [id]: result } }));
         } catch {
           if (scope.current()) set(state => ({ sessionDetails: { ...state.sessionDetails,
@@ -523,12 +523,12 @@ export const useAppStore = create<AppState>()(
       },
       fetchDeviationDetail: async (id, more = false) => {
         const previous = more ? get().deviationDetails[id] : undefined;
-        if (get().deviationDetails[id]?.status === "loading") return;
+        if (more && get().deviationDetails[id]?.status === "loading") return;
         const scope = requestScope("deviationDetail:" + id);
         if (!scope.owner) return;
         set(state => ({ deviationDetails: { ...state.deviationDetails, [id]: { ...previous, status: "loading" } } }));
         try {
-          const result = await readDetailStep("deviations", id, previous, scope.signal) as DetailState<Deviation>;
+          const result = await readDetailStep("deviations", id, previous, scope.signal, scope.owner) as DetailState<Deviation>;
           if (scope.current()) set(state => ({ deviationDetails: { ...state.deviationDetails, [id]: result } }));
         } catch {
           if (scope.current()) set(state => ({ deviationDetails: { ...state.deviationDetails,
@@ -540,7 +540,10 @@ export const useAppStore = create<AppState>()(
           deviationsWereLoaded = get().deviationPagesLoaded;
         cancelReads();
         set({ sessionDetails: {}, deviationDetails: {}, historyLoading: false, deletedLoading: false,
-          deviationPagesLoading: false, historyComplete: false, deletedComplete: false, deviationPagesComplete: false });
+          deviationPagesLoading: false, historyComplete: false, deletedComplete: false, deviationPagesComplete: false,
+          historyLoaded: false, historyCursor: null, historySessions: [],
+          deletedSessionsLoaded: false, deletedCursor: null, deletedSessions: [],
+          deviationPagesLoaded: false, deviationPagesCursor: null, deviationPages: [] });
         await Promise.all([get().refreshCurrent(),
           ...(historyWasLoaded ? [get().fetchHistory()] : []),
           ...(deletedWasLoaded ? [get().fetchDeletedSessions()] : []),

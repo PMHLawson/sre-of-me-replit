@@ -8,7 +8,7 @@ import { ThemeToggle } from '@/components/theme-toggle';
 import type { AnomalyCheckResponse } from '@shared/schema';
 import { checkAnomaly, anomalyFieldsForSave, type AnomalySaveDecision } from '@/lib/anomaly-preflight';
 
-type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'saving' | 'saved';
+type Stage = 'idle' | 'anomaly' | 'below-floor' | 'frequency' | 'frequency-unavailable' | 'saving' | 'saved';
 
 const POST_SAVE_TOAST_MS = 8000;
 
@@ -58,7 +58,16 @@ export default function LogSession() {
   const deleteSession = useAppStore(state => state.deleteSession);
   const sessions = useAppStore(state => state.sessions);
   const detail = useAppStore(state => editingSessionId ? state.sessionDetails[editingSessionId] : undefined);
-  const editSaved = detail?.status === 'ready' ? detail.value : undefined;
+  const fetchDetail = useAppStore(state => state.fetchSessionDetail);
+  const contextFrom = useAppStore(state => state.contextFrom);
+  const contextReady = useAppStore(state => state.sessionsLoaded && !state.sessionsError);
+  const [freshEditId, setFreshEditId] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true; setFreshEditId(null);
+    if (editingSessionId) void fetchDetail(editingSessionId).then(() => { if (active) setFreshEditId(editingSessionId); });
+    return () => { active = false; };
+  }, [editingSessionId, fetchDetail]);
+  const editSaved = editingSessionId === freshEditId && detail?.status === 'ready' ? detail.value : undefined;
   const editReady = !editingSessionId || !!editSaved;
 
   // An old deep link must load the complete owner-scoped record, not a recent summary.
@@ -112,6 +121,10 @@ export default function LogSession() {
     // against itself.
     if (!decisions.frequencyAck) {
       const selected = resolveSessionTimestamp(sessionDate);
+      if (!contextReady || !contextFrom || selected.getTime() < Date.parse(contextFrom) + 24 * 60 * 60 * 1000) {
+        pendingDecisionsRef.current = { ...decisions, anomaly: anomalyDecision };
+        setStage('frequency-unavailable'); return;
+      }
       const selectedKey = `${selected.getFullYear()}-${selected.getMonth()}-${selected.getDate()}`;
       const hasOnSelectedDay = sessions.some((s) => {
         if (s.deletedAt) return false;
@@ -491,6 +504,11 @@ export default function LogSession() {
       )}
 
       {/* ── Frequency advisory ────────────────────────────────────────── */}
+      {stage === 'frequency-unavailable' && <PromptModal
+        icon={<Repeat className="w-6 h-6 text-status-advisory" />} tone="advisory"
+        title="Duplicate check unavailable" testId="modal-frequency-unavailable"
+        body={<p>This date is outside the complete loaded context, or that context could not be verified. We have not assumed there are no other practices on this date. You may review history or save this record anyway.</p>}
+        confirmLabel="Save anyway" onConfirm={onFrequencyConfirm} onCancel={onFrequencyCancel} />}
       {stage === 'frequency' && (
         <PromptModal
           icon={<Repeat className="w-6 h-6 text-status-advisory" />}

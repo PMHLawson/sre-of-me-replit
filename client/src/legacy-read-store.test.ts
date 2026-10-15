@@ -8,7 +8,7 @@ vi.mock("@/lib/legacy-history-api", () => ({
 import { bindLegacyOwner, useAppStore } from "./store";
 const row = (id: string) => ({ id, userId: "owner", domain: "meditation", durationMinutes: 10,
   timestamp: "2026-01-01T00:00:00Z", deletedAt: null, isAnomaly: false, notes: null, anomalyNote: null });
-const bundle = (id = "current") => ({ asOf: "2026-10-15T00:00:00Z", complete: true,
+const bundle = (id = "current") => ({ ownerUserId: "owner", asOf: "2026-10-15T00:00:00Z", complete: true,
   context: { complete: true, fromInclusive: "2026-07-01T00:00:00Z", sessions: [row(id)], deviations: [] },
   policyState: { services: { meditation: { service_score: 80 } } }, escalationState: { highestTier: "WARNING" } });
 beforeEach(() => {
@@ -75,5 +75,22 @@ describe("archive isolation", () => {
     bindLegacyOwner(null); useAppStore.getState().resetLegacyReads();
     finish({ status: "ready", value: row("old") }); await pending;
     expect(useAppStore.getState().sessionDetails).toEqual({});
+  });
+});
+
+describe("mutation refresh retry mode", () => {
+  it("retries a failed first-page refresh without appending the old cursor", async () => {
+    api.page.mockResolvedValueOnce({ items: [row("deleted-old")], nextCursor: "old-cursor", complete: false });
+    await useAppStore.getState().fetchHistory();
+    api.state.mockResolvedValueOnce(bundle());
+    api.page.mockRejectedValueOnce(new Error("refresh failed"));
+    await useAppStore.getState().invalidateAfterMutation();
+    expect(useAppStore.getState().historyLoaded).toBe(false);
+    expect(useAppStore.getState().historyCursor).toBeNull();
+    expect(useAppStore.getState().historySessions).toEqual([]);
+    api.page.mockResolvedValueOnce({ items: [row("fresh")], nextCursor: null, complete: true });
+    await useAppStore.getState().fetchHistory(useAppStore.getState().historyLoaded);
+    expect(api.page.mock.calls.at(-1)?.[1]).toBeNull();
+    expect(useAppStore.getState().historySessions.map(value => value.id)).toEqual(["fresh"]);
   });
 });
