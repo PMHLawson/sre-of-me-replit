@@ -1,4 +1,5 @@
-import type {Pool,PoolClient} from "pg";
+import type {Pool,PoolClient,QueryConfig} from "pg";
+import {performance} from "node:perf_hooks";
 import {createHash} from "node:crypto";
 import type {Session,Deviation,UserSettings} from "../../shared/schema";
 import type {SessionSummary,DeviationSummary,HistoryPage,TextChunk,TextDetail} from "../../shared/legacy-history";
@@ -12,7 +13,7 @@ export class HistoryChanged extends Error { readonly status=409; }
 type Query=(sql:string,args?:unknown[])=>Promise<{rows:any[]}>;
 const iso=(value:any):string=>new Date(value).toISOString();
 const nullableIso=(value:any):string|null=>value===null?null:iso(value);
-const validId=(value:unknown):value is string=>typeof value==="string"&&value.length>0&&value.length<=200&&!/[\u0000-\u001f\u007f]/.test(value);
+const validId=(value:unknown):value is string=>typeof value==="string"&&value.length>0&&Buffer.byteLength(value,"utf8")<=2048&&!/\u0000/.test(value);
 const own=(value:unknown)=>{if(!validId(value))throw new HistoryInputError();return value;};
 const checkedRows=(rows:any[],budget:number)=>{if(rows.length>budget)throw new ResourceLimitError();return rows;};
 const sessionColumns=`s.id,s.user_id AS "userId",s.domain,s.duration_minutes AS "durationMinutes",s.timestamp,
@@ -36,7 +37,7 @@ export function parseHistoryPage(query:Record<string,unknown>,deviation=false):P
     Object.values(query).some(v=>typeof v!=="string"))throw new HistoryInputError();
   const limit=query.limit===undefined?50:Number(query.limit);
   if(!Number.isInteger(limit)||limit<1||limit>100||query.limit!==undefined&&!/^[1-9]\d{0,2}$/.test(query.limit as string)||
-    query.cursor!==undefined&&(String(query.cursor).length>1024||!String(query.cursor).length)||
+    query.cursor!==undefined&&(String(query.cursor).length>4096||!String(query.cursor).length)||
     query.state!==undefined&&!["active","planned"].includes(query.state as string))throw new HistoryInputError();
   return {limit,...(query.cursor!==undefined?{cursor:query.cursor as string}:{}),
     ...(query.state!==undefined?{state:query.state as "active"|"planned"}:{})};
@@ -45,7 +46,7 @@ function cursorScope(userId:string,kind:string,state?:string){return createHash(
 function decodeCursor(value:string|undefined,scope:string):Cursor|undefined {
   if(value===undefined)return;
   try{
-    if(!/^[A-Za-z0-9_-]+$/.test(value)||value.length>1024)throw 0;
+    if(!/^[A-Za-z0-9_-]+$/.test(value)||value.length>4096)throw 0;
     const parsed=JSON.parse(Buffer.from(value,"base64url").toString("utf8"));
     // PostgreSQL exact timestamp text retains microseconds; NEVER derive a cursor from pg's Date.
     if(!parsed||Object.keys(parsed).sort().join(",")!=="at,id,scope,v"||parsed.v!==1||parsed.scope!==scope||
@@ -67,21 +68,31 @@ export class LegacyHistoryReads {
   constructor(private readonly pool:Pick<Pool,"connect">,private readonly clock:()=>Date=()=>new Date()){}
   private async snapshot<T>(user:string,operation:(query:Query,now:Date)=>Promise<T>):Promise<T>{
     own(user);let client:PoolClient|undefined;let begun=false,destroy=false;
-    const deadline=Date.now()+15000;let statements=0;
+    const deadline=performance.now()+15000;let statements=0;
+    const control=async(sql:string,args:unknown[]=[])=>{
+      const remaining=Math.floor(deadline-performance.now());if(remaining<=0)throw new ResourceLimitError();
+      const config:QueryConfig & {query_timeout:number}={text:sql,values:args,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
+      return client!.query(config);
+    };
     try{
-      client=await this.pool.connect();await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");begun=true;
+      client=await this.pool.connect();await control("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");begun=true;
       const query:Query=async(sql,args=[])=>{
-        const remaining=deadline-Date.now();if(remaining<=0||++statements>32)throw new ResourceLimitError();
-        await client!.query("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout','1000',true)",
+        const remaining=Math.floor(deadline-performance.now());if(remaining<=0||++statements>32)throw new ResourceLimitError();
+        await control("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout','1000',true)",
           [String(Math.min(READ_TIMEOUT_MS,remaining))]);
-        return client!.query(sql,args);
+        return control(sql,args);
       };
       const now=this.clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new Error("Invalid read clock");
-      const result=await operation(query,now);if(Date.now()>deadline)throw new ResourceLimitError();
-      await client.query("COMMIT");return result;
+      const result=await operation(query,now);if(performance.now()>deadline)throw new ResourceLimitError();
+      await control("COMMIT");return result;
     }catch(error){
-      if(client&&begun)try{await client.query("ROLLBACK");}catch{destroy=true;}
-      if(["57014","55P03"].includes((error as {code?:string})?.code??""))throw new ResourceLimitError();
+      const transportTimeout=(error as Error)?.message==="Query read timeout";
+      if(transportTimeout)destroy=true;
+      if(client&&begun&&!destroy)try{
+        const rollback:QueryConfig & {query_timeout:number}={text:"ROLLBACK",query_timeout:READ_TIMEOUT_MS};
+        await client.query(rollback);
+      }catch{destroy=true;}
+      if(transportTimeout||["57014","55P03"].includes((error as {code?:string})?.code??""))throw new ResourceLimitError();
       throw error;
     }finally{client?.release(destroy);}
   }

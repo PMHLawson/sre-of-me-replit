@@ -31,7 +31,7 @@ export function policyResponse(input:Input){
 
       // Map every session the user has ever logged to its logical-day key so
       // the client can filter by Set membership with no JS timezone math.
-      const sessionDays: Record<string, string> = {};
+      const sessionDays: Record<string, string> = Object.create(null);
       for (const s of [...sessions, ...input.context]) {
         sessionDays[s.id] = logicalDay(s.timestamp, opts);
       }

@@ -10,7 +10,7 @@ export function planHistoryInput(opts:PolicyEngineOptions,historyDays=14):Histor
   for(const now of escalationHistoryAnchors(opts,historyDays))add({...opts,now});
   for(const windowDays of [7,14,28,42,90])add({...opts,windowDays});
   keys.add(logicalDay(opts.now??new Date(),opts));
-  const ordered=[...keys].sort();
+  const ordered=Array.from(keys).sort();
   // A logical day may comprise parts of TWO local calendar dates. These coarse
   // UTC guards deliberately contain both across all IANA offsets/DST changes;
   // logicalDay membership is authoritative after the bounded minimal DB read.
