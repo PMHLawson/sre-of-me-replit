@@ -5,6 +5,7 @@ import express, { type Request } from "express";
 import { Pool } from "pg";
 import { startFixture, verifyFixture } from "../lib/ownership-fixture";
 import { BoundaryError, type Transaction } from "../lib/org-context";
+import { OWNER_WRITE_BUDGET_ADMISSION_UPDATE,OWNER_WRITE_BUDGET_OBSERVATION_UPDATE } from "../lib/write-resource-budget";
 import { adoptionPath, createAdoptionDatabase, mountDevelopmentAdoption, prepareAdoptionServices,
   readAdoptionConfig, type AdoptionConfig } from "./development-policy-adoption";
 vi.mock("../db", () => { throw Error("FORBIDDEN ambient database import"); });
@@ -135,7 +136,13 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
   }
   it("performs the reviewed seed/import then clean collection reconciliation, preserving all original records and idempotence", async () => {
     const before = await legacy(), services = await prepareAdoptionServices(pool, config);
-    await services.seed(req); await services.seed(req); await services.import(req);
+    await services.seed(req);
+    const counter=async()=>(await f.client.query("SELECT minute_count,day_count,observed_bytes FROM owner_write_resource_budgets WHERE owner_user_id='adopt-a'")).rows;
+    const firstCounter=await counter();expect(firstCounter).toHaveLength(1);
+    expect(firstCounter[0].minute_count).toBeGreaterThan(0);expect(firstCounter[0].day_count).toBe(firstCounter[0].minute_count);
+    expect(Number(firstCounter[0].observed_bytes)).toBeGreaterThan(0);
+    await services.seed(req);expect(await counter()).toEqual(firstCounter);
+    await services.import(req);
     expect(await services.reconcile(req)).toMatchObject({ clean: true, counts: { ownedSessions: 4, canonicalSessions: 4, unownedSessions: 1 } });
     const audits = (await f.client.query("SELECT to_jsonb(a) raw FROM audit_events a ORDER BY audit_event_id")).rows;
     await expect(services.seed(req)).rejects.toMatchObject({ status: 403 });
@@ -149,12 +156,41 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
   });
   it("poisons caught SQL failures and refuses transaction control or legacy mutations", async () => {
     const db = createAdoptionDatabase(pool, config.binding!);
-    for (const sql of ["COMMIT", "ROLLBACK", "SELECT 1; COMMIT", "UPDATE sessions SET duration_minutes=99", "DELETE FROM sessions"])
+    for (const sql of ["COMMIT", "ROLLBACK", "SELECT 1; COMMIT", "UPDATE sessions SET duration_minutes=99", "DELETE FROM sessions",
+      "UPDATE public.domains SET display_name='forbidden'", "DELETE FROM public.observations"])
       await expect(db.transaction(async tx => { await tx.query("INSERT INTO adoption_probe VALUES ('poison')");
         try { await tx.query(sql); } catch {} })).rejects.toMatchObject({ status: 503 });
     await expect(db.transaction(async tx => { await tx.query("INSERT INTO adoption_probe VALUES ('duplicate')");
       try { await tx.query("INSERT INTO adoption_probe VALUES ('duplicate')"); } catch {} })).rejects.toMatchObject({ status: 503 });
     expect((await f.client.query("SELECT count(*)::int n FROM adoption_probe")).rows[0].n).toBe(0);
+  });
+  it("allows only the exact reviewed owner-counter statements and refuses altered SQL or invalid values before transmission",async()=>{
+    const sent:string[]=[];
+    const wrapped={connect:async()=>{const client=await pool.connect();return{
+      query:(sql:string,values?:unknown[])=>{sent.push(sql);return client.query(sql,values);},
+      release:(destroy?:boolean)=>client.release(destroy),
+    };}};
+    const db=createAdoptionDatabase(wrapped as any,config.binding!);
+    const now=new Date(),minute=new Date(Math.floor(now.getTime()/60000)*60000).toISOString();
+    const valid=["adopt-a",minute,1,now.toISOString().slice(0,10),1,now.toISOString()];
+    const denied=[
+      {sql:OWNER_WRITE_BUDGET_ADMISSION_UPDATE+" ",values:valid},
+      {sql:OWNER_WRITE_BUDGET_ADMISSION_UPDATE,values:valid.slice(0,-1)},
+      {sql:OWNER_WRITE_BUDGET_ADMISSION_UPDATE,values:[" ",...valid.slice(1)]},
+      {sql:OWNER_WRITE_BUDGET_ADMISSION_UPDATE,values:[...valid.slice(0,2),31,...valid.slice(3)]},
+      {sql:OWNER_WRITE_BUDGET_OBSERVATION_UPDATE,values:["adopt-a",-1]},
+      {sql:OWNER_WRITE_BUDGET_OBSERVATION_UPDATE+" RETURNING owner_user_id",values:["adopt-a",1]},
+      {sql:"UPDATE public.owner_write_resource_budgets SET minute_count=0 WHERE owner_user_id=$1",values:["adopt-a"]},
+    ];
+    for(const attempt of denied){
+      sent.length=0;
+      await expect(db.transaction(async tx=>{
+        await tx.query("INSERT INTO adoption_probe VALUES ('counter-guard-rollback')");
+        try{await tx.query(attempt.sql,attempt.values);}catch{}
+      })).rejects.toMatchObject({status:503});
+      expect(sent).not.toContain(attempt.sql);
+    }
+    expect((await f.client.query("SELECT count(*)::int n FROM adoption_probe WHERE id='counter-guard-rollback'")).rows[0].n).toBe(0);
   });
   it("awaits pending statements and expires escaped transaction handles", async () => {
     const db = createAdoptionDatabase(pool, config.binding!); let escaped: Transaction | undefined;

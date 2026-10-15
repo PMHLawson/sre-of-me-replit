@@ -26,7 +26,7 @@ const request = (actor: string) => ({ isAuthenticated: () => true, user: { claim
 const slugs = ["martial-arts", "meditation", "fitness", "music"];
 const payload = { domain: "music", durationMinutes: 1, timestamp: "2026-01-01T01:02:03.123456Z" };
 const tables = ["users", "sessions", "session_edits", "user_settings", "deviations", "http_sessions", "organizations", "organization_members",
-  "domains", "policy_versions", "dimension_definitions", "source_bindings", "observations", "audit_events", "deviations_v2", "deviation_domains", "evaluation_results"];
+  "domains", "policy_versions", "dimension_definitions", "source_bindings", "observations", "audit_events", "deviations_v2", "deviation_domains", "evaluation_results","owner_write_resource_budgets"];
 async function raw(table: string, where: string, values: unknown[] = []) {
   return (await f.client.query(`SELECT to_jsonb(t) r FROM public.${table} t WHERE ${where} ORDER BY to_jsonb(t)::text`, values)).rows.map(x => x.r);
 }
@@ -123,13 +123,16 @@ it("an excluded owner cannot enable adoption through body/query and retains the 
   expect(r.status).toBe(201); expect(r.body.userId).toBe("api-b"); expect(fake.legacy.createSession.mock.calls[0][0].userId).toBe("api-b");
   expect(await snapshot()).toBe(before); expect(poolRequests).toBe(0);
 });
-it("creates actual synchronized rows through the registered route and emits only the established public response", async () => {
+it("creates actual synchronized rows through the registered route and returns bounded text placeholders with established public keys", async () => {
   const other = await raw("sessions", "user_id='api-b' OR user_id IS NULL");
   const r = await http("POST", "/api/sessions?owner=api-b", { ...payload, userId: "api-b", organizationId: "forged", notes: "" });
   expect(r.status).toBe(201); expect(r.body).toMatchObject({ userId: "api-a", domain: "music", durationMinutes: 1,
-    timestamp: "2026-01-01T01:02:03.123Z", notes: "", isAnomaly: false, anomalyNote: null, deletedAt: null });
-  expect(Object.keys(r.body).sort()).toEqual(["id", "userId", "domain", "durationMinutes", "timestamp", "notes", "isAnomaly", "anomalyNote", "deletedAt"].sort());
+    timestamp: "2026-01-01T01:02:03.123Z", notes: null, isAnomaly: false, anomalyNote: null, deletedAt: null,
+    hasNotes:true,hasAnomalyNote:false,notesBytes:0,anomalyNoteBytes:0,notesAvailability:"not_loaded",anomalyNoteAvailability:"absent" });
+  expect(Object.keys(r.body).sort()).toEqual(["id", "userId", "domain", "durationMinutes", "timestamp", "notes", "isAnomaly", "anomalyNote", "deletedAt",
+    "hasNotes","hasAnomalyNote","notesBytes","anomalyNoteBytes","notesAvailability","anomalyNoteAvailability"].sort());
   expect((await raw("sessions", "id=$1", [r.body.id]))[0].timestamp).toContain(".123456");
+  expect((await raw("sessions","id=$1",[r.body.id]))[0].notes).toBe("");
   expect(await raw("observations", "legacy_source_id=$1", [r.body.id])).toHaveLength(1);
   expect(await raw("audit_events", "entity_type='legacy_session_mutation' AND entity_id=$1", [JSON.stringify([r.body.id])])).toHaveLength(1);
   expect(await raw("sessions", "user_id='api-b' OR user_id IS NULL")).toEqual(other); noLegacy(); expect(poolRequests).toBe(1);
@@ -194,4 +197,19 @@ it("the existing auth guard rejects unauthenticated requests before either write
   fake.owner = null; const before = await snapshot();
   expect(await http("POST", "/api/sessions", payload)).toEqual({ status: 401, body: { message: "Authentication required" } });
   expect(await snapshot()).toBe(before); noLegacy();
+});
+
+it("omitted anomaly explanation reuses only valid owned stored text and never commits a missing explanation",async()=>{
+ const flagged=await http("POST","/api/sessions",{...payload,isAnomaly:true,anomalyNote:" exact existing explanation "});
+ expect(flagged.status).toBe(201);const key=flagged.body.id;
+ const saved=await http("PATCH",keyPath(key),{reason:"retain exact",isAnomaly:true,durationMinutes:2});
+ expect(saved.status).toBe(200);
+ expect((await raw("sessions","id=$1",[key]))[0]).toMatchObject({is_anomaly:true,anomaly_note:" exact existing explanation ",duration_minutes:2});
+ expect((await raw("observations","legacy_source_id=$1",[key]))[0]).toMatchObject({is_anomaly:true,anomaly_note:" exact existing explanation "});
+ const ordinary=await http("POST","/api/sessions",payload);expect(ordinary.status).toBe(201);
+ const before=await snapshot();
+ expect(await http("PATCH",keyPath(ordinary.body.id),{reason:"missing note cannot save",isAnomaly:true,durationMinutes:3}))
+  .toEqual({status:400,body:{message:"Invalid request"}});
+ expect(await snapshot()).toBe(before);
+ noLegacy();
 });

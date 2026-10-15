@@ -286,11 +286,23 @@ beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_r
     await unchangedOnReject(()=>stores.c.domains.create({domainId:"collision",slug:"same-slug",displayName:"collision"},reason),503);
   });
   it("generated query scope includes both org and owner, and composite keys in complete predicates",()=>{
+    let counters=0;
     for(const {sql:wrapped,parameters} of f.queries){
       // Classify the real repository SELECT, not the admission projection or
       // its timeout-control statements. Keep both owner and actor boundaries.
       const marker="WITH __bounded AS MATERIALIZED (";
       const sql=wrapped.includes(marker)?wrapped.split(marker)[1].split("),\n    __measured AS")[0]:wrapped;
+      if(sql.includes("public.owner_write_resource_budgets")){
+        counters++;
+        expect(parameters[0]).toMatch(/^[abc]$/);
+        if(/^\s*INSERT\b/.test(sql))
+          expect(sql).toMatch(/INSERT INTO public\.owner_write_resource_budgets\(owner_user_id\) VALUES\(\$1\) ON CONFLICT\(owner_user_id\) DO NOTHING/);
+        else {
+          expect(sql).toMatch(/^\s*(SELECT|UPDATE)\b/);
+          expect(sql).toContain("WHERE owner_user_id=$1");
+        }
+        continue;
+      }
       if(!/^(SELECT \*|UPDATE|DELETE)/.test(sql.trim()))continue;
       if(sql.includes("FROM public.audit_events")){
         expect(sql).toContain("org_id=$1 AND actor_kind='user' AND actor_user_id=$2");
@@ -300,6 +312,7 @@ beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_r
       if(/FROM public.dimension_definitions.*measurement_id=\$4/s.test(sql))expect(sql).toContain("policy_version_id=$3 AND measurement_id=$4");
       if(/FROM public.deviation_domains.*domain_id=\$4/s.test(sql))expect(sql).toContain("deviation_id=$3 AND domain_id=$4");
     }
+    expect(counters).toBeGreaterThan(0);
   });
   it("every exported read/write operation revalidates changed membership, including audit and idempotent paths",async()=>{
     await f.client.query("UPDATE organization_members SET role='member' WHERE user_id='a'");

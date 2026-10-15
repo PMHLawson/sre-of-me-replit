@@ -14,6 +14,7 @@ vi.mock("./replit_integrations/auth", () => ({
 }));
 import { registerRoutes } from "./routes";
 import { detectAnomaly } from "./lib/anomaly";
+import { BoundaryError } from "./lib/org-context";
 
 const existing = {
   id: "fixture-session", userId: "fixture-authenticated-user", domain: "music",
@@ -51,7 +52,7 @@ async function patch(body: unknown) {
 }
 
 describe("session-edit PATCH behavior", () => {
-  it.each([undefined, null, "", "   ", "\n\t"])(
+  it.each([null, "", "   ", "\n\t"])(
     "rejects flagged edits with blank note %s before storage mutation",
     async anomalyNote => {
       const response = await patch({
@@ -63,6 +64,20 @@ describe("session-edit PATCH behavior", () => {
       expect(mocks.updateSession).not.toHaveBeenCalled();
     },
   );
+
+  it("defers omitted explanation to owned storage and still rejects an unavailable stored explanation",async()=>{
+    const fields={reason:"synthetic edit",durationMinutes:90,isAnomaly:true};
+    mocks.updateSession.mockRejectedValue(new BoundaryError(400));
+    expect(await patch(fields)).toEqual({status:400,body:{message:"Invalid request"}});
+    expect(mocks.updateSession).toHaveBeenCalledExactlyOnceWith(existing.userId,existing.id,fields);
+  });
+  it("permits omission of an unchanged explanation when owned storage confirms a valid existing explanation",async()=>{
+    const fields={reason:"retain historical explanation",isAnomaly:true};
+    mocks.updateSession.mockResolvedValue({...existing,isAnomaly:true,anomalyNote:"exact retained explanation"});
+    const response=await patch(fields);
+    expect(response.status).toBe(200);expect(response.body).toMatchObject({isAnomaly:true,anomalyNote:"exact retained explanation"});
+    expect(mocks.updateSession).toHaveBeenCalledExactlyOnceWith(existing.userId,existing.id,fields);
+  });
 
   it("passes all valid anomaly-edit fields and only the authenticated principal", async () => {
     const fields = {

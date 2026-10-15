@@ -31,11 +31,20 @@ function publicSession(row: Record<string, any>) {
   const timestamp = new Date(row.timestamp), deletedAt = row.deleted_at === null ? null : new Date(row.deleted_at);
   if (typeof row.id !== "string" || typeof row.user_id !== "string" || !Number.isFinite(timestamp.getTime()) ||
     (deletedAt !== null && !Number.isFinite(deletedAt.getTime()))) throw unavailable();
+  for(const [field,present,bytes,availability] of [
+    ["notes",row.hasNotes,row.notesBytes,row.notesAvailability],
+    ["anomaly_note",row.hasAnomalyNote,row.anomalyNoteBytes,row.anomalyNoteAvailability],
+  ] as const){
+    if(row[field]!==null||typeof present!=="boolean"||!Number.isSafeInteger(bytes)||bytes<0||
+      (!present&&bytes!==0)||availability!==(present?"not_loaded":"absent"))throw unavailable();
+  }
   // Match the existing API's camelCase keys and ISO millisecond representation.
   // Exact database microseconds remain in the canonical row and audit snapshots.
   return { id: row.id, userId: row.user_id, domain: row.domain, durationMinutes: row.duration_minutes,
     timestamp: timestamp.toISOString(), notes: row.notes, deletedAt: deletedAt?.toISOString() ?? null,
-    isAnomaly: row.is_anomaly, anomalyNote: row.anomaly_note };
+    isAnomaly: row.is_anomaly, anomalyNote: row.anomaly_note,
+    hasNotes:row.hasNotes,hasAnomalyNote:row.hasAnomalyNote,notesBytes:row.notesBytes,anomalyNoteBytes:row.anomalyNoteBytes,
+    notesAvailability:row.notesAvailability,anomalyNoteAvailability:row.anomalyNoteAvailability };
 }
 
 /**
