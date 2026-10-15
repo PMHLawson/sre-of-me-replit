@@ -15,7 +15,7 @@ describe("real bounded legacy reads against a nonce-owned synthetic database",()
     pool=new Pool({host:fixture.root+"/socket",port:5432,database:"postgres",user:"synthetic",password:"",ssl:false,
       connectionTimeoutMillis:5000,max:3});
     reads=new LegacyHistoryReads({connect:async()=>{verifyFixture(fixture.root);return pool.connect();}},()=>now);
-    await fixture.client.query(readFileSync("migrations/0002_bounded_history_read_indexes.sql","utf8"));
+    await fixture.client.query(readFileSync("script/sql/bounded-history-read-indexes.sql","utf8"));
     await fixture.client.query("INSERT INTO users(id) VALUES('history-a'),('history-b'); INSERT INTO user_settings(user_id) VALUES('history-a'),('history-b')");
   },60000);
   afterAll(async()=>{try{if(pool)await pool.end();}finally{if(fixture)await fixture.cleanup();}},60000);

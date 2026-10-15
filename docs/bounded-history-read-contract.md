@@ -30,8 +30,8 @@ not data truncation or deletion. Existing mutation responses remain compatible.
 
 ## Additive index adoption
 
-`migrations/0002_bounded_history_read_indexes.sql` is intentionally a separately
-reviewed additive index packet. It is NOT registered in Drizzle's journal and the
+`script/sql/bounded-history-read-indexes.sql` is intentionally a separately
+reviewed additive index packet outside the generated migration directory. It is NOT registered in Drizzle's journal and the
 ordinary migration command must not be claimed to apply it. No live database has
 been changed by saving this source.
 

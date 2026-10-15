@@ -37,7 +37,10 @@ describe("bounded input preserves the existing per-anchor evaluator",()=>{
   });
   it("request memo reduces repeated timezone conversions without global state",()=>{
     const opts=withLogicalDayMemo({now,timezone:"America/New_York",dayStartHour:4});
-    const spy=vi.spyOn(Intl,"DateTimeFormat");try{
+    const OriginalDateTimeFormat=Intl.DateTimeFormat;
+    const spy=vi.spyOn(Intl,"DateTimeFormat").mockImplementation(function(locales,options){
+      return new OriginalDateTimeFormat(locales,options);
+    });try{
       const first=logicalDay(now,opts);
       for(let i=0;i<100;i++)expect(logicalDay(now,{...opts,now:new Date(now.getTime()+i)})).toBe(first);
       expect(spy).toHaveBeenCalledTimes(1);
