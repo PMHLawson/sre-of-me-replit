@@ -2,6 +2,7 @@ import { Router, json, type RequestHandler } from "express";
 import { WorkspaceEnsureInputSchema, OnboardingSettingsPatchSchema } from "../../shared/onboarding";
 import { BoundaryError } from "../lib/org-context";
 import { WriteResourceLimitError } from "../lib/write-resource-budget";
+import { ResourceLimitError } from "../lib/read-budget";
 import { authenticatedBootstrapActor } from "../lib/authenticated-bootstrap-unit";
 import type { createPersonalWorkspaceService } from "../services/personal-workspace-service";
 
@@ -32,7 +33,8 @@ export function createOnboardingRouter(options: { service: Service; authenticate
       response.set("Cache-Control", "no-store");
       if(safe instanceof WriteResourceLimitError&&safe.retryAfterSeconds!==null)response.set("Retry-After",String(safe.retryAfterSeconds));
       response.status(safe.status).json({ message: safe.message,
-        ...(safe instanceof WriteResourceLimitError?{code:safe.code,retryAfterSeconds:safe.retryAfterSeconds}:{}) });
+        ...(safe instanceof WriteResourceLimitError?{code:safe.code,retryAfterSeconds:safe.retryAfterSeconds}:
+          safe instanceof ResourceLimitError?{code:safe.code}:{}) });
     });
   };
   router.get("/status", handle(request => options.service.status(request)));
