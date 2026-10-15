@@ -1,5 +1,6 @@
 import { beforeAll,afterAll,it,expect } from "vitest";
 import { Pool } from "pg";
+import { createHash } from "node:crypto";
 import { startFixture,verifyFixture } from "../lib/ownership-fixture";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap-unit";
@@ -175,4 +176,25 @@ it("new oversized raw notes/context and policy envelopes fail before any write o
   big.configuration.goal={...big.configuration.goal,desiredCapability:"x".repeat(102401)};
   await expect(domains.create(request(o.name),big)).rejects.toMatchObject({status:400});
   expect(await ownedState(o.name)).toBe(before);expect(await counters(o.name)).toBeNull();
+},15000);
+
+it("an exact older raw-observation retry preserves grandfathered long notes and its audit byte-for-byte at the cap",async()=>{
+  const o=await owner("quota-grandfather"),context=await createOrgContextResolver(fixture.db)(request(o.name));
+  const observation={schemaVersion:1 as const,observationId:"grandfather-observation",organizationId:context.orgId,ownerUserId:o.name,
+    domainId:o.domain.domainId,policyVersionId:o.configuration.policyVersionId,observedAt:"2026-01-10T00:00:00.000Z",
+    values:entry(o,"unused").values,notes:"😀".repeat(5000)};
+  const storageKey="observation:v1:"+createHash("sha256").update(JSON.stringify([context.orgId,o.name,"old-raw-key"])).digest("hex");
+  await fixture.client.query("INSERT INTO observations(observation_id,org_id,owner_user_id,domain_id,policy_version_id,idempotency_key,observed_at,observation) "+
+    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)",[observation.observationId,context.orgId,o.name,observation.domainId,observation.policyVersionId,
+      storageKey,observation.observedAt,JSON.stringify(observation)]);
+  await fixture.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") "+
+    "SELECT 'grandfather-audit',org_id,'user',owner_user_id,'observations',$2,'create',clock_timestamp(),'Synthetic historical snapshot',NULL,to_jsonb(o) "+
+    "FROM observations o WHERE observation_id=$1",[observation.observationId,JSON.stringify([observation.observationId])]);
+  await limits(o.name,30,500);const before=await ownedState(o.name);
+  const store=createPolicyV2Storage(fixture.db,context,{clock:policyClock});
+  const saved=await store.observations.create({observation,idempotencyKey:"old-raw-key"},"Exact historical retry");
+  expect(saved.observation.notes).toBe(observation.notes);
+  await expect(store.observations.create({observation:{...observation,observationId:"new-oversized"},idempotencyKey:"new-oversized"},
+    "New oversized note")).rejects.toMatchObject({status:400});
+  expect(await ownedState(o.name)).toBe(before);expect(await counters(o.name)).toEqual({minute:30,day:500});
 },15000);

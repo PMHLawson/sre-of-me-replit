@@ -26,7 +26,7 @@ const domainPatch = z.object({ displayName:text.optional(),deactivatedAt:at.null
 const newObservationSchema=ObservationSchema.extend({
   notes:z.string().max(4000).optional(),context:ActivityContextSchema.optional(),values:ActivityValuesSchema,
 });
-const observationInput = z.object({ observation:newObservationSchema,idempotencyKey:id,sourceBindingId:id.optional() }).strict();
+const observationInput = z.object({ observation:ObservationSchema,idempotencyKey:id,sourceBindingId:id.optional() }).strict();
 const bindingInput = z.object({ bindingId:id,domainId:id,sourceKind:id,externalId:id,
   metadata:z.object({ description:text.optional() }).strict().nullable().optional() }).strict();
 const deviationInput = z.object({ deviationId:id,startAt:at,endAt:at.nullable(),scope:z.enum(["all","selected"]),
@@ -211,8 +211,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     const unchanged=columns.every(column=>{
       const existing=before[column],proposed=patch[column];
       if(existing instanceof Date||proposed instanceof Date) {
-        const left=existing===null?NaN:new Date(existing).getTime();
-        const right=proposed===null?NaN:new Date(proposed as string|Date).getTime();
+        const left=existing instanceof Date?existing.getTime():existing===null?NaN:Date.parse(String(existing));
+        const right=proposed instanceof Date?proposed.getTime():proposed===null?NaN:Date.parse(String(proposed));
         return Number.isFinite(left)&&left===right;
       }
       return semanticEqual(existing,proposed);
@@ -644,6 +644,9 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
             !semanticEqual(parse(ObservationSchema,found[0].observation),o))throw new BoundaryError(400);
           return found[0];
         }
+        // Exact committed retries above retain grandfathered stored notes/context;
+        // only a new observation must satisfy the current write envelope.
+        parse(newObservationSchema,o);
         return insert(tx,"observation",{observation_id:o.observationId,domain_id:o.domainId,policy_version_id:o.policyVersionId,
           idempotency_key:storageKey,observed_at:o.observedAt,observation:o},r);
       }),
