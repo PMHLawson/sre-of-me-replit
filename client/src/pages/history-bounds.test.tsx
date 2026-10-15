@@ -1,16 +1,30 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { bindLegacyOwner, useAppStore, type Session } from "@/store";
 import History from "./history";
+
+// Zustand's SSR hook deliberately reads its creation snapshot. These fixtures
+// prepare state with setState, so select that exact snapshot explicitly while
+// preserving the real store and all of its mutation/request methods.
+vi.mock("@/store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/store")>();
+  type State = ReturnType<typeof actual.useAppStore.getState>;
+  const useAppStore = Object.assign(
+    (selector: (state: State) => unknown) => selector(actual.useAppStore.getState()),
+    actual.useAppStore,
+  );
+  return { ...actual, useAppStore };
+});
+
 const row = (id: string, timestamp: string, durationMinutes: number): Session => ({
   id, timestamp, durationMinutes, domain: "meditation", deletedAt: null,
   isAnomaly: false, anomalyNote: null, notes: null, textComplete: false, hasNotes: false, hasAnomalyNote: false });
 beforeEach(() => {
   bindLegacyOwner(null); bindLegacyOwner("owner"); useAppStore.getState().resetLegacyReads();
   const recent = new Date(); recent.setDate(recent.getDate() - 10);
-  useAppStore.setState({ demoState: "default", sessions: [row("context", recent.toISOString(), 80)],
+  useAppStore.setState({ dataOwner: "owner", demoState: "default", sessions: [row("context", recent.toISOString(), 80)],
     sessionsLoaded: true, deviationsLoaded: true, historyLoaded: true, historyComplete: false,
     historySessions: [row("archive", "2020-01-01T12:00:00Z", 10)] });
 });
