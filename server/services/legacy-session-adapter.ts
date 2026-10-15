@@ -1,6 +1,7 @@
 import type { Response } from "express";
 import type { Pool } from "pg";
 import { BoundaryError } from "../lib/org-context";
+import { ResourceLimitError } from "../lib/read-budget";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createLegacyActivityMutations } from "./legacy-activity-mutations";
 
@@ -81,7 +82,8 @@ export function createLegacySessionAdapter(options: {
     respondError(error: unknown, response: Pick<Response, "status" | "json">, action: Action) {
       if (!(error instanceof BoundaryError)) return false;
       response.status(error.status).json({ message: error.status === 404 ?
-        (action === "restore" ? "Deleted session not found" : "Session not found") : error.message });
+        (action === "restore" ? "Deleted session not found" : "Session not found") : error.message,
+        ...(error instanceof ResourceLimitError ? { code:error.code } : {}) });
       return true;
     },
   });

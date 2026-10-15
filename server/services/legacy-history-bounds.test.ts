@@ -4,6 +4,7 @@ import { startFixture } from "../lib/ownership-fixture";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { seedPolicyV2 } from "../lib/seed-policy-v2";
 import { createLegacyActivityMutations } from "./legacy-activity-mutations";
+import { createLegacySessionAdapter } from "./legacy-session-adapter";
 import { importLegacyObservations,reconcileLegacyObservations,verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { ResourceLimitError,MAX_READ_ROWS,READ_TIMEOUT_MS } from "../lib/read-budget";
 import { withTransactionReadBudget } from "../lib/transaction-read-budget";
@@ -184,4 +185,14 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     expect(settings.at(-1)!.parameters).toEqual(["100","100"]);
     expect(await state()).toBe(before);
   });
+  it("the legacy adapter preserves the explicit resource error without enabling a writer",()=>{
+    const getPool=vi.fn(async()=>{throw Error("No pool expected");});
+    const adapter=createLegacySessionAdapter({config:{enabled:false,owners:[]},getPool});
+    const response:any={status:vi.fn(()=>response),json:vi.fn(()=>response)};
+    expect(adapter.respondError(new ResourceLimitError(),response,"edit")).toBe(true);
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith({message:new ResourceLimitError().message,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(getPool).not.toHaveBeenCalled();
+  });
+
 });
