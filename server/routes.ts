@@ -1,6 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, historyReads } from "./storage";
+import { ResourceLimitError } from "./lib/read-budget";
+import { HistoryInputError, HistoryNotFound, HistoryChanged, parseHistoryPage, historyDays } from "./lib/legacy-history";
+import { policyResponse, stateBundle } from "./lib/history-state";
 import { createLegacySessionAdapter, readLegacyWriteThroughConfig, type LegacySessionAdapter } from "./services/legacy-session-adapter";
 import {
   insertSessionSchema,
@@ -63,155 +66,47 @@ export async function registerRoutes(
     })),
   }));
 
-  // GET /api/sessions — return sessions for the authenticated user (most recent first)
-  app.get("/api/sessions", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      const sessions = await storage.getSessions(userId);
-      res.json(sessions.map(serializeSession));
-    } catch {
-      res.status(500).json({ message: "Failed to fetch sessions" });
-    }
+  // Complete current context and both derived payloads share one snapshot,
+  // one clock and one settings version; no client joins unrelated generations.
+  app.get("/api/session-state",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{
+      const days=historyDays(req.query),userId:string=req.user.claims.sub;
+      await storage.getUserSettings(userId);
+      res.json(stateBundle(await historyReads.current(userId,days),days));
+    }catch(error){respondHistoryError(error,res);}
   });
-
-  // GET /api/policy-state — return per-service + composite policy state for the authenticated user
-  // Source of truth for Dashboard, Decide, Domain Detail, History, and System Health.
-  app.get("/api/policy-state", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      // SOMR-327 (F4) — Capture a single timestamp for the entire response so
-      // every window computation, deviation-activity check, and ramp-up flag
-      // all reference the same instant. Without this, four separate new Date()
-      // calls could theoretically span a logical-day boundary.
-      const now = new Date();
-      const [sessions, activeDeviations, user, settings] = await Promise.all([
-        storage.getSessions(userId),
-        storage.getActiveDeviations(userId, now),
-        authStorage.getUser(userId),
-        storage.getUserSettings(userId),
-      ]);
-      const userCreatedAt = user?.createdAt ?? undefined;
-      // C3.3 — Honour the user's persisted runtime knobs so scoring reflects
-      // their chosen timezone / day-start-hour / window length instead of
-      // the hardcoded engine defaults.
-      const opts = {
-        now,
-        deviations: activeDeviations,
-        userCreatedAt,
-        dayStartHour: settings.dayStartHour,
-        timezone: settings.timezone,
-        windowDays: settings.windowDays,
-      };
-      const state = computeCompositeState(sessions, opts);
-      // C2.3 — Compute trailing sustained-overachievement runs per domain
-      // so future notification triggers can read this without recomputing
-      // history client-side.
-      const sustainedOverachievement = computeSustainedOverachievement(sessions, opts);
-      // B3.1 — Surface ramp-up flag on policy-state too so Dashboard surfaces
-      // can branch without making a second API call to /api/escalation-state.
-      // SOMR-327 — Precompute all chart-range window key sets and a per-session
-      // logical-day map so the client can bucket sessions without mirroring the
-      // logical-day algorithm. opts already carries timezone/dayStartHour from
-      // user_settings, so these are identical to the policy-engine window.
-      const w7   = completedWindowDays({ ...opts, windowDays: 7  });
-      const w14  = completedWindowDays({ ...opts, windowDays: 14 });
-      const w28  = completedWindowDays({ ...opts, windowDays: 28 });
-      const w42  = completedWindowDays({ ...opts, windowDays: 42 });
-      // prev7: the 7 days that immediately precede the current 7d window.
-      // w14 covers 14 completed logical days (oldest→newest); the first half
-      // is the 7 days before w7 — no gap, no overlap with w7.
-      const prev7 = w14.slice(0, 7);
-      // SOMR-327 — Current (in-progress) logical day, excluded from all window
-      // sets.  Sent to the client so it can surface live today-context without
-      // any client-side timezone arithmetic.
-      const todayKey = logicalDay(now, opts);
-
-      // Map every session the user has ever logged to its logical-day key so
-      // the client can filter by Set membership with no JS timezone math.
-      const sessionDays: Record<string, string> = {};
-      for (const s of sessions) {
-        sessionDays[s.id] = logicalDay(s.timestamp, opts);
-      }
-
-      // SOMR-327 (F2, DST) — Compute which w42 logical-day keys each active
-      // deviation spans.  Use logicalDayStartUtc for BOTH the start and end of
-      // each logical day so that 23-hour spring-forward days and 25-hour
-      // fall-back days have exact boundaries — not an assumed 24 h.
-      //
-      // nextDateKey advances the YYYY-MM-DD key by exactly one UTC calendar
-      // date, which is always the next entry in the logical-day sequence.
-      const nextDateKey = (dk: string): string => {
-        const [yr, mo, dy] = dk.split("-").map(Number);
-        return new Date(Date.UTC(yr, mo - 1, dy + 1)).toISOString().slice(0, 10);
-      };
-      const deviationDayMap: Record<string, string[]> = {};
-      for (const d of activeDeviations) {
-        const startMs = new Date(d.startAt).getTime();
-        const endRaw  = d.endedAt ?? d.endAt ?? null;
-        const endMs   = endRaw
-          ? new Date(endRaw).getTime()
-          : Number.POSITIVE_INFINITY;
-        const overlapping = w42.filter((dayKey) => {
-          const dayStartMs = logicalDayStartUtc(dayKey, opts).getTime();
-          const dayEndMs   = logicalDayStartUtc(nextDateKey(dayKey), opts).getTime();
-          return startMs < dayEndMs && endMs > dayStartMs;
-        });
-        if (overlapping.length > 0) {
-          deviationDayMap[d.id] = overlapping;
-        }
-      }
-
-      res.json({
-        ...state,
-        isRampUp: isInRampUp(userCreatedAt, now),
-        sustainedOverachievement,
-        windowSets: { w7, w14, w28, w42, prev7, deviationDayMap, todayKey },
-        sessionDays,
-      });
-    } catch {
-      res.status(500).json({ message: "Failed to compute policy state" });
-    }
+  app.get("/api/sessions",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{res.json(await historyReads.page(req.user.claims.sub,"sessions",parseHistoryPage(req.query)));}
+    catch(error){respondHistoryError(error,res);}
   });
-
-  // GET /api/escalation-state — per-domain escalation tier, error-budget, burn-rate, recommended action.
-  // Derived from the same session stream that feeds /api/policy-state.
-  app.get("/api/escalation-state", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      // Optional ?days= override for the trailing history window. Validated and
-      // capped at MAX_ESCALATION_HISTORY_DAYS to bound server work; falls back
-      // to DEFAULT_ESCALATION_HISTORY_DAYS when absent or invalid.
-      const MAX_ESCALATION_HISTORY_DAYS = 60;
-      const rawDays = req.query.days;
-      let historyDays: number | undefined;
-      if (typeof rawDays === "string" && rawDays.length > 0) {
-        const parsed = Number.parseInt(rawDays, 10);
-        if (!Number.isFinite(parsed) || parsed < 1) {
-          return res.status(400).json({ message: "Invalid days parameter" });
-        }
-        historyDays = Math.min(parsed, MAX_ESCALATION_HISTORY_DAYS);
-      }
-      const [sessions, activeDeviations, user, settings] = await Promise.all([
-        storage.getSessions(userId),
-        storage.getActiveDeviations(userId),
-        authStorage.getUser(userId),
-        storage.getUserSettings(userId),
-      ]);
-      const state = computeEscalationState(
-        sessions,
-        {
-          deviations: activeDeviations,
-          userCreatedAt: user?.createdAt ?? undefined,
-          dayStartHour: settings.dayStartHour,
-          timezone: settings.timezone,
-          windowDays: settings.windowDays,
-        },
-        historyDays,
-      );
-      res.json(state);
-    } catch {
-      res.status(500).json({ message: "Failed to compute escalation state" });
-    }
+  app.get("/api/sessions/context",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{
+      if(Object.keys(req.query).length)throw new HistoryInputError();
+      const userId:string=req.user.claims.sub;await storage.getUserSettings(userId);
+      const input=await historyReads.current(userId,14);
+      res.json({asOf:input.now.toISOString(),sessions:input.context,deviations:input.contextDeviations,
+        fromInclusive:input.fromInclusive,complete:true});
+    }catch(error){respondHistoryError(error,res);}
+  });
+  // Compatible successful derived payloads remain available to existing callers.
+  app.get("/api/policy-state",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{
+      if(Object.keys(req.query).length)throw new HistoryInputError();
+      const userId:string=req.user.claims.sub;await storage.getUserSettings(userId);
+      res.json(policyResponse(await historyReads.current(userId,14)));
+    }catch(error){respondHistoryError(error,res);}
+  });
+  app.get("/api/escalation-state",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{
+      const days=historyDays(req.query),userId:string=req.user.claims.sub;
+      await storage.getUserSettings(userId);const input=await historyReads.current(userId,days);
+      res.json(computeEscalationState(input.sessions,input.opts,days));
+    }catch(error){respondHistoryError(error,res);}
   });
 
   // GET /api/settings — current user's settings (auto-created with defaults on first access).
@@ -286,20 +181,18 @@ export async function registerRoutes(
       // about. detectAnomaly will still apply the same cutoff defensively,
       // but pre-filtering at the DB layer keeps payloads small for users
       // with long histories.
-      const cutoff = new Date(Date.now() - BASELINE_DAYS * 24 * 60 * 60 * 1000);
-      const sessions = await storage.getSessionsSince(userId, cutoff);
+      const now = new Date();
+      const sessions = await historyReads.baseline(userId, now, parsed.data.domain, parsed.data.excludeSessionId);
       // The edited row is not one of its own historical peers. Exclusion is
       // applied only to this already user-scoped, active history collection.
       const peers = parsed.data.excludeSessionId
         ? sessions.filter(session => session.id !== parsed.data.excludeSessionId)
         : sessions;
-      const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, peers);
+      const result = detectAnomaly(parsed.data.domain, parsed.data.durationMinutes, peers, { now });
       // JSON cannot serialize Infinity; coerce to a large finite sentinel.
       const zScore = Number.isFinite(result.zScore) ? result.zScore : 9999;
       res.json({ ...result, zScore });
-    } catch {
-      res.status(500).json({ message: "Failed to compute anomaly check" });
-    }
+    } catch(error) { respondHistoryError(error,res); }
   });
 
   // GET /api/baselines — per-domain 42-day duration baseline (mean, stdDev,
@@ -309,33 +202,38 @@ export async function registerRoutes(
   app.get("/api/baselines", isAuthenticated, async (req: any, res) => {
     try {
       const userId: string = req.user.claims.sub;
-      const cutoff = new Date(Date.now() - BASELINE_DAYS * 24 * 60 * 60 * 1000);
-      const sessions = await storage.getSessionsSince(userId, cutoff);
+      const now = new Date();
+      const sessions = await historyReads.baseline(userId, now);
       const perDomain: Record<string, ReturnType<typeof computeBaseline>> = {};
       for (const d of domainEnum) {
-        perDomain[d] = computeBaseline(d, sessions);
+        perDomain[d] = computeBaseline(d, sessions, { now });
       }
       res.json({
         baselineDays: BASELINE_DAYS,
         coldStartThreshold: COLD_START_THRESHOLD,
         perDomain,
       });
-    } catch {
-      res.status(500).json({ message: "Failed to compute baselines" });
-    }
+    } catch(error) { respondHistoryError(error,res); }
   });
 
   // GET /api/sessions/deleted — soft-deleted sessions for the authenticated user.
   // Static path is registered before /api/sessions/:id below so it is not
   // captured as an :id parameter.
-  app.get("/api/sessions/deleted", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      const rows = await storage.getDeletedSessions(userId);
-      res.json(rows.map(serializeSession));
-    } catch {
-      res.status(500).json({ message: "Failed to fetch deleted sessions" });
-    }
+  app.get("/api/sessions/deleted",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{res.json(await historyReads.page(req.user.claims.sub,"deleted",parseHistoryPage(req.query)));}
+    catch(error){respondHistoryError(error,res);}
+  });
+  app.get("/api/sessions/:id/text",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{res.json(await historyReads.text(req.user.claims.sub,"sessions",req.params.id,req.query));}
+    catch(error){respondHistoryError(error,res);}
+  });
+  app.get("/api/sessions/:id",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{if(Object.keys(req.query).length)throw new HistoryInputError();
+      res.json(await historyReads.detail(req.user.claims.sub,"sessions",req.params.id));}
+    catch(error){respondHistoryError(error,res);}
   });
 
   // PATCH /api/sessions/:id — edit a non-deleted session. Body must include
@@ -396,34 +294,21 @@ export async function registerRoutes(
 
   // GET /api/deviations — list all (active + planned + ended) non-deleted deviations.
   // Optional ?state=active|planned filter.
-  app.get("/api/deviations", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      const state = typeof req.query.state === "string" ? req.query.state : undefined;
-      let rows;
-      if (state === "active") {
-        rows = await storage.getActiveDeviations(userId);
-      } else if (state === "planned") {
-        rows = await storage.getPlannedDeviations(userId);
-      } else {
-        rows = await storage.getAllDeviations(userId);
-      }
-      res.json(rows.map(serializeDeviation));
-    } catch {
-      res.status(500).json({ message: "Failed to fetch deviations" });
-    }
+  app.get("/api/deviations",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{res.json(await historyReads.page(req.user.claims.sub,"deviations",parseHistoryPage(req.query,true)));}
+    catch(error){respondHistoryError(error,res);}
   });
-
-  // GET /api/deviations/:id
-  app.get("/api/deviations/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId: string = req.user.claims.sub;
-      const row = await storage.getDeviation(userId, req.params.id);
-      if (!row) return res.status(404).json({ message: "Deviation not found" });
-      res.json(serializeDeviation(row));
-    } catch {
-      res.status(500).json({ message: "Failed to fetch deviation" });
-    }
+  app.get("/api/deviations/:id/text",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{res.json(await historyReads.text(req.user.claims.sub,"deviations",req.params.id,req.query));}
+    catch(error){respondHistoryError(error,res);}
+  });
+  app.get("/api/deviations/:id",isAuthenticated,async(req:any,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try{if(Object.keys(req.query).length)throw new HistoryInputError();
+      res.json(await historyReads.detail(req.user.claims.sub,"deviations",req.params.id));}
+    catch(error){respondHistoryError(error,res);}
   });
 
   // POST /api/deviations — create
@@ -500,4 +385,12 @@ function serializeDeviation(row: import("@shared/schema").Deviation) {
     endedAt: row.endedAt ? row.endedAt.toISOString() : null,
     deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
   };
+}
+
+function respondHistoryError(error:unknown,res:{status:(n:number)=>any}){
+  if(error instanceof ResourceLimitError)return res.status(503).json({message:error.message,code:error.code});
+  if(error instanceof HistoryInputError)return res.status(400).json({message:"Invalid history request"});
+  if(error instanceof HistoryNotFound)return res.status(404).json({message:"Record not found"});
+  if(error instanceof HistoryChanged)return res.status(409).json({message:"Record changed. Reload its details before reading more text.",code:"HISTORY_CHANGED"});
+  return res.status(503).json({message:"History is unavailable. Your records have not been changed."});
 }

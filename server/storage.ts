@@ -1,4 +1,5 @@
-import { db } from "./db";
+import { db, pool } from "./db";
+import { LegacyHistoryReads } from "./lib/legacy-history";
 import {
   sessions,
   sessionEdits,
@@ -423,3 +424,5 @@ export class DatabaseStorage implements IStorage {
 }
 
 export const storage = new DatabaseStorage();
+
+export const historyReads = new LegacyHistoryReads(pool);
