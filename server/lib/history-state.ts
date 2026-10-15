@@ -73,7 +73,7 @@ export function policyResponse(input:Input){
       };
 }
 export function stateBundle(input:Input,days:number):SessionStateBundle {
-  return {asOf:input.now.toISOString(),complete:true,
+  return {ownerUserId:input.ownerUserId,asOf:input.now.toISOString(),complete:true,
     context:{sessions:input.context,deviations:input.contextDeviations,fromInclusive:input.fromInclusive,complete:true},
     policyState:policyResponse(input),escalationState:computeEscalationState(input.sessions,input.opts,days)};
 }

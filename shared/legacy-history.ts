@@ -18,7 +18,7 @@ export interface TextChunk {
   text:string|null; offset:number; nextOffset:number|null; textVersion:string; bytes:number;
 }
 export interface SessionStateBundle {
-  asOf:string; complete:true;
+  ownerUserId:string; asOf:string; complete:true;
   context:{sessions:SessionSummary[];deviations:DeviationSummary[];fromInclusive:string;complete:true};
   policyState:PolicyStateResponse; escalationState:EscalationStateResponse;
 }

@@ -100,7 +100,7 @@ describe("real bounded legacy reads against a nonce-owned synthetic database",()
   it("retains future context and uses one snapshot/clock for all successful state components",async()=>{
     await insert("future","2027-01-01T00:00:00Z");await insert("today",now.toISOString());
     const bundle=stateBundle(await reads.current("history-a",14),14);
-    expect(bundle.asOf).toBe(now.toISOString());expect(bundle.complete).toBe(true);
+    expect(bundle.ownerUserId).toBe("history-a");expect(bundle.asOf).toBe(now.toISOString());expect(bundle.complete).toBe(true);
     expect(bundle.context.sessions.map(s=>s.id)).toContain("future");
     expect(bundle.policyState.sessionDays.future).toBe("2026-12-31");
     expect(bundle.policyState.services.meditation.actual_minutes).toBe(0);

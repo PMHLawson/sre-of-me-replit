@@ -146,7 +146,7 @@ export class LegacyHistoryReads {
       const deviations=active.map(d=>({...d,startAt:new Date(d.startAt),endAt:d.endAt===null?null:new Date(d.endAt),
         endedAt:null,deletedAt:null,reason:""})) as Deviation[];
       const scoreSessions=scoreRows.map(calcSession).filter(s=>plan.logicalDays.has(logicalDay(s.timestamp,opts)));
-      return {now,opts:{...opts,deviations},sessions:scoreSessions,context:contextRows.map(sessionSummary),
+      return {ownerUserId:user,now,opts:{...opts,deviations},sessions:scoreSessions,context:contextRows.map(sessionSummary),
         contextDeviations:deviationRows.map(deviationSummary),fromInclusive:contextFrom.toISOString(),settings};
     });
   }
