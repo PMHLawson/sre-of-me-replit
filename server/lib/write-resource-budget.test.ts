@@ -1,5 +1,5 @@
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
-import { Pool, type PoolClient } from "pg";
+import { Pool } from "pg";
 import { startFixture } from "./ownership-fixture";
 import { BoundaryError, type Transaction } from "./org-context";
 import { OWNER_WRITE_LIMITS, WriteResourceLimitError, withOwnerWriteBudget, readOwnerWriteBudgetStatus } from "./write-resource-budget";
@@ -40,6 +40,29 @@ describe("durable owner write admission in actual disposable PostgreSQL", () => 
       await tx.query("INSERT INTO public.write_budget_probe VALUES($1,$2)",[key,id]);
     });
   }
+  it("adds owner-leading measurement indexes without payload storage or partial-history filters",async()=>{
+    const columns=(await f.client.query("SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='owner_write_resource_budgets' ORDER BY ordinal_position")).rows;
+    expect(columns.map(row=>[row.column_name,row.data_type,row.is_nullable])).toEqual([
+      ["owner_user_id","text","NO"],["minute_started_at","timestamp with time zone","NO"],["minute_count","integer","NO"],
+      ["day_date","date","NO"],["day_count","integer","NO"],["observed_bytes","bigint","NO"],
+      ["observed_at","timestamp with time zone","YES"],["updated_at","timestamp with time zone","NO"]]);
+    const constraints=(await f.client.query("SELECT contype,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='public.owner_write_resource_budgets'::regclass")).rows;
+    expect(constraints.filter(row=>row.contype==="p").map(row=>row.definition)).toEqual(["PRIMARY KEY (owner_user_id)"]);
+    expect(constraints.filter(row=>row.contype==="f")).toHaveLength(1);
+    expect(constraints.find(row=>row.contype==="f").definition).toContain("FOREIGN KEY (owner_user_id)");
+    expect(constraints.filter(row=>row.contype==="c")).toHaveLength(3);
+    const indexes=(await f.client.query("SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' AND indexname LIKE 'somr468_%_owner_bytes_idx' ORDER BY indexname")).rows;
+    expect(indexes).toHaveLength(12);
+    for(const row of indexes){
+      if(row.indexname==="somr468_audit_events_owner_bytes_idx"){
+        expect(row.indexdef).toContain("(actor_user_id)");expect(row.indexdef).toContain("actor_kind");
+      }else{
+        expect(row.indexdef).toMatch(/\((?:user_id|owner_user_id)\)/);
+        expect(row.indexdef).not.toContain(" WHERE ");
+      }
+      expect(row.indexdef).not.toContain(" INCLUDE ");
+    }
+  });
   it("no-op and exact idempotent replay do not create or increment a counter",async()=>{
     const id=await owner("write-noop");
     expect(await transaction(tx=>withOwnerWriteBudget(tx,id,async()=>"unchanged"))).toBe("unchanged");

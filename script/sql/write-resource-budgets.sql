@@ -15,4 +15,18 @@ CREATE TABLE public.owner_write_resource_budgets (
 );
 COMMENT ON TABLE public.owner_write_resource_budgets IS
   'Durable accepted external mutation counters and last logical owned JSON byte observation. No practice values, raw notes, or retention authority.';
+-- Owner-leading indexes cover every historical row, including soft-deleted data.
+-- They prevent each owner's aggregate measurement from scanning other tenants.
+CREATE INDEX somr468_sessions_owner_bytes_idx ON public.sessions(user_id);
+CREATE INDEX somr468_session_edits_owner_bytes_idx ON public.session_edits(user_id);
+CREATE INDEX somr468_deviations_owner_bytes_idx ON public.deviations(user_id);
+CREATE INDEX somr468_domains_owner_bytes_idx ON public.domains(owner_user_id);
+CREATE INDEX somr468_policy_versions_owner_bytes_idx ON public.policy_versions(owner_user_id);
+CREATE INDEX somr468_dimension_definitions_owner_bytes_idx ON public.dimension_definitions(owner_user_id);
+CREATE INDEX somr468_observations_owner_bytes_idx ON public.observations(owner_user_id);
+CREATE INDEX somr468_evaluation_results_owner_bytes_idx ON public.evaluation_results(owner_user_id);
+CREATE INDEX somr468_deviations_v2_owner_bytes_idx ON public.deviations_v2(owner_user_id);
+CREATE INDEX somr468_deviation_domains_owner_bytes_idx ON public.deviation_domains(owner_user_id);
+CREATE INDEX somr468_source_bindings_owner_bytes_idx ON public.source_bindings(owner_user_id);
+CREATE INDEX somr468_audit_events_owner_bytes_idx ON public.audit_events(actor_user_id) WHERE actor_kind='user';
 COMMIT;
