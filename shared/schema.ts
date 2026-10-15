@@ -32,17 +32,29 @@ export const sessions = pgTable("sessions", {
   anomalyNote: text("anomaly_note"),
 });
 
+/** Limits apply only to NEW/CHANGED activity text, never stored goal amounts or historical data. */
+export const ACTIVITY_TEXT_MAX_CHARACTERS=4000;
+export const ACTIVITY_TEXT_MAX_UTF8_BYTES=16*1024;
+export function activityTextWithinLimit(value:string):boolean {
+  // Four thousand codepoints require at most eight thousand UTF-16 code units.
+  if(value.length>ACTIVITY_TEXT_MAX_CHARACTERS*2)return false;
+  return Array.from(value).length<=ACTIVITY_TEXT_MAX_CHARACTERS&&
+    new TextEncoder().encode(value).byteLength<=ACTIVITY_TEXT_MAX_UTF8_BYTES;
+}
+export const activityTextSchema=z.string().refine(activityTextWithinLimit,
+  {message:"Activity text must contain at most4000 characters and16KiB of UTF-8 text"});
+
 export const insertSessionSchema = createInsertSchema(sessions)
   .omit({ id: true, deletedAt: true })
   .extend({
     domain: z.enum(domainEnum),
     durationMinutes: z.number().int().positive(),
     timestamp: z.string().datetime({ offset: true }),
-    notes: z.string().optional(),
+    notes: activityTextSchema.optional(),
     // Backward-compatible: existing POST callers omit these and the row
     // defaults to isAnomaly=false / anomalyNote=null.
     isAnomaly: z.boolean().optional(),
-    anomalyNote: z.string().nullable().optional(),
+    anomalyNote: activityTextSchema.nullable().optional(),
   });
 
 /** POST /api/sessions/anomaly-check request payload. */
@@ -81,6 +93,7 @@ export const updateSessionSchema = z.object({
   domain: z.enum(domainEnum).optional(),
   durationMinutes: z.number().int().positive().optional(),
   timestamp: z.string().datetime({ offset: true }).optional(),
+  // Exact unchanged historical text is checked against the owned locked row.
   notes: z.string().nullable().optional(),
   reason: explanationSchema,
   // C1.1 — Anomaly fields mirror insertSessionSchema so the edit path can
