@@ -8,6 +8,8 @@ import http from "node:http";
 import {once}from"node:events";
 import {startFixture}from"../../lib/ownership-fixture";
 import {NonresurrectingStore}from"./nonresurrecting-store";
+import {EncryptedTokenSessionStore}from"./encrypted-session-store";
+import {createTokenVault}from"./token-vault";
 import {deliberateLogout,registerLogout}from"./deliberate-logout";
 import {trustedAddressGuard}from"../../../shared/trusted-addresses";
 import fs from"node:fs";
@@ -16,7 +18,7 @@ import pgStorePackage from"connect-pg-simple/package.json";
 import {createRequire}from"node:module";
 const signature=createRequire(import.meta.url)("cookie-signature") as {sign(value:string,secret:string):string};
 const origin="https://sre-of-me-replit.pmhlabs.org";
-let fixture:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:NonresurrectingStore,server:http.Server,port:number;
+let fixture:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:EncryptedTokenSessionStore,server:http.Server,port:number;
 let providerFails=false,gate:Promise<void>|undefined;
 let syntheticIdentity=0;
 let delayedEntered:(()=>void)|undefined;
@@ -33,13 +35,20 @@ async function login(){const r=await request("/synthetic-login","POST");expect(r
 beforeAll(async()=>{
  fixture=await startFixture("logout");
  pool=new Pool({host:fixture.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false});
- store=new NonresurrectingStore(pool);
+  store=new EncryptedTokenSessionStore(new NonresurrectingStore(pool),createTokenVault({
+   activeKeyId:"synthetic",keys:{synthetic:Buffer.alloc(32,0x42)},
+  }));
  const app=express(),passport=new Passport();
  app.set("trust proxy",1);app.use(trustedAddressGuard());app.all("/api/logout",deliberateLogout);
  app.use(session({secret:"synthetic-fixture-only-secret",store,resave:false,saveUninitialized:false,cookie:{secure:true,httpOnly:true,sameSite:"lax",maxAge:604800000}}));
  passport.serializeUser((user,cb)=>cb(null,user));passport.deserializeUser((user:Express.User,cb)=>cb(null,user));
  app.use(passport.initialize());app.use(passport.session());
- app.post("/synthetic-login",(req,res,next)=>req.login({id:`synthetic-${++syntheticIdentity}`},e=>e?next(e):res.json({ok:true})));
+  app.post("/synthetic-login",(req,res,next)=>{
+   const id=`synthetic-${++syntheticIdentity}`;
+   req.login({id,claims:{sub:id,exp:Math.floor(Date.now()/1000)+3600},
+    refresh_token:`synthetic-refresh-${id}`,access_token:`synthetic-access-${id}`,expires_at:Math.floor(Date.now()/1000)+3600},
+    e=>e?next(e):res.json({ok:true}));
+  });
  app.get("/private",(req,res)=>res.status(req.isAuthenticated()?200:401).end());
  app.get("/capture",(req,res)=>{saves.push(req.session);res.end();});
  app.post("/synthetic-refresh",(req,res)=>{
