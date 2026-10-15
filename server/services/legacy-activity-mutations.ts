@@ -3,7 +3,9 @@ import { isDeepStrictEqual as equal } from "node:util";
 import { z } from "zod";
 import { domainEnum, updateSessionSchema } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
-import { BoundaryError, revalidate } from "../lib/org-context";
+import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase } from "../lib/org-context";
+import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS } from "../lib/read-budget";
+import { withTransactionReadBudget, completeRead } from "../lib/transaction-read-budget";
 import { createAuditService } from "../lib/audit-service";
 import { verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
@@ -11,6 +13,8 @@ import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-own
 type Request = Parameters<ReturnType<typeof createPinnedOwnershipUnit>["run"]>[0];
 type Row = Record<string, any>;
 type State = { legacy: Row; canonical: Row };
+type MappingEvidence={domain:Row;configurations:import("../../shared/domain-config").DomainConfiguration[]};
+type MutationUnit=OwnershipUnit & {readonly mappingEvidence:Map<string,Promise<MappingEvidence>>};
 const version = "legacy-activity-mutation-v1";
 const entity = "legacy_session_mutation";
 const id = z.string().min(1).max(200).refine(x => x.trim() === x && !/[\u0000-\u001f\u007f]/.test(x) && x !== "__proto__");
@@ -32,16 +36,12 @@ function ticks(value:unknown):bigint {
   const fraction=value.match(/\.(\d+)/)?.[1]??"";requireValid(fraction.length<=6);
   return BigInt(Date.parse(value))*BigInt(1000)+BigInt(fraction.padEnd(6,"0").slice(3));
 }
-async function mapping(u:OwnershipUnit,source:Row):Promise<Row> {
+async function loadMappingEvidence(u:MutationUnit,slug:string):Promise<MappingEvidence> {
   const {orgId:org,actorUserId:actor}=u.context;
-  requireValid(source.user_id===actor&&typeof source.id==="string"&&domainEnum.includes(source.domain)&&
-    Number.isInteger(source.duration_minutes)&&source.duration_minutes>0&&typeof source.is_anomaly==="boolean"&&
-    (source.notes===null||typeof source.notes==="string")&&(source.anomaly_note===null||typeof source.anomaly_note==="string"));
-  if(source.deleted_at!==null)ticks(source.deleted_at);
-  const ds=(await u.tx.query("SELECT * FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 AND slug=$3 FOR SHARE",[org,actor,source.domain])).rows;
+  const ds=(await u.tx.query("SELECT * FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 AND slug=$3 LIMIT 2 FOR SHARE",[org,actor,slug])).rows;
   requireValid(ds.length===1&&ds[0].deactivated_at===null&&ds[0].tombstoned_at===null);const d=ds[0];
-  const ps=(await u.tx.query("SELECT p.*,to_jsonb(p) raw FROM public.policy_versions p WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY revision FOR SHARE",[org,actor,d.domain_id])).rows;
-  const dimensions=(await u.tx.query("SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 FOR SHARE",[org,actor,d.domain_id])).rows;
+  const ps=completeRead((await u.tx.query("SELECT p.*,to_jsonb(p) raw FROM public.policy_versions p WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY revision LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1])).rows);
+  const dimensions=completeRead((await u.tx.query("SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY policy_version_id,measurement_id LIMIT $4 FOR SHARE",[org,actor,d.domain_id,MAX_READ_ROWS+1])).rows);
   const configurations=ps.map(p=>{
     const c=parse(DomainConfigurationSchema,p.configuration);
     requireValid(c.organizationId===org&&c.ownerUserId===actor&&c.domainId===d.domain_id&&c.policyVersionId===p.policy_version_id&&
@@ -52,12 +52,26 @@ async function mapping(u:OwnershipUnit,source:Row):Promise<Row> {
   });
   requireValid(configurations.length>0&&ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations,observations:[]}).success&&
     dimensions.length===configurations.reduce((n,c)=>n+c.measurements.length,0));
+  const bs=(await u.tx.query("SELECT * FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 AND source_kind='manual-legacy' AND external_id=$4 LIMIT 2 FOR SHARE",[org,actor,d.domain_id,slug])).rows;
+  requireValid(bs.length===1&&equal(bs[0].metadata,{description:"existing-owner-seed-v1"}));
+  return {domain:d,configurations};
+}
+async function mappingEvidence(u:MutationUnit,slug:string) {
+  let pending=u.mappingEvidence.get(slug);
+  if(!pending){pending=loadMappingEvidence(u,slug);u.mappingEvidence.set(slug,pending);}
+  return pending;
+}
+async function mapping(u:MutationUnit,source:Row):Promise<Row> {
+  const {orgId:org,actorUserId:actor}=u.context;
+  requireValid(source.user_id===actor&&typeof source.id==="string"&&domainEnum.includes(source.domain)&&
+    Number.isInteger(source.duration_minutes)&&source.duration_minutes>0&&typeof source.is_anomaly==="boolean"&&
+    (source.notes===null||typeof source.notes==="string")&&(source.anomaly_note===null||typeof source.anomaly_note==="string"));
+  if(source.deleted_at!==null)ticks(source.deleted_at);
+  const {domain:d,configurations}=await mappingEvidence(u,source.domain);
   const c=configurations.filter(c=>ticks(c.effectiveFrom)<=ticks(source.timestamp)).at(-1);requireValid(c);
   const ms=c.measurements.filter(m=>m.kind==="duration");requireValid(ms.length===1);
   const m=ms[0];requireValid(m.valueType==="number"&&m.unit.unitId==="minute"&&m.unit.dimension==="time"&&
     m.scope.kind==="per_event"&&m.taskVariantId===undefined);
-  const bs=(await u.tx.query("SELECT * FROM public.source_bindings WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 AND source_kind='manual-legacy' AND external_id=$4 FOR SHARE",[org,actor,d.domain_id,source.domain])).rows;
-  requireValid(bs.length===1&&equal(bs[0].metadata,{description:"existing-owner-seed-v1"}));
   const oid=observationId(org,actor,source.id);
   const observation=parse(ObservationSchema,{schemaVersion:1,observationId:oid,organizationId:org,ownerUserId:actor,domainId:d.domain_id,
     policyVersionId:c.policyVersionId,observedAt:source.timestamp,
@@ -68,16 +82,18 @@ async function mapping(u:OwnershipUnit,source:Row):Promise<Row> {
     idempotency_key:`legacy-sessions-v1:${hash(org,actor,source.id)}`,observed_at:source.timestamp,observation,
     is_anomaly:source.is_anomaly,anomaly_note:source.anomaly_note,deleted_at:source.deleted_at,legacy_source_type:"sessions",legacy_source_id:source.id};
 }
-async function canonical(u:OwnershipUnit,source:Row) {
+async function canonical(u:MutationUnit,source:Row) {
   const expected=await mapping(u,source),r=(await u.tx.query(`SELECT to_jsonb(o) raw FROM public.observations o
-    WHERE org_id=$1 AND owner_user_id=$2 AND (legacy_source_id=$3 OR observation_id=$4 OR idempotency_key=$5) FOR UPDATE`,
+    WHERE org_id=$1 AND owner_user_id=$2 AND (legacy_source_id=$3 OR observation_id=$4 OR idempotency_key=$5) LIMIT 2 FOR UPDATE`,
     [u.context.orgId,u.context.actorUserId,source.id,expected.observation_id,expected.idempotency_key])).rows;
   requireValid(r.length===1&&equal(r[0].raw,expected));return r[0].raw as Row;
 }
-async function lineage(u:OwnershipUnit,current:State):Promise<number> {
+async function lineage(u:MutationUnit,current:State,writeIntent=false):Promise<number> {
   const {orgId:org,actorUserId:actor}=u.context,sourceId=current.legacy.id;
-  const audits=(await u.tx.query(`SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 AND entity_id=$2
-    AND entity_type IN ('legacy_session_import','legacy_session_mutation') FOR SHARE`,[org,JSON.stringify([sourceId])])).rows.map(r=>r.raw);
+  const audits=completeRead((await u.tx.query(`SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 AND entity_id=$2
+    AND entity_type IN ('legacy_session_import','legacy_session_mutation') ORDER BY audit_event_id LIMIT $3 FOR SHARE`,
+    [org,JSON.stringify([sourceId]),MAX_READ_ROWS+1])).rows).map(r=>r.raw);
+  if(writeIntent&&audits.length>=MAX_READ_ROWS)throw new ResourceLimitError();
   requireValid(audits.every(a=>a.org_id===org&&a.actor_kind==="user"&&a.actor_user_id===actor));
   const imports=audits.filter(a=>a.entity_type==="legacy_session_import"),mutations=audits.filter(a=>a.entity_type===entity);
   requireValid(imports.length<=1);
@@ -128,12 +144,12 @@ async function lineage(u:OwnershipUnit,current:State):Promise<number> {
   }
   requireValid(previous!==null&&equal(previous,current));return mutations.length;
 }
-async function get(u:OwnershipUnit,key:string):Promise<State> {
+async function get(u:MutationUnit,key:string):Promise<State> {
   const r=(await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE id=$1 AND user_id=$2 FOR UPDATE",[key,u.context.actorUserId])).rows;
   if(r.length!==1)throw new BoundaryError(404);const legacy=r[0].raw as Row;
   return {legacy,canonical:await canonical(u,legacy)};
 }
-async function writeCanonical(u:OwnershipUnit,legacy:Row,creating:boolean){
+async function writeCanonical(u:MutationUnit,legacy:Row,creating:boolean){
   const row=await mapping(u,legacy),columns=Object.keys(row),values=Object.values(row);
   const result=creating?await u.tx.query(`INSERT INTO public.observations (${columns.join(",")})
     VALUES (${columns.map((_,i)=>`$${i+1}`).join(",")}) RETURNING to_jsonb(observations) raw`,values):
@@ -141,20 +157,30 @@ async function writeCanonical(u:OwnershipUnit,legacy:Row,creating:boolean){
     WHERE observation_id=$1 AND org_id=$2 AND owner_user_id=$3 RETURNING to_jsonb(observations) raw`,values);
   requireValid(result.rows.length===1&&equal(result.rows[0].raw,row));return row;
 }
-async function append(u:OwnershipUnit,operation:string,sequence:number,reason:string,before:State|null,after:State,edit?:Row){
+async function append(u:MutationUnit,operation:string,sequence:number,reason:string,before:State|null,after:State,edit?:Row){
   await createAuditService(u.tx,u.db,u.context).append(entity,[after.legacy.id],operation==="create"?"create":"update",reason,before,
     {version,operation,sequence,state:after,...(edit?{legacyEdit:edit}:{})});
 }
 /** Private mutation service only. No routes, ambient connection, seed/import, purge or startup hooks. */
 export function createLegacyActivityMutations(unit:ReturnType<typeof createPinnedOwnershipUnit>){
-  const run=<T>(request:Request,operation:(u:OwnershipUnit)=>Promise<T>)=>unit.run(request,async u=>{
-    if(u.context.role!=="owner"||u.context.rolloutMode!=="legacy")throw new BoundaryError(403);
-    await revalidate(u.tx,u.db,u.context);
-    // Transaction-local canonical timestamp serialization, preserving microseconds.
-    await u.tx.query("SELECT set_config('TimeZone','UTC',true)");return operation(u);
+  const run=<T>(request:Request,operation:(u:MutationUnit)=>Promise<T>)=>unit.run(request,async original=>{
+    if(original.context.role!=="owner"||original.context.rolloutMode!=="legacy")throw new BoundaryError(403);
+    return withTransactionReadBudget(original.tx,async tx=>{
+      // Preserve the original pinned unit's nested-failure tracking while
+      // making nested provenance reads inherit this exact guarded handle.
+      const db:OwnershipDatabase={transaction:fn=>original.db.transaction(()=>fn(tx))};
+      const context=await createOrgContextResolver(db)(request);
+      if(context.orgId!==original.context.orgId||context.actorUserId!==original.context.actorUserId||
+        context.role!==original.context.role||context.rolloutMode!==original.context.rolloutMode)throw new BoundaryError(403);
+      const u:MutationUnit={tx,db,context,mappingEvidence:new Map()};
+      await revalidate(tx,db,context);
+      // Transaction-local canonical timestamp serialization, preserving microseconds.
+      await tx.query("SELECT set_config('TimeZone','UTC',true)");
+      return operation(u);
+    });
   });
   const transition=(request:Request,input:unknown,restore:boolean)=>run(request,async u=>{
-    const key=parse(id,input),before=await get(u,key),sequence=await lineage(u,before);
+    const key=parse(id,input),before=await get(u,key),sequence=await lineage(u,before,true);
     if(restore?before.legacy.deleted_at===null:before.legacy.deleted_at!==null)throw new BoundaryError(404);
     const r=await u.tx.query(`UPDATE public.sessions SET deleted_at=${restore?"NULL":"clock_timestamp()"}
       WHERE id=$1 AND user_id=$2 RETURNING to_jsonb(sessions) raw`,[key,u.context.actorUserId]);
@@ -166,14 +192,17 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
     create:(request:Request,input:unknown)=>run(request,async u=>{
       const p=parse(createSchema,input),anomaly=p.isAnomaly??false;
       requireValid(!anomaly||!!p.anomalyNote?.trim());
+      const prospective={id:randomUUID(),user_id:u.context.actorUserId,domain:p.domain,duration_minutes:p.durationMinutes,
+        timestamp:p.timestamp,notes:p.notes??null,is_anomaly:anomaly,anomaly_note:anomaly?p.anomalyNote:null,deleted_at:null};
+      await mapping(u,prospective); // Complete target metadata before the first INSERT.
       const r=await u.tx.query(`INSERT INTO public.sessions(id,user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(sessions) raw`,
-        [randomUUID(),u.context.actorUserId,p.domain,p.durationMinutes,p.timestamp,p.notes??null,anomaly,anomaly?p.anomalyNote:null]);
+        [prospective.id,u.context.actorUserId,p.domain,p.durationMinutes,p.timestamp,p.notes??null,anomaly,anomaly?p.anomalyNote:null]);
       requireValid(r.rows.length===1);const after={legacy:r.rows[0].raw,canonical:await writeCanonical(u,r.rows[0].raw,true)};
       await append(u,"create",1,"Record activity",null,after);await lineage(u,after);return after.legacy;
     }),
     edit:(request:Request,input:unknown,patch:unknown)=>run(request,async u=>{
-      const key=parse(id,input),p=parse(editSchema,patch),before=await get(u,key),sequence=await lineage(u,before);
+      const key=parse(id,input),p=parse(editSchema,patch),before=await get(u,key),sequence=await lineage(u,before,true);
       if(before.legacy.deleted_at!==null)throw new BoundaryError(404);
       const columns:Record<string,unknown>={},prior:Record<string,unknown>={};
       for(const [field,column]of [["domain","domain"],["durationMinutes","duration_minutes"],["timestamp","timestamp"],
@@ -186,6 +215,7 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
       const note=anomaly?(p.anomalyNote??before.legacy.anomaly_note??null):null;
       if(p.isAnomaly===true)requireValid(typeof note==="string"&&!!note.trim());
       if(note!==before.legacy.anomaly_note){columns.anomaly_note=note;prior.anomalyNote=before.legacy.anomaly_note;}
+      await mapping(u,{...before.legacy,...columns}); // Target policy overflow must precede any edit/audit insert.
       const e=await u.tx.query(`INSERT INTO public.session_edits(id,session_id,user_id,edited_at,reason,changed_fields)
         VALUES($1,$2,$3,clock_timestamp(),$4,$5) RETURNING to_jsonb(session_edits) raw`,[randomUUID(),key,u.context.actorUserId,p.reason,JSON.stringify(prior)]);
       requireValid(e.rows.length===1);
@@ -214,10 +244,10 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
         await u.tx.query("LOCK TABLE public.sessions, public.session_edits, public.observations, public.audit_events IN SHARE MODE");
         const provenance = await verifyLegacyImportProvenance(u.db,request);
         const {orgId:org,actorUserId:actor} = u.context;
-        const sessions = (await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE user_id=$1 ORDER BY id FOR SHARE",[actor])).rows.map(r=>r.raw as Row);
-        const observations = (await u.tx.query("SELECT to_jsonb(o) raw FROM public.observations o WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id FOR SHARE",[org,actor])).rows.map(r=>r.raw as Row);
-        const edits = (await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE user_id=$1 OR session_id IN (SELECT id FROM public.sessions WHERE user_id=$1) ORDER BY id FOR SHARE",[actor])).rows.map(r=>r.raw as Row);
-        const audits = (await u.tx.query("SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 ORDER BY audit_event_id FOR SHARE",[org])).rows.map(r=>r.raw as Row);
+        const sessions = completeRead((await u.tx.query("SELECT to_jsonb(s) raw FROM public.sessions s WHERE user_id=$1 ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
+        const observations = completeRead((await u.tx.query("SELECT to_jsonb(o) raw FROM public.observations o WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE",[org,actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
+        const edits = completeRead((await u.tx.query("SELECT to_jsonb(e) raw FROM public.session_edits e WHERE user_id=$1 OR session_id IN (SELECT id FROM public.sessions WHERE user_id=$1) ORDER BY id LIMIT $2 FOR SHARE",[actor,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
+        const audits = completeRead((await u.tx.query("SELECT to_jsonb(a) raw FROM public.audit_events a WHERE org_id=$1 ORDER BY audit_event_id LIMIT $2 FOR SHARE",[org,MAX_READ_ROWS+1])).rows).map(r=>r.raw as Row);
         const relevant = audits.filter(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) ||
           [version,"legacy-history-import-v1"].includes(a.after?.version) || [version,"legacy-history-import-v1"].includes(a.before?.version));
         requireValid(relevant.every(a=>["legacy_session_import","legacy_edit_import",entity].includes(a.entity_type) &&
@@ -237,7 +267,7 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
         }
         requireValid(canonicalIds.size === sessions.length && observations.length === sessions.length &&
           observations.every(o=>canonicalIds.has(o.observation_id)) && totalMutations === mutations.length);
-        const domains = (await u.tx.query("SELECT domain_id,slug FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY slug FOR SHARE",[org,actor])).rows;
+        const domains = completeRead((await u.tx.query("SELECT domain_id,slug FROM public.domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY slug LIMIT $3 FOR SHARE",[org,actor,MAX_COLLECTION_ROWS+1])).rows,MAX_COLLECTION_ROWS);
         const summaries = domains.map(d=>{
           const legacy = sessions.filter(s=>s.domain === d.slug), canonical = observations.filter(o=>o.domain_id === d.domain_id);
           const count = (rows:Row[],old:boolean)=>({total:rows.length,active:rows.filter(r=>r.deleted_at === null).length,

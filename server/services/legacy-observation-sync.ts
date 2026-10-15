@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
+import { ResourceLimitError, MAX_READ_ROWS } from "../lib/read-budget";
+import { withTransactionReadBudget, completeRead } from "../lib/transaction-read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, bounded, createOrgContextResolver, revalidate,
   type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
@@ -43,7 +45,8 @@ function ticks(value: string): bigint {
 }
 const json = (v: unknown) => JSON.parse(JSON.stringify(v));
 async function rows(tx: Transaction, table: string, where: string, values: unknown[], order: string) {
-  return (await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} FOR SHARE`, values)).rows as Row[];
+  return completeRead((await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT ${values.length+1} FOR SHARE`,
+    [...values,MAX_READ_ROWS+1])).rows as Row[]);
 }
 type State = Awaited<ReturnType<typeof read>>;
 async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext) {
@@ -51,7 +54,7 @@ async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext)
   const { orgId: org, actorUserId: actor } = context, scope = [org,actor];
   if (context.role !== "owner" || context.rolloutMode !== "legacy") throw new BoundaryError(403);
   const organization = (await tx.query("SELECT * FROM public.organizations WHERE org_id=$1 FOR UPDATE",[org])).rows[0];
-  const members = await rows(tx,"organization_members","t.org_id=$1",[org],"t.user_id");
+  const members = (await tx.query("SELECT t.*,to_jsonb(t) AS raw FROM public.organization_members t WHERE t.org_id=$1 ORDER BY t.user_id LIMIT 2 FOR SHARE",[org])).rows;
   if (organization?.display_name !== "Personal legacy workspace" || organization.rollout_mode !== "legacy" ||
     members.length !== 1 || members[0].user_id !== actor || members[0].role !== "owner") throw new BoundaryError(403);
   const scoped = (table: string, order: string) => rows(tx,table,"t.org_id=$1 AND t.owner_user_id=$2",scope,order);
@@ -253,9 +256,9 @@ async function insertAudit(tx: Transaction,e: Row,at: string) {
 }
 async function run(db: OwnershipDatabase,request: Request,write: boolean) {
   authenticate(request); // before ANY access to injected database
-  return bounded(() => db.transaction(async tx => {
+  return bounded(() => db.transaction(raw => withTransactionReadBudget(raw,async tx => {
     // Canonical SQL JSON date strings without sacrificing microseconds.
-    await tx.query("SET LOCAL TIME ZONE 'UTC'");
+    await tx.query("SELECT set_config('TimeZone','UTC',true)");
     const pinned: OwnershipDatabase = {transaction:async fn => fn(tx)};
     const context = await createOrgContextResolver(pinned)(request);
     let state = await read(tx,pinned,context), planned: Planned[];
@@ -270,6 +273,10 @@ async function run(db: OwnershipDatabase,request: Request,write: boolean) {
       // A partly imported or altered history is never repaired automatically.
       requireValid(imported(state).length === 0 && !state.audits.some(a =>
         types.includes(a.entity_type) || a.after?.version === version || a.before?.version === version));
+      // Check projected complete collections before the first insert. A later
+      // full read must not discover a self-created resource overflow.
+      if(state.observations.length+planned.length>MAX_READ_ROWS||
+        state.audits.length+planned.length+state.edits.length>MAX_READ_ROWS)throw new ResourceLimitError();
       for (const p of planned) {
         await revalidate(tx,pinned,context);
         const r = p.row;
@@ -287,7 +294,7 @@ async function run(db: OwnershipDatabase,request: Request,write: boolean) {
     const final = report(state,plan(state));requireValid(final.clean);
     return {importBatchId:state.batch,mapping:Object.fromEntries(planned.map(p => [p.source.id,p.row.observation_id])),
       reconciliation:final};
-  }));
+  })));
 }
 /** Internal server-only seams. Never connected to routes, hooks, startup or CLI. */
 export async function importLegacyObservations(db: OwnershipDatabase,request: Request) { return run(db,request,true); }
@@ -301,10 +308,11 @@ export async function reconcileLegacyObservations(db: OwnershipDatabase,request:
  */
 export async function verifyLegacyImportProvenance(db: OwnershipDatabase, request: Request) {
   authenticate(request);
-  return bounded(() => db.transaction(async tx => {
+  return bounded(() => db.transaction(raw => withTransactionReadBudget(raw,async tx => {
     await tx.query("SELECT set_config('TimeZone','UTC',true)");
-    const context = await createOrgContextResolver(db)(request);
-    const current = await read(tx,db,context);
+    const pinned:OwnershipDatabase={transaction:async operation=>operation(tx)};
+    const context = await createOrgContextResolver(pinned)(request);
+    const current = await read(tx,pinned,context);
     const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
       const r = a.after?.sourceSnapshot?.row;
       requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
@@ -326,5 +334,5 @@ export async function verifyLegacyImportProvenance(db: OwnershipDatabase, reques
     const preserved = {...current,sessions,edits,observations};
     requireValid(report(preserved,plan(preserved)).clean);
     return {importedSessions:sessions.length,importedEdits:edits.length};
-  }));
+  })));
 }
