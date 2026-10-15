@@ -4,21 +4,23 @@ import { OnboardingReadySchema, OnboardingSettingsSchema, OnboardingSettingsPatc
 import { authenticatedBootstrapActor, type BootstrapUnit, type createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap-unit";
 import { createAuditService } from "../lib/audit-service";
 import { withOwnerWriteBudget } from "../lib/write-resource-budget";
+import { readComplete } from "../lib/transaction-read-budget";
 import { assertContext, revalidate, BoundaryError, type OrgContext } from "../lib/org-context";
 
 type Units = ReturnType<typeof createAuthenticatedBootstrapUnit>;
 type Request = Parameters<Units["run"]>[0];
+const settingsFields=["user_id","day_start_hour","timezone","window_days","notifications_enabled","notification_tier","updated_at"] as const;
 async function memberships(unit: BootstrapUnit) {
-  return (await unit.tx.query(
+  return readComplete(unit.tx,
     "SELECT org_id,user_id,role,created_at,updated_at FROM public.organization_members WHERE user_id=$1 ORDER BY org_id LIMIT 2 FOR SHARE",
-    [unit.actorUserId])).rows;
+    [unit.actorUserId],["org_id","user_id","role","created_at","updated_at"],2);
 }
 async function ready(unit: BootstrapUnit, context: OrgContext): Promise<OnboardingReady> {
   assertContext(unit.db, context); await revalidate(unit.tx, unit.db, context);
   const scope = [context.orgId, context.actorUserId];
-  const settings = await unit.tx.query("SELECT user_id,day_start_hour,timezone,window_days FROM public.user_settings WHERE user_id=$1", [context.actorUserId]);
-  if (settings.rows.length > 1) throw new BoundaryError(503);
-  const s = settings.rows[0];
+  const settings=await readComplete(unit.tx,"SELECT user_id,day_start_hour,timezone,window_days FROM public.user_settings WHERE user_id=$1 LIMIT 2",
+    [context.actorUserId],["user_id","day_start_hour","timezone","window_days"],1);
+  const s=settings[0];
   // A navigation discriminator only; this grants no API authority. Both joins
   // retain org+owner scope so a same-org colleague's seed is not disclosed.
   const projection = await unit.tx.query(`SELECT
@@ -66,9 +68,10 @@ export function createPersonalWorkspaceService(units: Units) {
         if (found.length !== 1) throw new BoundaryError(403);
         const context = await unit.resolveContext();
         assertContext(unit.db, context); await revalidate(unit.tx, unit.db, context);
-        const selected = await unit.tx.query("SELECT * FROM public.user_settings WHERE user_id=$1 FOR UPDATE", [context.actorUserId]);
-        if (selected.rows.length !== 1) throw new BoundaryError(503);
-        const before = selected.rows[0];
+        const selected=await readComplete(unit.tx,"SELECT * FROM public.user_settings WHERE user_id=$1 LIMIT 2 FOR UPDATE",
+          [context.actorUserId],settingsFields,1);
+        if(selected.length!==1)throw new BoundaryError(503);
+        const before=selected[0];
         const projection = (row: typeof before) => OnboardingSettingsSchema.safeParse({ userId: row.user_id,
           dayStartHour: row.day_start_hour, timezone: row.timezone, windowDays: row.window_days });
         const existing = projection(before);
@@ -83,9 +86,12 @@ export function createPersonalWorkspaceService(units: Units) {
         const assignments = changed.map((field, index) => `${columns[field]}=$${index + 2}`);
         await admitMutation();
         const updated = await unit.tx.query(`UPDATE public.user_settings SET ${assignments.join(",")},updated_at=now()
-          WHERE user_id=$1 RETURNING *`, values);
-        if (updated.rows.length !== 1) throw new BoundaryError(503);
-        const after = updated.rows[0], saved = projection(after);
+          WHERE user_id=$1 RETURNING user_id`, values);
+        if(updated.rows.length!==1)throw new BoundaryError(503);
+        const selectedAfter=await readComplete(unit.tx,"SELECT * FROM public.user_settings WHERE user_id=$1 LIMIT 2",
+          [context.actorUserId],settingsFields,1);
+        if(selectedAfter.length!==1)throw new BoundaryError(503);
+        const after=selectedAfter[0],saved=projection(after);
         if (!saved.success || saved.data.userId !== context.actorUserId ||
           fields.some(field => saved.data[field] !== (parsed.data[field] ?? existing.data[field])) ||
           after.notifications_enabled !== before.notifications_enabled || after.notification_tier !== before.notification_tier)

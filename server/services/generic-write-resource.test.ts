@@ -198,3 +198,15 @@ it("an exact older raw-observation retry preserves grandfathered long notes and 
     "New oversized note")).rejects.toMatchObject({status:400});
   expect(await ownedState(o.name)).toBe(before);expect(await counters(o.name)).toEqual({minute:30,day:500});
 },15000);
+
+it("oversized existing workspace metadata is suppressed before transfer and neither corrected nor charged",async()=>{
+  const actor="quota-old-settings";await fixture.client.query("INSERT INTO users(id) VALUES ($1)",[actor]);
+  await fixture.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES ('write-resource-shared',$1,'owner')",[actor]);
+  await fixture.client.query("INSERT INTO user_settings(user_id,timezone) VALUES ($1,repeat('x',9*1024*1024))",[actor]);
+  const before=(await fixture.client.query("SELECT md5(timezone) hash,octet_length(timezone) bytes FROM user_settings WHERE user_id=$1",[actor])).rows[0];
+  const service=createPersonalWorkspaceService(createAuthenticatedBootstrapUnit(pool));
+  await expect(service.updateSettings(request(actor),{dayStartHour:15})).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+  await expect(service.status(request(actor))).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+  expect((await fixture.client.query("SELECT md5(timezone) hash,octet_length(timezone) bytes FROM user_settings WHERE user_id=$1",[actor])).rows[0]).toEqual(before);
+  expect(await counters(actor)).toBeNull();
+},15000);
