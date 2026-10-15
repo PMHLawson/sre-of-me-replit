@@ -1,4 +1,4 @@
-import { beforeAll,afterAll,describe,it,expect } from "vitest";
+import { beforeEach,beforeAll,afterAll,describe,it,expect } from "vitest";
 import { startFixture } from "../lib/ownership-fixture";
 import { createOrgContextResolver,type OrgContext } from "../lib/org-context";
 import { createPolicyV2Storage } from "./policy-v2-storage";
@@ -8,6 +8,10 @@ import { Pool } from "pg";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 
 describe("actual scoped repositories and atomic audit",()=>{
+
+// Each test exercises an independent scenario in this disposable synthetic database.
+// Dedicated write-resource suites prove the unchanged real30/min500/day quotas.
+beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_resource_budgets");});
   let f:Awaited<ReturnType<typeof startFixture>>;
   type Store=ReturnType<typeof createPolicyV2Storage>;
   const stores:Record<string,Store>={},contexts:Record<string,OrgContext>={},configs:Record<string,DomainConfiguration>={};

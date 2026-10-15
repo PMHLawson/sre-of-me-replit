@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, it, expect, vi } from "vitest";
+import { beforeEach,beforeAll, afterAll, it, expect, vi } from "vitest";
 import express from "express";
 import { createServer, type Server } from "node:http";
 import { Pool } from "pg";
@@ -186,3 +186,7 @@ it("the actual registerRoutes management mount preserves lazy database import an
     expect(mountStats).toEqual({ dbImports: 1, dbConnects: 1 });
   } finally { await new Promise<void>((resolve, reject) => mounted.close(error => error ? reject(error) : resolve())); }
 });
+
+// Each test exercises an independent scenario in this disposable synthetic database.
+// Dedicated write-resource suites prove the unchanged real30/min500/day quotas.
+beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_resource_budgets");});
