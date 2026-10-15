@@ -21,20 +21,32 @@ const columns = 'd.id,d.user_id AS "userId",d.domain,d.start_at AS "startAt",d.e
   'CASE WHEN d.reason IS NULL THEN \'absent\' ELSE \'not_loaded\' END AS "reasonAvailability"';
 const fields = ["id","userId","domain","startAt","endAt","endedAt","deletedAt","excludeFromComposite","reason",
   "hasReason","reasonBytes","reasonAvailability"];
-async function selected(tx: Transaction, actor: string, id: string, condition = "d.deleted_at IS NULL", reason?: string) {
-  const supplied = reason !== undefined;
-  const comparison = supplied ? ',d.reason IS NOT DISTINCT FROM $3::text AS "reasonSame",' +
-    '($4::int <= char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
-    'AND $5::int <= octet_length(d.reason) AND ($4::int < char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
-    'OR $5::int < octet_length(d.reason))) AS "reasonMayShorten"' : "";
-  const rows = await readComplete(tx, "SELECT " + columns + comparison +
+async function selected(tx: Transaction, actor: string, id: string, condition = "d.deleted_at IS NULL",
+  input: {reason?: string; startAt?: string; endAt?: string|null} = {}) {
+  const values: unknown[] = [actor,id], comparisons: string[] = [], extraFields: string[] = [];
+  if (input.reason !== undefined) {
+    const at = values.length+1; values.push(input.reason,input.reason.length,new TextEncoder().encode(input.reason).byteLength);
+    comparisons.push('d.reason IS NOT DISTINCT FROM $'+at+'::text AS "reasonSame"',
+      '($'+(at+1)+'::int <= char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
+      'AND $'+(at+2)+'::int <= octet_length(d.reason) AND ($'+(at+1)+'::int < char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
+      'OR $'+(at+2)+'::int < octet_length(d.reason))) AS "reasonMayShorten"');
+    extraFields.push("reasonSame","reasonMayShorten");
+  }
+  // Compare in PostgreSQL under the owned row lock. JS Date milliseconds lose
+  // legitimate microsecond changes and cannot decide whether a write is a no-op.
+  for (const [key,column] of [["startAt","start_at"],["endAt","end_at"]] as const) {
+    if (input[key] === undefined) continue;
+    const at = values.length+1; values.push(input[key]);
+    comparisons.push('d.'+column+' IS DISTINCT FROM $'+at+'::timestamptz AS "'+key+'Different"');
+    extraFields.push(key+"Different");
+  }
+  const rows = await readComplete(tx, "SELECT " + columns + (comparisons.length ? ","+comparisons.join(",") : "") +
     " FROM public.deviations d WHERE d.user_id=$1 AND d.id=$2 AND " + condition + " LIMIT 2 FOR UPDATE",
-    [actor,id,...(supplied ? [reason,reason!.length,new TextEncoder().encode(reason).byteLength] : [])],
-    [...fields,...(supplied ? ["reasonSame","reasonMayShorten"] : [])],1);
+    values,[...fields,...extraFields],1);
   return rows[0] as Deviation & Record<string, any> | undefined;
 }
 function summary(row: Deviation & Record<string, any>) {
-  const { reasonSame, reasonMayShorten, ...value } = row;
+  const { reasonSame, reasonMayShorten, startAtDifferent, endAtDifferent, ...value } = row;
   return value as Deviation;
 }
 async function ready(unit: BootstrapUnit, admitMutation: () => Promise<void>) {
@@ -69,15 +81,15 @@ export function createLegacyDeviationMutations(units: Units) {
       const id = parse(identity,key), p = parse(updateDeviationSchema,input);
       return units.run(request, unit => withOwnerWriteBudget(unit.tx,unit.actorUserId,async ({admitMutation}) => {
         await unit.tx.query("SELECT set_config('TimeZone','UTC',true)");
-        const before = await selected(unit.tx,unit.actorUserId,id,"d.deleted_at IS NULL",p.reason);
+        const before = await selected(unit.tx,unit.actorUserId,id,"d.deleted_at IS NULL",p);
         if (!before) return undefined;
         const changed: Record<string, unknown> = {};
         if (p.reason !== undefined && !before.reasonSame) {
           if (!insertDeviationSchema.shape.reason.safeParse(p.reason).success && !before.reasonMayShorten) throw new BoundaryError(400);
           changed.reason = p.reason;
         }
-        if (p.startAt !== undefined && new Date(p.startAt).getTime() !== before.startAt.getTime()) changed.start_at = p.startAt;
-        if (p.endAt !== undefined && (p.endAt === null ? null : new Date(p.endAt).getTime()) !== (before.endAt?.getTime()??null)) changed.end_at = p.endAt;
+        if (p.startAt !== undefined && before.startAtDifferent) changed.start_at = p.startAt;
+        if (p.endAt !== undefined && before.endAtDifferent) changed.end_at = p.endAt;
         if (p.excludeFromComposite !== undefined && p.excludeFromComposite !== before.excludeFromComposite) changed.exclude_from_composite = p.excludeFromComposite;
         const names = Object.keys(changed);
         if (!names.length) return summary(before); // no bootstrap, audit or charge

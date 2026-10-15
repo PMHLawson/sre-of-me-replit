@@ -6,15 +6,19 @@ import {startFixture} from "./lib/ownership-fixture";
 import {seedPolicyV2} from "./lib/seed-policy-v2";
 import {importLegacyObservations} from "./services/legacy-observation-sync";
 import {runStartupRetention} from "./startup-retention";
+import {createAuthenticatedBootstrapUnit} from "./lib/authenticated-bootstrap-unit";
+import {createLegacyDeviationMutations} from "./services/legacy-deviation-mutations";
 vi.mock("./db",()=>({db:{}}));
 import {DatabaseStorage} from "./storage";
 
 describe("actual retention, deviation and settings writes with owner admission",()=>{
- let f:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:DatabaseStorage,n=0,owner:string,other:string,id:string;
+ let f:Awaited<ReturnType<typeof startFixture>>,pool:Pool,store:DatabaseStorage,
+  deviationStore:ReturnType<typeof createLegacyDeviationMutations>,n=0,owner:string,other:string,id:string;
  beforeAll(async()=>{
   f=await startFixture("legacy-retention-write-budget");
   pool=new Pool({host:f.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false,max:2,connectionTimeoutMillis:5000});
   store=new DatabaseStorage(drizzle(f.client,{schema}),pool);
+  deviationStore=createLegacyDeviationMutations(createAuthenticatedBootstrapUnit(pool));
  },60000);
  afterAll(async()=>{try{if(pool)await pool.end();}finally{if(f)await f.cleanup();}},60000);
  beforeEach(async()=>{
@@ -23,6 +27,15 @@ describe("actual retention, deviation and settings writes with owner admission",
   await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note) VALUES($1,$2,'music',900,'2020-01-01T01:02:03.123456Z',$3,true,$4)",
    [id,owner," exact old note 🙂 ".repeat(500)," exact old explanation ".repeat(300)]);
  });
+ const request=(who=owner)=>({isAuthenticated:()=>true,user:{claims:{sub:who}}});
+ const seedExistingContext=async()=>{
+  // Fixture metadata only: existing membership avoids charging/bootstrap setup
+  // in tests whose contract is the number of accepted deviation mutations.
+  const org="retention-org-"+n;
+  await f.client.query("INSERT INTO organizations(org_id,display_name) VALUES($1,'Synthetic retention workspace')",[org]);
+  await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')",[org,owner]);
+ };
+ const deviationAudits=async()=> (await f.client.query("SELECT to_jsonb(a) r FROM audit_events a WHERE actor_user_id=$1 AND entity_type='legacy_deviation' ORDER BY occurred_at,audit_event_id",[owner])).rows.map(row=>row.r);
  const raw=async()=> (await f.client.query("SELECT to_jsonb(s) r FROM sessions s WHERE id=$1",[id])).rows[0]?.r;
  const counts=async(who=owner)=> (await f.client.query("SELECT minute_count,day_count FROM owner_write_resource_budgets WHERE owner_user_id=$1",[who])).rows;
  it("soft deletion and restoration change only deletion state, keep old text exact and return bounded summaries",async()=>{
@@ -86,28 +99,37 @@ describe("actual retention, deviation and settings writes with owner admission",
   expect((await store.getDeletedSessions(owner)).map(x=>x.id)).toEqual([id+"-recent",id+"-old"]);
  });
  it("deviation create/update/end/delete charge only real changes and omit reason payloads",async()=>{
-  const created=await store.createDeviation({userId:owner,domain:"music",reason:" valid reason ",startAt:"2026-01-01T00:00:00Z"}) as any;
+  await seedExistingContext();
+  const created=await deviationStore.create(request(),{domain:"music",reason:" valid reason ",startAt:"2026-01-01T00:00:00Z"}) as any;
   expect(created.reason).toBe("");expect(created.reasonBytes).toBe(14);expect(created.hasReason).toBe(true);
   const key=created.id;
-  expect(await store.updateDeviation(other,key,{excludeFromComposite:false})).toBeUndefined();
-  await store.updateDeviation(owner,key,{reason:" valid reason "});
+  expect(await deviationStore.edit(request(other),key,{excludeFromComposite:false,changeReason:"Synthetic foreign rejection"})).toBeUndefined();
+  await deviationStore.edit(request(),key,{reason:" valid reason "});
   expect(await counts()).toEqual([{minute_count:1,day_count:1}]);
-  await store.updateDeviation(owner,key,{excludeFromComposite:false});
-  await store.endDeviation(owner,key,new Date("2026-01-02T00:00:00Z"));expect(await store.endDeviation(owner,key)).toBeUndefined();
-  const gone=await store.softDeleteDeviation(owner,key);expect(gone?.deletedAt).toBeInstanceOf(Date);
-  expect(await store.softDeleteDeviation(owner,key)).toBeUndefined();expect(await counts()).toEqual([{minute_count:4,day_count:4}]);
+  await deviationStore.edit(request(),key,{excludeFromComposite:false,changeReason:"Synthetic weighting correction"});
+  await deviationStore.end(request(),key,{changeReason:"Synthetic early ending"});expect(await deviationStore.end(request(),key,{changeReason:"Synthetic repeated ending"})).toBeUndefined();
+  const gone=await deviationStore.softDelete(request(),key,{changeReason:"Synthetic recoverable deletion"});expect(gone?.deletedAt).toBeInstanceOf(Date);
+  expect(await deviationStore.softDelete(request(),key,{changeReason:"Synthetic repeated deletion"})).toBeUndefined();expect(await counts()).toEqual([{minute_count:4,day_count:4}]);
+  const audit=await deviationAudits();expect(audit).toHaveLength(4);
+  expect(audit.map(a=>a.action)).toEqual(["create","update","update","delete"]);
+  expect(audit.every(a=>a.actor_user_id===owner&&a.after.reason===" valid reason ")).toBe(true);
   expect((await f.client.query("SELECT reason FROM deviations WHERE id=$1",[key])).rows[0].reason).toBe(" valid reason ");
  });
  it("historical long deviation reasons survive exact unchanged or omitted updates; changed/new over500 reasons fail",async()=>{
+  await seedExistingContext();
   const reason=" \told reason 🙂\n".repeat(200),key=id+"-deviation";
   await f.client.query("INSERT INTO deviations(id,user_id,domain,reason,start_at) VALUES($1,$2,'music',$3,'2026-01-01T00:00:00Z')",[key,owner,reason]);
-  await store.updateDeviation(owner,key,{reason,excludeFromComposite:false});
-  await store.updateDeviation(owner,key,{endAt:"2026-01-03T00:00:00Z"});
-  await expect(store.updateDeviation(owner,key,{reason:reason+"x"})).rejects.toMatchObject({status:400});
-  await expect(store.createDeviation({userId:owner,domain:"music",startAt:"2026-01-01T00:00:00Z",reason:"x".repeat(501)})).rejects.toMatchObject({status:400});
-  const shorter=reason.slice(0,-20);await store.updateDeviation(owner,key,{reason:shorter});
+  await deviationStore.edit(request(),key,{reason,excludeFromComposite:false,changeReason:"Synthetic old reason retained"});
+  await deviationStore.edit(request(),key,{endAt:"2026-01-03T00:00:00Z",changeReason:"Synthetic end date correction"});
+  await expect(deviationStore.edit(request(),key,{reason:reason+"x",changeReason:"Synthetic invalid expansion"})).rejects.toMatchObject({status:400});
+  await expect(deviationStore.create(request(),{domain:"music",startAt:"2026-01-01T00:00:00Z",reason:"x".repeat(501)})).rejects.toMatchObject({status:400});
+  const shorter=reason.slice(0,-20);await deviationStore.edit(request(),key,{reason:shorter,changeReason:"Synthetic deliberate shortening"});
   expect((await f.client.query("SELECT reason FROM deviations WHERE id=$1",[key])).rows[0].reason).toBe(shorter);
   expect(await counts()).toEqual([{minute_count:3,day_count:3}]);
+  const audit=await deviationAudits();expect(audit).toHaveLength(3);
+  expect(audit[0].before.reason).toBe(reason);expect(audit[0].after.reason).toBe(reason);
+  expect(audit[1].before.reason).toBe(reason);expect(audit[1].after.reason).toBe(reason);
+  expect(audit[2].before.reason).toBe(reason);expect(audit[2].after.reason).toBe(shorter);
  });
  it("settings creation, normalization and changed saves charge once; canonical reads and equal saves do not",async()=>{
   const initial=await store.getUserSettings(owner);expect(initial).toMatchObject({userId:owner,dayStartHour:4,windowDays:7,timezone:"America/New_York"});
@@ -123,16 +145,18 @@ describe("actual retention, deviation and settings writes with owner admission",
   expect(await counts(other)).toEqual([{minute_count:1,day_count:1}]);
  });
  it("rate denial rolls back deletion, deviation and settings changes without altering source text",async()=>{
+  await seedExistingContext();
   await f.client.query("INSERT INTO deviations(id,user_id,domain,reason,start_at) VALUES($1,$2,'music','old','2026-01-01T00:00:00Z')",[id+"-dev",owner]);
   await f.client.query("INSERT INTO user_settings(user_id) VALUES($1)",[owner]);
   await f.client.query("INSERT INTO owner_write_resource_budgets(owner_user_id,minute_started_at,minute_count,day_date,day_count) VALUES($1,date_trunc('minute',clock_timestamp()),30,(clock_timestamp() AT TIME ZONE 'UTC')::date,50)",[owner]);
-  const before=await raw();
-  for(const op of [()=>store.softDeleteSession(owner,id),()=>store.endDeviation(owner,id+"-dev"),()=>store.softDeleteDeviation(owner,id+"-dev"),
-   ()=>store.updateDeviation(owner,id+"-dev",{reason:"new"}),()=>store.upsertUserSettings(owner,{windowDays:14})])
+  const before=await raw(),auditBefore=await deviationAudits();
+  for(const op of [()=>store.softDeleteSession(owner,id),()=>deviationStore.end(request(),id+"-dev",{changeReason:"Synthetic rate-denied ending"}),()=>deviationStore.softDelete(request(),id+"-dev",{changeReason:"Synthetic rate-denied deletion"}),
+   ()=>deviationStore.edit(request(),id+"-dev",{reason:"new",changeReason:"Synthetic rate-denied correction"}),()=>store.upsertUserSettings(owner,{windowDays:14})])
    await expect(op()).rejects.toMatchObject({status:429,code:"WRITE_RATE_LIMIT_EXCEEDED"});
   expect(await raw()).toEqual(before);
   expect((await f.client.query("SELECT reason,ended_at,deleted_at FROM deviations WHERE id=$1",[id+"-dev"])).rows[0]).toEqual({reason:"old",ended_at:null,deleted_at:null});
   expect((await store.getUserSettings(owner)).windowDays).toBe(7);
   expect(await counts()).toEqual([{minute_count:30,day_count:50}]);
+  expect(await deviationAudits()).toEqual(auditBefore);
  });
 });

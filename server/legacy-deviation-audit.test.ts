@@ -216,6 +216,55 @@ it("rate denial and ambiguous memberships leave every table unchanged",async () 
   expect(await snapshot()).toBe(before);
 });
 
+it("microsecond-only changes are real edits while equivalent PostgreSQL instants stay free",async () => {
+  const a = await owner();
+  const saved = await service.create(a.req,{...payload,endAt:"2020-01-02T03:04:05.654321Z"});
+  const original = await row(saved.id);
+  // These instants differ only below JS Date's millisecond precision.
+  await expect(service.edit(a.req,saved.id,{startAt:"2020-01-01T01:02:03.123999Z"})).rejects.toMatchObject({status:400});
+  expect(await row(saved.id)).toEqual(original); expect(await used(a.actor)).toBe(1);
+  await service.edit(a.req,saved.id,{startAt:"2020-01-01T01:02:03.123999Z",changeReason:"Synthetic precise start correction"});
+  const afterStart = await row(saved.id); expect(afterStart.start_at).toContain(".123999");
+  await service.edit(a.req,saved.id,{endAt:"2020-01-02T03:04:05.654999Z",changeReason:"Synthetic precise end correction"});
+  const afterEnd = await row(saved.id); expect(afterEnd.end_at).toContain(".654999");
+  let audit = await events(a.actor);
+  expect(audit).toHaveLength(3);
+  expect(audit[1].before).toEqual(original); expect(audit[1].after).toEqual(afterStart);
+  expect(audit[2].before).toEqual(afterStart); expect(audit[2].after).toEqual(afterEnd);
+  expect(await used(a.actor)).toBe(3);
+  // Offsets are already permitted by the legacy deviation schemas. Neither
+  // alternative serialization changes the exact persisted PostgreSQL instant.
+  await service.edit(a.req,saved.id,{startAt:"2020-01-01T02:02:03.123999+01:00",endAt:"2020-01-02T04:04:05.654999+01:00"});
+  await service.edit(a.req,saved.id,{startAt:"2020-01-01T01:02:03.1239990Z",endAt:"2020-01-02T03:04:05.6549990Z"});
+  expect(await row(saved.id)).toEqual(afterEnd); expect(await used(a.actor)).toBe(3); expect(await events(a.actor)).toEqual(audit);
+  await service.edit(a.req,saved.id,{endAt:null,changeReason:"Synthetic open end correction"});
+  const openEnd = await row(saved.id); expect(openEnd.end_at).toBeNull();
+  audit = await events(a.actor); expect(audit).toHaveLength(4);
+  expect(audit[3].before).toEqual(afterEnd); expect(audit[3].after).toEqual(openEnd);
+  await service.edit(a.req,saved.id,{endAt:null});
+  expect(await used(a.actor)).toBe(4); expect(await events(a.actor)).toEqual(audit);
+});
+
+it("actual HTTP routes enforce explanations and use the authenticated actor, not client identifiers",async () => {
+  const a = await owner(), b = await owner(); auth.actor = a.actor;
+  const call = (path:string,method:string,body:unknown) => fetch(origin+path,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  let response = await call("/api/deviations","POST",{...payload,userId:b.actor,actorUserId:b.actor});
+  expect(response.status).toBe(201); const saved = await response.json();
+  const before = await snapshot();
+  response = await call("/api/deviations/"+saved.id,"PATCH",{excludeFromComposite:false}); expect(response.status).toBe(400);
+  response = await call("/api/deviations/"+saved.id+"/end","POST",{}); expect(response.status).toBe(400);
+  response = await call("/api/deviations/"+saved.id,"DELETE",{changeReason:"  "}); expect(response.status).toBe(400);
+  expect(await snapshot()).toBe(before);
+  response = await call("/api/deviations/"+saved.id,"PATCH",{excludeFromComposite:false,changeReason:"Synthetic HTTP correction"});
+  expect(response.status).toBe(200);
+  response = await call("/api/deviations/"+saved.id+"/end","POST",{changeReason:"Synthetic HTTP end"}); expect(response.status).toBe(200);
+  response = await call("/api/deviations/"+saved.id,"DELETE",{changeReason:"Synthetic HTTP delete"}); expect(response.status).toBe(200);
+  expect((await events(a.actor)).map(e=>e.reason)).toEqual([payload.reason,"Synthetic HTTP correction","Synthetic HTTP end","Synthetic HTTP delete"]);
+  expect(await events(b.actor)).toHaveLength(0);
+  auth.actor = null;
+  response = await call("/api/deviations","POST",payload); expect(response.status).toBe(401);
+});
+
 it("preserves oversized historical reasons inside SQL snapshots without transferring the old text through service results",async () => {
   const a = await owner(), id = randomUUID(), old = "Synthetic exact old text🙂".repeat(400000);
   await f.client.query("INSERT INTO deviations(id,user_id,domain,reason,start_at) VALUES($1,$2,'meditation',$3,$4)",[id,a.actor,old,payload.startAt]);
@@ -239,22 +288,3 @@ it("preserves oversized historical reasons inside SQL snapshots without transfer
   expect(await used(a.actor)).toBe(1);
 },30000);
 
-it("actual HTTP routes enforce explanations and use the authenticated actor, not client identifiers",async () => {
-  const a = await owner(), b = await owner(); auth.actor = a.actor;
-  const call = (path:string,method:string,body:unknown) => fetch(origin+path,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  let response = await call("/api/deviations","POST",{...payload,userId:b.actor,actorUserId:b.actor});
-  expect(response.status).toBe(201); const saved = await response.json();
-  const before = await snapshot();
-  response = await call("/api/deviations/"+saved.id,"PATCH",{excludeFromComposite:false}); expect(response.status).toBe(400);
-  response = await call("/api/deviations/"+saved.id+"/end","POST",{}); expect(response.status).toBe(400);
-  response = await call("/api/deviations/"+saved.id,"DELETE",{changeReason:"  "}); expect(response.status).toBe(400);
-  expect(await snapshot()).toBe(before);
-  response = await call("/api/deviations/"+saved.id,"PATCH",{excludeFromComposite:false,changeReason:"Synthetic HTTP correction"});
-  expect(response.status).toBe(200);
-  response = await call("/api/deviations/"+saved.id+"/end","POST",{changeReason:"Synthetic HTTP end"}); expect(response.status).toBe(200);
-  response = await call("/api/deviations/"+saved.id,"DELETE",{changeReason:"Synthetic HTTP delete"}); expect(response.status).toBe(200);
-  expect((await events(a.actor)).map(e=>e.reason)).toEqual([payload.reason,"Synthetic HTTP correction","Synthetic HTTP end","Synthetic HTTP delete"]);
-  expect(await events(b.actor)).toHaveLength(0);
-  auth.actor = null;
-  response = await call("/api/deviations","POST",payload); expect(response.status).toBe(401);
-});
