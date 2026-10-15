@@ -180,11 +180,55 @@ describe("durable owner write admission in actual disposable PostgreSQL", () => 
     },{capacityBytes:1,enforceCapacity:true}));
     expect(await counts(id)).toEqual([{minute_count:2,day_count:2}]);
   });
-  it("capacity measurement has a real finite PostgreSQL statement deadline",async()=>{
+  it("monitor-only save work stays constant as retained owner history grows and never calls optional measurement",async()=>{
+    const small=await owner("write-small-history"),large=await owner("write-large-history");
+    await f.client.query("INSERT INTO public.sessions(id,user_id,domain,duration_minutes,timestamp,notes,deleted_at) "+
+      "SELECT 'large-history-'||n,$1,'meditation',10,'2026-01-01T12:00:00Z',repeat('retained 🙂 ',128),"+
+      "CASE WHEN n%2=0 THEN '2026-01-02T12:00:00Z'::timestamptz ELSE NULL END FROM generate_series(1,2048) n",[large]);
+    const trace:Record<string,string[]>={};
+    for(const id of [small,large]){
+      trace[id]=[];
+      await transaction(raw=>{
+        const tx:Transaction={query:(text,values=[])=>{
+          trace[id].push(text);
+          // A monitor failure would be fatal if it were accidentally coupled
+          // to this business transaction. Neither full-count nor observation
+          // metadata writes may occur on the monitor-only save path.
+          if(text.includes("to_jsonb(")||text.includes("observed_bytes"))
+            throw Error("Optional measurement must not run during a save");
+          return raw.query(text,values);
+        }};
+        return record(tx,id,id+"-saved");
+      });
+      expect(await counts(id)).toEqual([{minute_count:1,day_count:1}]);
+      expect((await f.client.query("SELECT count(*)::int n FROM public.write_budget_probe WHERE owner_id=$1",[id])).rows[0].n).toBe(1);
+    }
+    expect(trace[large]).toEqual(trace[small]);
+    expect((await f.client.query("SELECT count(*)::int n FROM public.sessions WHERE user_id=$1",[large])).rows[0].n).toBe(2048);
+    // Never label an old/default byte value as a newly measured observation.
+    expect((await f.client.query("SELECT observed_at FROM public.owner_write_resource_budgets WHERE owner_user_id IN ($1,$2)",[small,large])).rows)
+      .toEqual([{observed_at:null},{observed_at:null}]);
+  });
+  it("a failed explicit standalone measurement does not consume admission or prevent a later valid save",async()=>{
+    const id=await owner("write-monitor-timeout");
+    await expect(transaction(raw=>{
+      const tx:Transaction={query:(text,values=[])=>text.includes(" AS used_bytes ")?raw.query("SELECT pg_sleep(3)"):raw.query(text,values)};
+      return readOwnerWriteBudgetStatus(tx,id);
+    })).rejects.toMatchObject({status:503});
+    expect(await counts(id)).toEqual([]);
+    await transaction(tx=>record(tx,id,"after-monitor-failure"));
+    expect(await counts(id)).toEqual([{minute_count:1,day_count:1}]);
+    expect((await f.client.query("SELECT count(*)::int n FROM public.write_budget_probe WHERE id='after-monitor-failure'")).rows[0].n).toBe(1);
+    const measured=await transaction(tx=>readOwnerWriteBudgetStatus(tx,id));
+    expect(measured.ownerUserId).toBe(id);
+    expect(measured.storage.enforcement).toBe("monitor_only");
+    expect(measured.storage.usedBytes).toBeGreaterThan(0);
+  },10000);
+  it("explicit capacity enforcement retains a real finite PostgreSQL statement deadline",async()=>{
     const id=await owner("write-timeout");
     await expect(transaction(raw=>{
       const tx:Transaction={query:(text,values)=>text.startsWith("SELECT (")?raw.query("SELECT pg_sleep(3)"):raw.query(text,values)};
-      return withOwnerWriteBudget(tx,id,async budget=>budget.admitMutation());
+      return withOwnerWriteBudget(tx,id,async budget=>budget.admitMutation(),{enforceCapacity:true});
     })).rejects.toMatchObject({status:503});
     expect(await counts(id)).toEqual([]);
   },10000);

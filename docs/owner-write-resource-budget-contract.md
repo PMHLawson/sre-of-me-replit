@@ -14,7 +14,7 @@ return withOwnerWriteBudget(tx, authenticatedOwnerId, async ({ admitMutation }) 
 });
 ```
 
-The callback and admission must be awaited. Nested and sequential repository operations sharing the exact same Transaction handle and owner reuse one charge. The outermost scope checks final logical growth; nested admission-only helpers do not finalize early. Do not create a separate Pool transaction or adapter per nested call. A Drizzle adapter must safely bind positional parameters against the same transaction, with one stable adapter identity.
+The callback and admission must be awaited. Nested and sequential repository operations sharing the exact same Transaction handle and owner reuse one charge. Monitor-only saves do not measure lifetime storage or update its observation. Only explicit capacity enforcement makes the outermost scope check final logical growth; nested admission-only helpers do not finalize early. Do not create a separate Pool transaction or adapter per nested call. A Drizzle adapter must safely bind positional parameters against the same transaction, with one stable adapter identity.
 
 The first helper lock is users(id) FOR UPDATE before invoking the callback. Existing membership/context revalidation keeps its established users-first ordering. Business validation row locks precede counter admission; counter ownership never derives from request body, query, path, IP or unverified claims. Bootstrap needs the authenticated users row but no preexisting organization membership.
 
@@ -40,10 +40,31 @@ Owner-leading measurement indexes cover all three legacy history tables, all eig
 
 ## Failure response
 
-WriteResourceLimitError extends BoundaryError with status 429 and code WRITE_RATE_LIMIT_EXCEEDED or OWNER_CAPACITY_EXCEEDED. retryAfterSeconds is a positive integer for rate refusal, null for capacity refusal. Integrations must preserve the typed status/code, add Retry-After only when present, and show the explicit message. Existing 467 read-size/time errors remain 503. Missing DDL or failed measurement fails closed with 503 before the first business DML; never treat unavailable measurement as zero.
+WriteResourceLimitError extends BoundaryError with status 429 and code WRITE_RATE_LIMIT_EXCEEDED or OWNER_CAPACITY_EXCEEDED. retryAfterSeconds is a positive integer for rate refusal, null for capacity refusal. Integrations must preserve the typed status/code, add Retry-After only when present, and show the explicit message. Existing 467 read-size/time errors remain 503. Missing counter DDL still fails closed with 503 before the first business DML. When trusted capacity enforcement is explicitly active, a failed required measurement also fails that mutation closed; never treat unavailable measurement as zero. Monitor-only mutations do not perform optional measurements, so measurement availability cannot fail or roll back their business save.
 
 ## Explicit DDL and verification
 
 script/sql/write-resource-budgets.sql is an additive, transaction-wrapped reviewed script. It deliberately does not alter the migration journal or run at application startup. Before Development adoption, verify target identity and a fresh recoverable backup, verify the table is absent, apply this exact script explicitly, then verify its columns, primary key, owner FK, constraints and twelve owner/actor measurement indexes. Reapplying to an existing table fails safely; do not drop/recreate it or reset durable counters. The source/test fixture applies this exact script only to its newly created disposable PostgreSQL databases.
 
 Native tests cover no-op/replay, nested/sequential reuse, independent-connection races, daily/minute limits/reset, owner separation, counter/business rollback, caught and wholly swallowed failures, logical UTF-8 measurement, monitor-only behavior, optional growth refusal, above-cap preservation/reduction, and an actual SQL timeout. Source preparation alone does not establish execution, Preview adoption or Production acceptance.
+
+
+## SOMR-477: separate optional measurement from ordinary saves
+
+Ordinary application callers retain the default `enforceCapacity: false`. Admission still validates and locks the authenticated owner, checks durable minute/day counters, and commits or rolls back admission, business records and audits together. It never runs the lifetime footprint query or updates `observed_bytes/observed_at` in monitor-only mode. Old/default values in those counter columns are not newly measured storage; do not display them as current. The optional trusted `enforceCapacity: true` seam retains exact before/after measurements and growth-only rejection; no application caller or runtime flag is activated by this correction.
+
+The existing `readOwnerWriteBudgetStatus` export is the explicit operator measurement seam. It returns one consistent PostgreSQL statement snapshot with a dated `asOf`, scalar logical bytes and rate information; it does not transfer practice payloads, create a counter or consume a write allowance. The existing 2.5-second statement/1-second lock/15-second monotonic budgets apply, and errors normalize to a safe 503. A failed standalone attempt leaves prior successful receipts valid but stale.
+
+Run this seam only through trusted operator code in its OWN finite transaction, never as part of an ordinary save, request-finalization hook, login, or background polling loop. The caller must supply the trusted owner identity and an approved database unit; this export grants no client route or authorization. Example operation boundary:
+
+```ts
+// Explicit operator action only, separate from every business-save transaction.
+const snapshot = await operatorDatabase.transaction(tx =>
+  readOwnerWriteBudgetStatus(tx, trustedOwnerId));
+```
+
+For an actual operator check, retain the returned result in a restricted private cloud receipt with its source commit and receipt time. Keep the preceding successful receipt as well; compare `storage.usedBytes` and `asOf` across both to report byte growth and elapsed time. Failure receipts should record only a safe status/stage and attempt time, never credentials or raw records; do not overwrite the last successful result. This records observations, not automatic anomaly detection, a running total or an exact provider bill. No database-history table, new DDL, scheduler, automatic cadence, notification service, quota activation or deletion is introduced.
+
+The proposed seven-day active-account eligibility remains DEFERRED in [SOMR-478](https://pmhlawson.atlassian.net/browse/SOMR-478), not an adopted schedule. Any future automation must be separately scoped with freshness/failure handling, explicit resource budgets, no idle-database wakeups and a stated response requirement. The same decision record preserves transaction-safe running totals plus reconciliation and the review triggers for imports, retained-data changes, future allowances and security/release planning. [SOMR-477](https://pmhlawson.atlassian.net/browse/SOMR-477) records this bounded save-path correction.
+
+Native synthetic checks verify identical monitor-only helper query sequences with zero versus 2,048 retained practice rows (including recoverable deletions), no footprint/observation query on those saves, preserved rows and durable charges, and that an explicit measurement timeout in its own transaction cannot prevent a later valid save. Existing native cases continue to cover explicit growth enforcement, rate races, rollback, exact replay and owner separation. Native execution and Development/Preview adoption are separate gates; authoring this source does not claim those gates passed.

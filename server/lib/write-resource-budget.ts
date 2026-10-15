@@ -127,14 +127,17 @@ async function admit(state: State): Promise<void> {
       Date.parse(minuteStart) + 60000;
     throw new WriteResourceLimitError("rate", Math.max(1, Math.ceil((reset - Date.parse(now)) / 1000)));
   }
-  state.beforeBytes = await measure(state);
+  // Optional monitor-only accounting must never scan lifetime history inside a save.
+  // Exact before/after measurements belong only to explicit trusted growth enforcement.
+  if (state.options.enforceCapacity) state.beforeBytes = await measure(state);
   await query(state, OWNER_WRITE_BUDGET_ADMISSION_UPDATE,
     [state.owner, minuteStart, minuteCount + 1, dayDate, dayCount + 1, now]);
 }
 /** Authenticated server seam. Call inside the SAME business/audit transaction.
  * Await admitMutation immediately before the first actual mutation, after
  * validation/replay/no-op decisions. Nested and sequential scopes sharing the
- * same transaction/owner reuse one charge. The outermost scope checks growth.
+ * same transaction/owner reuse one charge. Only explicit capacity enforcement
+ * checks final growth. Monitor-only saves do no lifetime storage measurement.
  */
 export async function withOwnerWriteBudget<T>(tx: Transaction, ownerUserId: string,
   operation: (budget: OwnerWriteAdmission) => Promise<T>, input?: OwnerWriteBudgetOptions): Promise<T> {
@@ -173,10 +176,10 @@ export async function withOwnerWriteBudget<T>(tx: Transaction, ownerUserId: stri
     } finally { current.depth--; }
     if (current.admitted) await current.admitted;
     if (current.failure) throw current.failure;
-    if (current.depth === 0 && current.admitted) {
+    if (current.depth === 0 && current.admitted && options.enforceCapacity) {
       const after = await measure(current), before = current.beforeBytes;
       if (before === undefined) throw new BoundaryError(503);
-      if (options.enforceCapacity && after > options.capacityBytes && after > before)
+      if (after > options.capacityBytes && after > before)
         throw new WriteResourceLimitError("capacity");
       await query(current, OWNER_WRITE_BUDGET_OBSERVATION_UPDATE, [ownerUserId, after]);
     }
@@ -184,23 +187,29 @@ export async function withOwnerWriteBudget<T>(tx: Transaction, ownerUserId: stri
     return value;
   } catch (error) { return poison(current, error); }
 }
-/** Read-only, one-statement owner usage snapshot; no counter creation/charge. */
+/** Explicit operator-only, read-only one-statement owner usage snapshot.
+ * No counter creation/charge, save-path call, route, scheduler or automatic cadence.
+ * Run in its own transaction; retain dated results in restricted operator receipts.
+ * Optional measurement failure then cannot abort a business-save transaction.
+ */
 export async function readOwnerWriteBudgetStatus(tx: Transaction, ownerUserId: string,
   input?: OwnerWriteBudgetOptions): Promise<OwnerWriteBudgetStatus> {
   if (!validOwner(ownerUserId)) throw new BoundaryError(403);
   const options = optionsFor(input), state: State = { tx, owner: ownerUserId, options,
     deadline: performance.now() + 15000, depth: 0, initialized: Promise.resolve() };
-  const result = await query(state, "SELECT clock.now::text AS now,b.minute_started_at::text,b.minute_count,b.day_date::text,b.day_count,(" + footprint +
-    ")::text AS used_bytes FROM public.users u CROSS JOIN (SELECT clock_timestamp() AS now) clock LEFT JOIN public.owner_write_resource_budgets b ON b.owner_user_id=u.id WHERE u.id=$1", [ownerUserId]);
-  if (result.rows.length !== 1) throw new BoundaryError(403);
-  const row = result.rows[0], now = iso(row.now), nowMs = Date.parse(now);
-  const minuteStart = row.minute_started_at === null ? Math.floor(nowMs / 60000) * 60000 : Math.max(Date.parse(iso(row.minute_started_at)), Math.floor(nowMs / 60000) * 60000);
-  const today = now.slice(0,10), dayDate = row.day_date === null ? today : String(row.day_date) > today ? String(row.day_date) : today;
-  const minuteUsed = row.minute_started_at !== null && Date.parse(iso(row.minute_started_at)) === minuteStart ? whole(row.minute_count) : 0;
-  const dayUsed = row.day_date !== null && String(row.day_date) === dayDate ? whole(row.day_count) : 0;
-  const usedBytes = whole(row.used_bytes);
-  return { ownerUserId, asOf: now,
-    minute: { used: minuteUsed, limit: OWNER_WRITE_LIMITS.minute, remaining: Math.max(0, OWNER_WRITE_LIMITS.minute - minuteUsed), resetsAt: new Date(minuteStart + 60000).toISOString() },
-    day: { used: dayUsed, limit: OWNER_WRITE_LIMITS.day, remaining: Math.max(0, OWNER_WRITE_LIMITS.day - dayUsed), resetsAt: new Date(Date.parse(dayDate + "T00:00:00Z") + 86400000).toISOString() },
-    storage: { usedBytes, limitBytes: options.capacityBytes, enforcement: options.enforceCapacity ? "growth_only" : "monitor_only", overLimit: usedBytes > options.capacityBytes } };
+  try {
+    const result = await query(state, "SELECT clock.now::text AS now,b.minute_started_at::text,b.minute_count,b.day_date::text,b.day_count,(" + footprint +
+      ")::text AS used_bytes FROM public.users u CROSS JOIN (SELECT clock_timestamp() AS now) clock LEFT JOIN public.owner_write_resource_budgets b ON b.owner_user_id=u.id WHERE u.id=$1", [ownerUserId]);
+    if (result.rows.length !== 1) throw new BoundaryError(403);
+    const row = result.rows[0], now = iso(row.now), nowMs = Date.parse(now);
+    const minuteStart = row.minute_started_at === null ? Math.floor(nowMs / 60000) * 60000 : Math.max(Date.parse(iso(row.minute_started_at)), Math.floor(nowMs / 60000) * 60000);
+    const today = now.slice(0,10), dayDate = row.day_date === null ? today : String(row.day_date) > today ? String(row.day_date) : today;
+    const minuteUsed = row.minute_started_at !== null && Date.parse(iso(row.minute_started_at)) === minuteStart ? whole(row.minute_count) : 0;
+    const dayUsed = row.day_date !== null && String(row.day_date) === dayDate ? whole(row.day_count) : 0;
+    const usedBytes = whole(row.used_bytes);
+    return { ownerUserId, asOf: now,
+      minute: { used: minuteUsed, limit: OWNER_WRITE_LIMITS.minute, remaining: Math.max(0, OWNER_WRITE_LIMITS.minute - minuteUsed), resetsAt: new Date(minuteStart + 60000).toISOString() },
+      day: { used: dayUsed, limit: OWNER_WRITE_LIMITS.day, remaining: Math.max(0, OWNER_WRITE_LIMITS.day - dayUsed), resetsAt: new Date(Date.parse(dayDate + "T00:00:00Z") + 86400000).toISOString() },
+      storage: { usedBytes, limitBytes: options.capacityBytes, enforcement: options.enforceCapacity ? "growth_only" : "monitor_only", overLimit: usedBytes > options.capacityBytes } };
+  } catch (error) { throw normalizedError(error); }
 }
