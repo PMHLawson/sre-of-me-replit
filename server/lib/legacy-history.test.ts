@@ -88,6 +88,15 @@ describe("real bounded legacy reads against a nonce-owned synthetic database",()
     await expect(reads.current("history-a",14)).rejects.toBeInstanceOf(ResourceLimitError);
     expect((await fixture.client.query("SELECT count(*)::int n FROM sessions")).rows[0].n).toBe(MAX_READ_ROWS+1);
   });
+  it("uses the existing first-account defaults without writing inside the snapshot",async()=>{
+    await fixture.client.query("DELETE FROM user_settings WHERE user_id='history-b'");
+    const input=await reads.current("history-b",14);
+    expect(input.settings).toMatchObject({dayStartHour:4,timezone:"America/New_York",windowDays:7,
+      notificationsEnabled:false,notificationTier:"WARNING"});
+    expect(input.context).toEqual([]);
+    expect((await fixture.client.query("SELECT count(*)::int n FROM user_settings WHERE user_id='history-b'")).rows[0].n).toBe(0);
+    await fixture.client.query("INSERT INTO user_settings(user_id) VALUES('history-b')");
+  });
   it("retains future context and uses one snapshot/clock for all successful state components",async()=>{
     await insert("future","2027-01-01T00:00:00Z");await insert("today",now.toISOString());
     const bundle=stateBundle(await reads.current("history-a",14),14);
@@ -112,14 +121,16 @@ describe("real bounded legacy reads against a nonce-owned synthetic database",()
     expect(()=>parseHistoryPage(q)).toThrow(HistoryInputError);
   });
   it("times out bounded database work and rolls the owned transaction back",async()=>{
-    const c=await pool.connect();
+    const c=await pool.connect();let destroyed=false;
     try{
-      const slow={connect:async()=>({...c,query:async(sql:string,args?:unknown[])=>{
-        if(sql.includes("SELECT s.id"))return c.query("SELECT pg_sleep(4)");return c.query(sql,args);
-      },release:()=>{}})};
+      const slow={connect:async()=>({...c,query:async(sql:any,args?:unknown[])=>{
+        const text=typeof sql==="string"?sql:sql.text;
+        if(text.includes("SELECT s.id"))return c.query({text:"SELECT pg_sleep(4)",query_timeout:sql.query_timeout});
+        return c.query(sql,args);
+      },release:(kill:boolean)=>{if(kill){destroyed=true;c.release(true);}}})};
       const slowReads=new LegacyHistoryReads(slow as any,()=>now);
       await expect(slowReads.baseline("history-a",now)).rejects.toBeInstanceOf(ResourceLimitError);
-      expect((await c.query("SELECT 1 AS ok")).rows[0].ok).toBe(1);
-    }finally{c.release();}
+      expect((await (destroyed?pool.query("SELECT 1 AS ok"):c.query("SELECT 1 AS ok"))).rows[0].ok).toBe(1);
+    }finally{if(!destroyed)c.release();}
   },10000);
 });

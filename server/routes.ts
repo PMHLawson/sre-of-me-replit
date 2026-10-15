@@ -162,6 +162,7 @@ export async function registerRoutes(
       });
       res.status(201).json(serializeSession(session));
     } catch (error) {
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "create")) return;
       res.status(500).json({ message: "Failed to create session" });
     }
@@ -255,6 +256,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "edit")) return;
       res.status(500).json({ message: "Failed to update session" });
     }
@@ -270,6 +272,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "softDelete")) return;
       res.status(500).json({ message: "Failed to delete session" });
     }
@@ -285,6 +288,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Deleted session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "restore")) return;
       res.status(500).json({ message: "Failed to restore session" });
     }

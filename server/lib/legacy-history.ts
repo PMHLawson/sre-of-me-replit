@@ -1,7 +1,7 @@
 import type {Pool,PoolClient,QueryConfig} from "pg";
 import {performance} from "node:perf_hooks";
 import {createHash} from "node:crypto";
-import type {Session,Deviation,UserSettings} from "../../shared/schema";
+import {normalizeComplianceWindowDays,type Session,type Deviation,type UserSettings} from "../../shared/schema";
 import type {SessionSummary,DeviationSummary,HistoryPage,TextChunk,TextDetail} from "../../shared/legacy-history";
 import {ResourceLimitError,MAX_READ_ROWS,MAX_COLLECTION_ROWS,READ_TIMEOUT_MS} from "./read-budget";
 import {planHistoryInput} from "./history-input";
@@ -120,8 +120,12 @@ export class LegacyHistoryReads {
       const settingRows=(await q(`SELECT user_id AS "userId",day_start_hour AS "dayStartHour",timezone,window_days AS "windowDays",
         notifications_enabled AS "notificationsEnabled",notification_tier AS "notificationTier",updated_at AS "updatedAt"
         FROM public.user_settings WHERE user_id=$1`,[user])).rows;
-      if(settingRows.length!==1)throw new Error("Missing settings");
-      const settings=settingRows[0] as UserSettings;
+      if(settingRows.length>1)throw new Error("Ambiguous settings");
+      // Same accepted defaults as getUserSettings, without writing in this
+      // read-only snapshot. Normal settings access still persists its row.
+      const source=settingRows[0]??{userId:user,dayStartHour:4,timezone:"America/New_York",windowDays:7,
+        notificationsEnabled:false,notificationTier:"WARNING",updatedAt:now};
+      const settings={...source,windowDays:normalizeComplianceWindowDays(source.windowDays)} as UserSettings;
       const users=(await q('SELECT created_at AS "createdAt" FROM public.users WHERE id=$1',[user])).rows;
       const opts=withLogicalDayMemo({now,dayStartHour:settings.dayStartHour,timezone:settings.timezone,windowDays:settings.windowDays,
         userCreatedAt:users[0]?.createdAt??undefined});
