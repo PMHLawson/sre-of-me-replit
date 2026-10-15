@@ -144,6 +144,8 @@ it("uses the effective policy at the observation instant and supports later revi
 
 it("one legacy mutation charges once across canonical and audit writes; read verification and missing IDs do not charge",async()=>{
  const actor="mutation-budget";await owner(actor);const key=actor+"-music";
+ // Seeding legitimately uses generic writes; isolate the allowance under test.
+ await f.client.query("DELETE FROM owner_write_resource_budgets WHERE owner_user_id=$1",[actor]);
  const count=async()=> (await f.client.query("SELECT minute_count,day_count FROM owner_write_resource_budgets WHERE owner_user_id=$1",[actor])).rows;
  expect(await count()).toEqual([]);
  await service.verify(request(actor),key);expect(await count()).toEqual([]);
