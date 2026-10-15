@@ -27,22 +27,27 @@ The Development secret-existence check for this required name returned **false**
 
 Refresh tokens use Node's `aes-256-gcm` with a fresh 12-byte nonce, 16-byte authentication tag, and associated data binding the application purpose, envelope version and key ID. The JSON envelope contains only the algorithm, version, key ID, nonce, tag and ciphertext. It is authenticated before any token is returned. Tampering, an unknown key ID, an invalid encoding or a bad tag rejects session loading with `Session storage operation failed`; crypto-library errors and token values are not logged.
 
-New writes use the active key. Reads accept retained old key IDs. On the next session write, a decrypted old-key token is encrypted with the current active key. Rotation is: add a new key while retaining old keys; switch `activeKeyId`; migrate old-key ciphertext in bounded compare-and-swap batches; verify no rows refer to the old ID; retain the old key through the seven-day session TTL and recovery window; only then remove it. Losing a key makes ciphertext under that key unreadable. There is no plaintext fallback.
+New writes use the active key. Reads accept retained old key IDs. On the next session write, a decrypted old-key token is encrypted with the current active key. Rotation is: add a new key while retaining old keys; switch `activeKeyId`; migrate old-key ciphertext in bounded compare-and-swap batches; verify no rows refer to the old ID; retain old decrypt keys for every applicable retained database backup and recovery copy; only remove a key after proving that no live or recoverable ciphertext still needs it. Seven-day HTTP-session expiry alone is insufficient. Losing a key makes ciphertext under that key unreadable. There is no plaintext fallback.
 
 ## Legacy sessions and bounded migration
 
 The reader accepts the existing legacy string value for `refresh_token`, so active users are not immediately logged out. It removes unused `access_token` from the in-memory user. Any subsequent session write encrypts the refresh token and omits the access token. A read alone does not rewrite the persisted row; inactive legacy rows remain unchanged until an explicit migration or ordinary session expiry.
 
-After independent review and owner key provisioning, a separate migration may process at most 100 unexpired rows per transaction. For each row it must:
+The internal module `migrate-session-tokens.ts` supplies an explicitly invoked, bounded migration. It is not imported by a route or startup path and has no automatic loop. Its default is a read-only dry run. It accepts an injected pool and validated `TokenVault`; source verification uses only a disposable synthetic database and synthetic keys, before owner key provisioning.
 
-1. Read only the session ID, expiry and exact stored `sess::text`; do not export token values to logs or receipts.
-2. Skip records that are already encrypted; decrypt and validate their key IDs before continuing.
-3. For a legacy string refresh token, encrypt it with the active key and remove the unused access token in the replacement JSON.
-4. Update only when the same session ID, exact prior `sess::text` and expiry still match. A conflict is skipped and retried from a fresh read; it must never overwrite a concurrent login, refresh or logout.
-5. Preserve the session ID, expiry, cookie, Passport claims and all unrelated fields. Never delete, reset or recreate a session.
-6. After each bounded batch, verify row counts and ciphertext/key-ID classifications without printing values.
+Each invocation reads at most 100 rows, including expired retained rows. Expiry of an HTTP session does not revoke a stored provider refresh token. It validates current ciphertext, rewraps old-key ciphertext, encrypts legacy strings, and removes unused access tokens even if the refresh token is already encrypted or absent. Unknown keys, malformed session/token data and database failures stop the batch with a sanitized error. A later invalid row rolls back earlier updates in the same transaction.
 
-This candidate does not run that migration and does not touch any owner database. The existing seven-day TTL remains unchanged. No forced user logout is needed; rows not touched by the migration expire through the existing behavior.
+The update changes only the two credential paths through PostgreSQL JSONB operations. It preserves session IDs, exact database expiry, cookies, claims, persistence markers and unrelated values, including numbers beyond JavaScript's exact integer range. Its UPDATE must match the exact prior session ID, `sess::text` and `expire::text`. Concurrent refresh, touch, expiry change or logout therefore causes a conflict rather than overwriting the new state or recreating a deleted row. Statement and lock waits are bounded.
+
+The result separates aggregate counts from a sensitive internal pagination cursor. Log only `result.counts`; never log, export or publish the whole result, cursor, session IDs, session JSON, tokens or keys. A cursor is for private in-process use only. Conflicts require a fresh read. A live operator packet must specify a bounded retry allowance and stop for investigation if conflicts do not settle; this module does not retry automatically.
+
+Before any live apply:
+1. Preserve a fresh private database recovery copy and the exact source checkpoint. Prove that the rollback source can read ciphertext and that required decrypt keys can be recovered securely.
+2. Ensure every application writer uses the protected session codec; an old writer can otherwise reintroduce plaintext after a scan.
+3. Inventory all retained rows using dry-run batches and private cursors, without printing credential contents. Review aggregate counts, including expired records.
+4. Apply bounded batches, then repeat a complete fresh inventory. Completion requires no remaining plaintext/access-token removals, no unresolved conflicts, and valid ciphertext under retained keys. Do not treat a partial page or an HTTP-session expiry as completion.
+
+No owner database was inventoried or migrated, no key was provisioned, and no real session was changed by source verification. Live apply and activation remain held. The existing session TTL is unchanged; this operation never deletes, resets or recreates a session.
 
 ## Rollback boundary
 
