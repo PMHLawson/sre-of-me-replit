@@ -147,7 +147,7 @@ interface AppState {
   fetchEscalationState: (days?: number) => Promise<void>;
   updateSession: (id: string, patch: SessionPatch, reason: string) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<boolean>;
-  /** Soft-deleted sessions still within retention window. Lazy-loaded. */
+  /** Restorable soft-deleted sessions, without age-based expiry. Lazy-loaded. */
   deletedSessions: Session[];
   deletedSessionsLoaded: boolean;
   /** Non-null when the last fetchDeletedSessions call failed. */

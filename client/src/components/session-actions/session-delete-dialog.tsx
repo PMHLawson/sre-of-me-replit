@@ -23,9 +23,9 @@ interface SessionDeleteDialogProps {
 
 /**
  * Two-step soft-delete confirmation. Step 1 explains what will happen and
- * surfaces a clear "Continue" action; step 2 requires the user to confirm
- * irreversibly (within the retention window — the row is recoverable from
- * Recently Deleted, but the user must opt in twice to remove it from sight).
+ * surfaces a clear "Continue" action; step 2 requires confirmation before
+ * removing the session from active views. It remains restorable from
+ * Recently Deleted without an age-based expiry.
  */
 export function SessionDeleteDialog({ open, onOpenChange, session, onConfirm }: SessionDeleteDialogProps) {
   const [step, setStep] = useState<1 | 2>(1);
@@ -64,7 +64,7 @@ export function SessionDeleteDialog({ open, onOpenChange, session, onConfirm }: 
             <div className="space-y-2">
               <p>
                 {step === 1
-                  ? 'The session will be moved to Recently Deleted and can be restored within the retention window.'
+                  ? 'The session will be moved to Recently Deleted and can be restored there. It will not expire automatically.'
                   : 'Final confirmation — the session will leave the active list now.'}
               </p>
               <p
