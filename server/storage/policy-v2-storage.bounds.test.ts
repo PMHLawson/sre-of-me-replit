@@ -222,6 +222,24 @@ describe("generic repositories complete their bounded evidence or fail without w
     expect(witness[1].observation.notes.length).toBe(1572864);expect(witness[2].observation).toBeNull();
   },20000);
 
+  it("poisons the pinned unit when a caller catches SQL admission refusal after an earlier write",async()=>{
+    await observations("bounds-a",1,"caught-overflow");
+    await fixture.client.query("UPDATE observations SET observation=jsonb_set(observation,'{notes}',to_jsonb($2::text)) WHERE owner_user_id=$1",
+      ["bounds-a","界".repeat(Math.ceil(MAX_READ_BYTES/3)+100)]);
+    let caught=false;
+    await expect(createPinnedOwnershipUnit(pool).run(request(),async u=>{
+      await u.tx.query("INSERT INTO domains(domain_id,org_id,owner_user_id,slug,display_name) VALUES($1,$2,$3,$4,$5)",
+        ["poison-rollback",u.context.orgId,u.context.actorUserId,"poison-rollback","Must roll back"]);
+      try{await readComplete(u.tx,"SELECT observation FROM observations WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE",
+        [u.context.orgId,u.context.actorUserId,2],["observation"],1);}catch(error){
+        expect(error).toBeInstanceOf(ResourceLimitError);caught=true;
+      }
+      return "apparent success must not commit";
+    })).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(caught).toBe(true);
+    expect((await fixture.client.query("SELECT count(*)::integer n FROM domains WHERE domain_id='poison-rollback'")).rows[0].n).toBe(0);
+  },20000);
+
   it("PostgreSQL actually cancels a slow bounded read and restores the prior session settings",async()=>{
     const wrapped:OwnershipDatabase={transaction:fn=>fixture.db.transaction(tx=>fn({
       query:(sql,values)=>sql.includes("SELECT observation FROM public.observations")
