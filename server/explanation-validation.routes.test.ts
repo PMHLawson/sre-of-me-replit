@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer } from "node:http";
+import { BoundaryError } from "./lib/org-context";
 
 const fake = vi.hoisted(() => ({
   owner: "invented-explanation-owner-ALPHA" as string | null,
@@ -93,6 +94,8 @@ describe("real explanation request handlers with invented auth/storage boundarie
       const expectedPatch = { ...c.base, ...(input.present ? { reason: input.value } : {}) };
       const value = row(c.name, owner, input.value);
       fake.storage[c.storage].mockResolvedValue(value);
+      const deferredLength=c.name==="deviation-update"&&input.id==="501";
+      if(deferredLength)fake.storage.updateDeviation.mockRejectedValue(new BoundaryError(400));
       const response = await fetch(origin + c.path + "?userId=forged-query-owner", {
         method: c.method, headers: { "Content-Type": "application/json",
           ...(input.id === "undefined" ? { "x-invented-explicit-undefined": "yes" } : {}) },
@@ -102,7 +105,11 @@ describe("real explanation request handlers with invented auth/storage boundarie
         ? c.optional : ["meaningful", "padded", "500"].includes(input.id);
       const body = await response.json();
       expect(response.status).toBe(valid ? c.status : 400);
-      if (!valid) {
+      if(deferredLength){
+        expect(body.message).toBe("Invalid request");
+        expect(fake.storage.updateDeviation).toHaveBeenCalledExactlyOnceWith(owner,id,expectedPatch);
+        for(const [name,method] of Object.entries(fake.storage))if(name!=="updateDeviation")expect(method).not.toHaveBeenCalled();
+      } else if (!valid) {
         expect(body.errors.fieldErrors.reason.length).toBeGreaterThan(0);
         noStorage();
       } else {

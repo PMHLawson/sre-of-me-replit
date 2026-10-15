@@ -1,4 +1,7 @@
 import { db } from "./db";
+import type { Pool,PoolClient,QueryConfig } from "pg";
+import { performance } from "node:perf_hooks";
+import { ResourceLimitError,READ_TIMEOUT_MS } from "./lib/read-budget";
 import { LegacyHistoryReads } from "./lib/legacy-history";
 import { BoundaryError,type Transaction } from "./lib/org-context";
 import { withTransactionReadBudget,readComplete } from "./lib/transaction-read-budget";
@@ -73,30 +76,23 @@ const deviationMutationFields=["id","userId","domain","startAt","endAt","endedAt
 const settingsMutationColumns=`user_id AS "userId",day_start_hour AS "dayStartHour",timezone,window_days AS "windowDays",
  notifications_enabled AS "notificationsEnabled",notification_tier AS "notificationTier",updated_at AS "updatedAt"`;
 const settingsMutationFields=["userId","dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier","updatedAt"];
-// The helper supplies only static SQL fragments and positional parameters. All
-// values become Drizzle parameters on this SAME transaction, never interpolated.
-function transactionSql(text:string,values:unknown[]){
- const pieces=text.split(/\$(\d+)/g);
- return sql.join(pieces.map((piece,index)=>{
-  if(index%2===0)return sql.raw(piece);
-  const offset=Number(piece)-1;if(offset<0||offset>=values.length)throw new BoundaryError(503);
-  return sql`${values[offset]}`;
- }),sql.raw(""));
-}
 function requireActivityText(value:string|null|undefined){
  if(typeof value==="string"&&!activityTextWithinLimit(value))throw new BoundaryError(400);
 }
 async function sessionMutation(tx:Transaction,userId:string,id:string,condition="TRUE",extra="",values:unknown[]=[]){
  const rows=await readComplete(tx,`SELECT ${sessionMutationColumns}${extra} FROM public.sessions s
   WHERE s.user_id=$1 AND s.id=$2 AND ${condition} LIMIT 2 FOR UPDATE`,
-  [userId,id,...values],[...sessionMutationFields,...(extra?["notesSame","anomalyNoteSame","anomalyNoteNonBlank","timestampSame"]:[])],1);
+  [userId,id,...values],[...sessionMutationFields,...(extra?["notesSame","anomalyNoteSame","anomalyNoteNonBlank","timestampSame","notesMayShorten","anomalyNoteMayShorten"]:[])],1);
  return rows[0] as Session & Record<string,any>|undefined;
 }
 async function deviationMutation(tx:Transaction,userId:string,id:string,condition="d.deleted_at IS NULL",reason?:string){
  const hasReason=reason!==undefined;
- const rows=await readComplete(tx,`SELECT ${deviationMutationColumns}${hasReason?',d.reason IS NOT DISTINCT FROM $3::text AS "reasonSame"':""}
+ const extra=hasReason?`,d.reason IS NOT DISTINCT FROM $3::text AS "reasonSame",
+  ($4::int <= char_length(d.reason)+char_length(regexp_replace(d.reason,'[^𐀀-􏿿]','','g')) AND $5::int <= octet_length(d.reason) AND ($4::int < char_length(d.reason)+char_length(regexp_replace(d.reason,'[^𐀀-􏿿]','','g')) OR $5::int < octet_length(d.reason))) AS "reasonMayShorten"`:"";
+ const rows=await readComplete(tx,`SELECT ${deviationMutationColumns}${extra}
   FROM public.deviations d WHERE d.user_id=$1 AND d.id=$2 AND ${condition} LIMIT 2 FOR UPDATE`,
-  [userId,id,...(hasReason?[reason]:[])],[...deviationMutationFields,...(hasReason?["reasonSame"]:[])],1);
+  [userId,id,...(hasReason?[reason,reason!.length,new TextEncoder().encode(reason).byteLength]:[])],
+  [...deviationMutationFields,...(hasReason?["reasonSame","reasonMayShorten"]:[])],1);
  return rows[0] as Deviation & Record<string,any>|undefined;
 }
 async function settingsMutation(tx:Transaction,userId:string){
@@ -105,12 +101,54 @@ async function settingsMutation(tx:Transaction,userId:string){
 }
 
 export class DatabaseStorage implements IStorage {
-  constructor(private readonly database:Pick<typeof db,"transaction"|"select"|"insert"|"update"|"delete">=db){}
-  private write<T>(userId:string,operation:(tx:Transaction,budget:MutationScope)=>Promise<T>):Promise<T>{
-    return this.database.transaction(async orm=>{
-      const native:Transaction={query:async(text,values=[])=>orm.execute(transactionSql(text,values))};
-      return withTransactionReadBudget(native,tx=>withOwnerWriteBudget(tx,userId,budget=>operation(tx,budget)));
-    });
+  constructor(private readonly database:Pick<typeof db,"transaction"|"select"|"insert"|"update"|"delete">=db,
+    private readonly writePool?:Pick<Pool,"connect">){}
+  private async write<T>(userId:string,operation:(tx:Transaction,budget:MutationScope)=>Promise<T>):Promise<T>{
+    // One checked-out native connection carries admission, business data and
+    // audit atomically. A transport timeout cannot safely return it to the pool.
+    const pool=this.writePool??(await import("./db")).pool;
+    let client:PoolClient|undefined,began=false,committed=false,destroy=false,active=false,commitAttempted=false,failed=false;
+    const pending:Promise<unknown>[]=[],deadline=performance.now()+READ_TIMEOUT_MS*6;
+    const nativeQuery=async(text:string,values:unknown[]=[],cleanup=false)=>{
+      const remaining=cleanup?READ_TIMEOUT_MS:Math.floor(deadline-performance.now());
+      if(remaining<1)throw new ResourceLimitError();
+      const config:QueryConfig&{query_timeout:number}={text,values,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
+      try{return await client!.query(config);}catch(error){
+        const code=String((error as {code?:unknown})?.code??"");
+        if((error as Error)?.message==="Query read timeout"){destroy=true;throw new ResourceLimitError();}
+        if(!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){destroy=true;throw new BoundaryError(503);}
+        if(["57014","55P03"].includes(code))throw new ResourceLimitError();
+        throw error;
+      }
+    };
+    const track=<V>(promise:Promise<V>)=>{pending.push(promise);void promise.catch(()=>{failed=true;});return promise;};
+    const refused=()=>{const p=Promise.reject(new BoundaryError(503));void p.catch(()=>{});return p;};
+    const native:Transaction=Object.freeze({query(text:string,values:unknown[]=[]){
+      if(!active)return refused();
+      if(typeof text!=="string"||!/^\s*(SELECT|INSERT|UPDATE|DELETE|LOCK)\b/i.test(text)||text.includes(";")){
+        failed=true;return track(refused());
+      }
+      return track(Promise.resolve().then(()=>nativeQuery(text,values)));
+    }});
+    try{
+      client=await pool.connect();
+      await nativeQuery("BEGIN");began=true;active=true;
+      const result=await withTransactionReadBudget(native,async tx=>{
+        const value=await withOwnerWriteBudget(tx,userId,budget=>operation(tx,budget));
+        await Promise.allSettled(pending);if(failed)throw new BoundaryError(503);
+        return value;
+      },deadline);
+      active=false;await Promise.allSettled(pending);if(failed)throw new BoundaryError(503);
+      commitAttempted=true;const commit=await nativeQuery("COMMIT");if(commit.command!=="COMMIT")throw new BoundaryError(503);
+      committed=true;return result;
+    }catch(error){
+      active=false;await Promise.allSettled(pending);
+      if(client&&began&&!committed&&!destroy){try{await nativeQuery("ROLLBACK",[],true);}catch{destroy=true;}}
+      if(client&&(!began||(commitAttempted&&!committed)))destroy=true;
+      throw error instanceof ResourceLimitError?error:destroy?new BoundaryError(503):error instanceof BoundaryError?error:new BoundaryError(503);
+    }finally{
+      active=false;if(client){try{client.release(destroy);}catch{throw new BoundaryError(503);}}
+    }
   }
 
   async getSessions(userId: string): Promise<Session[]> {
@@ -155,11 +193,15 @@ export class DatabaseStorage implements IStorage {
         `,s.notes IS NOT DISTINCT FROM $3::text AS "notesSame",
         s.anomaly_note IS NOT DISTINCT FROM $4::text AS "anomalyNoteSame",
         COALESCE(s.anomaly_note ~ '[^[:space:]]',false) AS "anomalyNoteNonBlank",
-        ($5::timestamptz IS NULL OR s.timestamp=$5::timestamptz) AS "timestampSame"`,
-        [p.notes??null,p.anomalyNote??null,p.timestamp??null]);
+        ($5::timestamptz IS NULL OR s.timestamp=$5::timestamptz) AS "timestampSame",
+        ($6::int <= char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) AND $7::int <= octet_length(s.notes) AND ($6::int < char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) OR $7::int < octet_length(s.notes))) AS "notesMayShorten",
+        ($8::int <= char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) AND $9::int <= octet_length(s.anomaly_note) AND ($8::int < char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) OR $9::int < octet_length(s.anomaly_note))) AS "anomalyNoteMayShorten"`,
+        [p.notes??null,p.anomalyNote??null,p.timestamp??null,
+         typeof p.notes==="string"?p.notes.length:null,typeof p.notes==="string"?new TextEncoder().encode(p.notes).byteLength:null,
+         typeof p.anomalyNote==="string"?p.anomalyNote.length:null,typeof p.anomalyNote==="string"?new TextEncoder().encode(p.anomalyNote).byteLength:null]);
       if(!current)return undefined;
-      if(p.notes!==undefined&&!current.notesSame)requireActivityText(p.notes);
-      if(typeof p.anomalyNote==="string"&&!current.anomalyNoteSame)requireActivityText(p.anomalyNote);
+      if(p.notes!==undefined&&!current.notesSame&&!current.notesMayShorten)requireActivityText(p.notes);
+      if(typeof p.anomalyNote==="string"&&!current.anomalyNoteSame&&!current.anomalyNoteMayShorten)requireActivityText(p.anomalyNote);
       const changes:Record<string,unknown>={},priorColumns:Record<string,string>={};
       const change=(column:string,value:unknown,field:string)=>{changes[column]=value;priorColumns[field]=column;};
       if(p.domain!==undefined&&p.domain!==current.domain)change("domain",p.domain,"domain");
@@ -295,13 +337,13 @@ export class DatabaseStorage implements IStorage {
       const current=await deviationMutation(tx,userId,id,"d.deleted_at IS NULL",p.reason);if(!current)return undefined;
       const update:Record<string,unknown>={};
       if(p.reason!==undefined&&!current.reasonSame){
-        if(!insertDeviationSchema.shape.reason.safeParse(p.reason).success)throw new BoundaryError(400);
+        if(!insertDeviationSchema.shape.reason.safeParse(p.reason).success&&!current.reasonMayShorten)throw new BoundaryError(400);
         update.reason=p.reason;
       }
       if(p.startAt!==undefined&&new Date(p.startAt).getTime()!==current.startAt.getTime())update.start_at=p.startAt;
       if(p.endAt!==undefined&&(p.endAt===null?null:new Date(p.endAt).getTime())!==(current.endAt?.getTime()??null))update.end_at=p.endAt;
       if(p.excludeFromComposite!==undefined&&p.excludeFromComposite!==current.excludeFromComposite)update.exclude_from_composite=p.excludeFromComposite;
-      const names=Object.keys(update);if(!names.length){const {reasonSame,...summary}=current;return summary;}
+      const names=Object.keys(update);if(!names.length){const {reasonSame,reasonMayShorten,...summary}=current;return summary;}
       await admitMutation();await tx.query(`UPDATE public.deviations SET ${names.map((name,index)=>name+"=$"+(index+3)).join(",")}
         WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`,[userId,id,...Object.values(update)]);
       return deviationMutation(tx,userId,id);
@@ -343,6 +385,8 @@ export class DatabaseStorage implements IStorage {
       const current=await settingsMutation(tx,userId),defaults={dayStartHour:4,timezone:"America/New_York",windowDays:7,
         notificationsEnabled:false,notificationTier:"WARNING"};
       const next={...(current??defaults),...(current?{windowDays:normalizeComplianceWindowDays(current.windowDays)}:{}),...p};
+      const fields=["dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier"] as const;
+      if(current&&fields.every(field=>next[field]===current[field]))return current;
       await admitMutation();await tx.query(`INSERT INTO public.user_settings(user_id,day_start_hour,timezone,window_days,notifications_enabled,notification_tier,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) ON CONFLICT(user_id) DO UPDATE SET
         day_start_hour=EXCLUDED.day_start_hour,timezone=EXCLUDED.timezone,window_days=EXCLUDED.window_days,

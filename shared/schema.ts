@@ -36,10 +36,15 @@ export const sessions = pgTable("sessions", {
 export const ACTIVITY_TEXT_MAX_CHARACTERS=4000;
 export const ACTIVITY_TEXT_MAX_UTF8_BYTES=16*1024;
 export function activityTextWithinLimit(value:string):boolean {
-  // Four thousand codepoints require at most eight thousand UTF-16 code units.
-  if(value.length>ACTIVITY_TEXT_MAX_CHARACTERS*2)return false;
-  return Array.from(value).length<=ACTIVITY_TEXT_MAX_CHARACTERS&&
+  // Match the existing activity boundary: JavaScript UTF-16 code units.
+  return value.length<=ACTIVITY_TEXT_MAX_CHARACTERS&&
     new TextEncoder().encode(value).byteLength<=ACTIVITY_TEXT_MAX_UTF8_BYTES;
+}
+export function activityTextChangeWithinLimit(value:string,prior:string|null|undefined):boolean {
+  if(activityTextWithinLimit(value)||value===prior)return true;
+  if(typeof prior!=="string")return false;
+  const bytes=new TextEncoder().encode(value).byteLength,oldBytes=new TextEncoder().encode(prior).byteLength;
+  return value.length<=prior.length&&bytes<=oldBytes&&(value.length<prior.length||bytes<oldBytes);
 }
 export const activityTextSchema=z.string().refine(activityTextWithinLimit,
   {message:"Activity text must contain at most4000 characters and16KiB of UTF-8 text"});
@@ -351,7 +356,9 @@ export const insertDeviationSchema = createInsertSchema(deviations)
   });
 
 export const updateDeviationSchema = z.object({
-  reason: explanationSchema.optional(),
+  // Length is checked against the owned locked row so exact historical text
+  // can be retained. New or changed reasons still use explanationSchema.
+  reason: z.string().min(1).refine(value=>value.trim().length>0).optional(),
   startAt: z.string().datetime({ offset: true }).optional(),
   endAt: z.string().datetime({ offset: true }).nullable().optional(),
   excludeFromComposite: z.boolean().optional(),

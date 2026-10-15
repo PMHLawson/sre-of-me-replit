@@ -12,7 +12,7 @@ let f:Awaited<ReturnType<typeof startFixture>>,pool:Pool,service:ReturnType<type
 const request=(actor:string)=>({isAuthenticated:()=>true,user:{claims:{sub:actor}}});
 const slugs=["martial-arts","meditation","fitness","music"];
 const tables=["users","sessions","session_edits","user_settings","deviations","http_sessions","organizations","organization_members",
- "domains","policy_versions","dimension_definitions","source_bindings","observations","audit_events","deviations_v2","deviation_domains","evaluation_results"];
+ "domains","policy_versions","dimension_definitions","source_bindings","observations","audit_events","deviations_v2","deviation_domains","evaluation_results","owner_write_resource_budgets"];
 async function snapshot(){const state:Record<string,unknown>={};for(const t of tables)
  state[t]=(await f.client.query(`SELECT to_jsonb(t) r FROM public.${t} t ORDER BY to_jsonb(t)::text`)).rows;return JSON.stringify(state);}
 async function raw(table:string,where:string,values:unknown[]=[]){return(await f.client.query(`SELECT to_jsonb(t) r FROM public.${table} t WHERE ${where} ORDER BY to_jsonb(t)::text`,values)).rows.map(x=>x.r);}
@@ -59,7 +59,8 @@ it("edits imported history without rewriting provenance; domain/time/note/flags 
  const row=await service.edit(request("mutation-a"),key,{domain:"fitness",durationMinutes:4,timestamp:"2026-01-02T03:04:05.654321Z",notes:"new",reason:" synthetic change "});
  expect(row.domain).toBe("fitness");expect(row.timestamp).toContain(".654321");expect(row.anomaly_note).toBeNull();
  const edits=await raw("session_edits","session_id=$1 AND id NOT LIKE '%-old-edit'",[key]);expect(edits).toHaveLength(1);
- const prior=JSON.parse(edits[0].changed_fields);expect(prior).toMatchObject({domain:"music",durationMinutes:1,notes:null,anomalyNote:"historical inconsistent note"});
+ const prior=JSON.parse(edits[0].changed_fields);expect(prior).toMatchObject({domain:"music",durationMinutes:1,notes:null});
+ expect(prior).not.toHaveProperty("anomalyNote");expect((await raw("sessions","id=$1",[key]))[0].anomaly_note).toBe("historical inconsistent note");
  expect(prior.timestamp).toContain(".123456");expect(edits[0].reason).toBe(" synthetic change ");
  expect(await raw("audit_events","entity_type IN ('legacy_session_import','legacy_edit_import')")).toEqual(imports);
  expect(await raw("session_edits","id LIKE '%-old-edit'")).toEqual(oldEdits);expect(await service.verify(request("mutation-a"),key)).toEqual({clean:true,mutations:1});
@@ -73,7 +74,8 @@ it("soft-deletes and restores both rows together, preserving imported flags and 
  expect((await raw("observations","legacy_source_id=$1",[key]))[0].deleted_at).toBe(deleted.deleted_at);
  await expect(service.softDelete(request("mutation-a"),key)).rejects.toMatchObject({status:404});
  await expect(service.edit(request("mutation-a"),key,{reason:"deleted edit"})).rejects.toMatchObject({status:404});
- const restored=await service.restore(request("mutation-a"),key);expect(restored).toEqual(original);
+ const restored=await service.restore(request("mutation-a"),key);expect(restored).toMatchObject({id:key,notes:null,anomaly_note:null,hasAnomalyNote:true});
+ expect((await raw("sessions","id=$1",[key]))[0]).toEqual(original);
  expect((await raw("observations","legacy_source_id=$1",[key]))[0].deleted_at).toBeNull();
  await expect(service.restore(request("mutation-a"),key)).rejects.toMatchObject({status:404});
  expect(await service.verify(request("mutation-a"),key)).toEqual({clean:true,mutations:2});
@@ -138,4 +140,55 @@ it("uses the effective policy at the observation instant and supports later revi
  expect((await raw("observations","legacy_source_id=$1",[before.id]))[0].policy_version_id).toBe(policy.policy_version_id);
  expect((await raw("observations","legacy_source_id=$1",[after.id]))[0].policy_version_id).toBe(next.policyVersionId);
  expect(await service.verify(request("mutation-b"),"mutation-b-music")).toEqual({clean:true,mutations:0});
+});
+
+it("one legacy mutation charges once across canonical and audit writes; read verification and missing IDs do not charge",async()=>{
+ const actor="mutation-budget";await owner(actor);const key=actor+"-music";
+ const count=async()=> (await f.client.query("SELECT minute_count,day_count FROM owner_write_resource_budgets WHERE owner_user_id=$1",[actor])).rows;
+ expect(await count()).toEqual([]);
+ await service.verify(request(actor),key);expect(await count()).toEqual([]);
+ await expect(service.edit(request(actor),"missing-budget",{reason:"missing"})).rejects.toMatchObject({status:404});
+ expect(await count()).toEqual([]);
+ await service.edit(request(actor),key,{durationMinutes:2,reason:"actual edit"});
+ expect(await count()).toEqual([{minute_count:1,day_count:1}]);
+ expect(await service.verify(request(actor),key)).toEqual({clean:true,mutations:1});
+ expect(await count()).toEqual([{minute_count:1,day_count:1}]);
+ await f.client.query("UPDATE owner_write_resource_budgets SET minute_count=30,minute_started_at=date_trunc('minute',clock_timestamp()) WHERE owner_user_id=$1",[actor]);
+ const before=await snapshot();
+ for(const op of [()=>service.create(request(actor),payload),()=>service.edit(request(actor),key,{reason:"capped"}),
+  ()=>service.softDelete(request(actor),key)])await expect(op()).rejects.toMatchObject({status:429,code:"WRITE_RATE_LIMIT_EXCEEDED"});
+ expect(await snapshot()).toBe(before);
+});
+it("new overlong notes fail, exact historical text and strict shortening remain usable without full DML return payloads",async()=>{
+ const actor="mutation-long";await f.client.query("INSERT INTO users(id) VALUES($1)",[actor]);
+ await f.client.query("INSERT INTO user_settings(user_id) VALUES($1)",[actor]);
+ const text=" \t🙂 exact historic\n".repeat(400);
+ for(const slug of slugs)await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note) VALUES($1,$2,$3,1,'2020-01-01T00:00:00.123456Z',$4,true,$4)",
+  [actor+"-"+slug,actor,slug,text]);
+ await seedPolicyV2(f.db,request(actor));await importLegacyObservations(f.db,request(actor));
+ const witnessed:Array<{text:string;rows:unknown[]}>=[];
+ const tracked={connect:async()=>{
+  const client=await pool.connect(),query=client.query.bind(client);
+  const proxy=Object.create(client);proxy.release=(destroy?:boolean)=>client.release(destroy);
+  proxy.query=async(input:any,values?:unknown[])=>{
+   const result=await query(input,values as any),sql=typeof input==="string"?input:input.text;
+   if(/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql))witnessed.push({text:sql,rows:result.rows});
+   return result;
+  };return proxy;
+ }};
+ const s=createLegacyActivityMutations(createPinnedOwnershipUnit(tracked as any)),key=actor+"-music";
+ const unchanged=await s.edit(request(actor),key,{notes:text,anomalyNote:text,durationMinutes:2,reason:"retain exact"});
+ expect(unchanged).toMatchObject({notes:null,anomaly_note:null,notesBytes:Buffer.byteLength(text),anomalyNoteBytes:Buffer.byteLength(text)});
+ expect((await raw("sessions","id=$1",[key]))[0]).toMatchObject({notes:text,anomaly_note:text});
+ await expect(s.create(request(actor),{...payload,notes:"x".repeat(4001)})).rejects.toMatchObject({status:400});
+ await expect(s.edit(request(actor),key,{notes:text+"x",reason:"grow old"})).rejects.toMatchObject({status:400});
+ await expect(s.edit(request(actor),key,{notes:text.replace("exact","other"),reason:"equal-size replacement"})).rejects.toMatchObject({status:400});
+ const shorter=text.slice(0,-20);
+ await s.edit(request(actor),key,{notes:shorter,anomalyNote:shorter,reason:"strictly shorten"});
+ expect((await raw("sessions","id=$1",[key]))[0]).toMatchObject({notes:shorter,anomaly_note:shorter});
+ expect(await s.verify(request(actor),key)).toEqual({clean:true,mutations:2});
+ expect(witnessed.length).toBeGreaterThan(0);
+ for(const response of witnessed){expect(JSON.stringify(response.rows)).not.toContain(text);expect(Buffer.byteLength(JSON.stringify(response.rows))).toBeLessThan(1024);}
+ const edits=await raw("session_edits","session_id=$1",[key]);
+ expect(edits.some((e:any)=>JSON.parse(e.changed_fields).notes===text)).toBe(true);
 });

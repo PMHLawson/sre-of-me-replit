@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { z } from "zod";
-import { domainEnum,updateSessionSchema,activityTextSchema,activityTextWithinLimit } from "../../shared/schema";
+import { domainEnum,updateSessionSchema,activityTextSchema,activityTextChangeWithinLimit } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase } from "../lib/org-context";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS } from "../lib/read-budget";
@@ -222,7 +222,7 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
       if(before.legacy.deleted_at!==null)throw new BoundaryError(404);
       for(const [field,column] of [["notes","notes"],["anomalyNote","anomaly_note"]] as const){
         const text=p[field];
-        if(typeof text==="string"&&text!==before.legacy[column])requireValid(activityTextWithinLimit(text));
+        if(typeof text==="string")requireValid(activityTextChangeWithinLimit(text,before.legacy[column]));
       }
       const columns:Record<string,unknown>={},prior:Record<string,unknown>={};
       for(const [field,column]of [["domain","domain"],["durationMinutes","duration_minutes"],["timestamp","timestamp"],
