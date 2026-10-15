@@ -240,6 +240,36 @@ describe("generic repositories complete their bounded evidence or fail without w
     expect((await fixture.client.query("SELECT count(*)::integer n FROM domains WHERE domain_id='poison-rollback'")).rows[0].n).toBe(0);
   },20000);
 
+  it("serializes two concurrent six-MiB admissions and withholds the second payload before transfer",async()=>{
+    await observations("bounds-a",1,"concurrent-bytes");
+    await fixture.client.query("UPDATE observations SET observation=jsonb_set(observation,'{notes}',to_jsonb($2::text)) WHERE owner_user_id=$1",
+      ["bounds-a","界".repeat(2097152)]);
+    const witness:Array<{payload:any;bytes:number;allowance:number}>=[];
+    const connect=async()=>{
+      const client=await pool.connect();
+      return {query:async(input:any,parameters:unknown[]=[])=>{
+        const sql=typeof input==="string"?input:input.text,values=typeof input==="string"?parameters:input.values??[];
+        const result=await client.query(input,typeof input==="string"?values:undefined);
+        if(sql.includes("SELECT observation FROM observations"))for(const row of result.rows)
+          witness.push({payload:row.observation,bytes:Number(row.__read_bytes),allowance:Number(values.at(-1))});
+        return result;
+      },release:(destroy?:boolean)=>client.release(destroy)} as unknown as PoolClient;
+    };
+    await expect(createPinnedOwnershipUnit({connect:connect as Pool["connect"]}).run(request(),async u=>{
+      await u.tx.query("INSERT INTO domains(domain_id,org_id,owner_user_id,slug,display_name) VALUES($1,$2,$3,$4,$5)",
+        ["concurrent-poison-rollback",u.context.orgId,u.context.actorUserId,"concurrent-poison-rollback","Must roll back"]);
+      const read=()=>readComplete(u.tx,"SELECT observation FROM observations WHERE org_id=$1 AND owner_user_id=$2 ORDER BY observation_id LIMIT $3 FOR SHARE",
+        [u.context.orgId,u.context.actorUserId,2],["observation"],1);
+      const outcomes=await Promise.allSettled([read(),read()]);
+      expect(outcomes.map(x=>x.status)).toEqual(["fulfilled","rejected"]);
+      return "caught concurrent refusal must not commit";
+    })).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(witness).toHaveLength(2);expect(witness[0].payload.notes.length).toBe(2097152);
+    expect(witness[1].payload).toBeNull();expect(witness[1].allowance).toBeLessThan(3*1024*1024);
+    expect(witness.filter(x=>x.payload!==null).reduce((n,x)=>n+x.bytes,0)).toBeLessThanOrEqual(MAX_READ_BYTES);
+    expect((await fixture.client.query("SELECT count(*)::integer n FROM domains WHERE domain_id='concurrent-poison-rollback'")).rows[0].n).toBe(0);
+  },20000);
+
   it("PostgreSQL actually cancels a slow bounded read and restores the prior session settings",async()=>{
     const wrapped:OwnershipDatabase={transaction:fn=>fixture.db.transaction(tx=>fn({
       query:(sql,values)=>sql.includes("SELECT observation FROM public.observations")

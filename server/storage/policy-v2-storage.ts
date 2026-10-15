@@ -361,7 +361,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       stateFingerprint:fingerprint(row),
       scoreAvailability:"not_calculated",attainmentAvailability:"not_calculated"});
     if(!view.success)throw new BoundaryError(503);
-    chargeReadBytes(tx,Buffer.byteLength(JSON.stringify(view.data),"utf8")+128);return view.data;
+    await chargeReadBytes(tx,Buffer.byteLength(JSON.stringify(view.data),"utf8")+128);return view.data;
   }
   async function manualRows(tx:Transaction,extra:string,args:unknown[],lock=false) {
     return readComplete(tx,`SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __personal_millisecond_time,

@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks";
 import type { Transaction } from "./org-context";
 import { ResourceLimitError, MAX_READ_ROWS, READ_TIMEOUT_MS } from "./read-budget";
 
-type Budget={active:boolean;deadline:number;statements:number;maximum:number;bytes:number;failed:boolean};
+type Budget={active:boolean;deadline:number;statements:number;maximum:number;bytes:number;failed:boolean;admissionTail:Promise<void>};
 export const MAX_READ_BYTES=8*1024*1024;
 // Only guarded handles are registered. Raw PoolClients are never cached, so a
 // reused connection or a later transaction cannot inherit an old allowance.
@@ -17,10 +17,11 @@ export async function withTransactionReadBudget<T>(raw:Transaction,operation:(tx
     if(inherited.failed||!inherited.active||performance.now()>=inherited.deadline)refuse(inherited);
     let value:T;
     try{value=await operation(raw);}catch(error){if(error instanceof ResourceLimitError)inherited.failed=true;throw error;}
+    await inherited.admissionTail;
     if(inherited.failed||performance.now()>=inherited.deadline)refuse(inherited);
     return value;
   }
-  const budget:Budget={active:true,deadline:absoluteDeadline??performance.now()+READ_TIMEOUT_MS*6,statements:0,maximum:16384,bytes:0,failed:false};
+  const budget:Budget={active:true,deadline:absoluteDeadline??performance.now()+READ_TIMEOUT_MS*6,statements:0,maximum:16384,bytes:0,failed:false,admissionTail:Promise.resolve()};
   const remaining=()=>Math.floor(budget.deadline-performance.now());
   const tx:Transaction={query:async(sql,values)=>{
     if(budget.failed||!budget.active||++budget.statements>budget.maximum||remaining()<1)refuse(budget);
@@ -38,14 +39,26 @@ export async function withTransactionReadBudget<T>(raw:Transaction,operation:(tx
   guarded.set(tx,budget);
   try{
     const value=await operation(tx);
+    await budget.admissionTail;
     if(budget.failed||remaining()<1)refuse(budget);
     return value;
-  }catch(error){if(error instanceof ResourceLimitError)budget.failed=true;throw error;}finally{budget.active=false;}
+  }catch(error){if(error instanceof ResourceLimitError)budget.failed=true;throw error;}finally{await budget.admissionTail;budget.active=false;}
 }
 /** Never substitute a truncated lineage, validation bundle or reconciliation. */
 export function completeRead<T>(rows:T[],maximum=MAX_READ_ROWS):T[]{
   if(rows.length>maximum)throw new ResourceLimitError();
   return rows;
+}
+
+/** Admission and transfer are one serialized operation. A queued read cannot
+ * reuse an allowance captured before another read or derived copy spent it. */
+function serializedAdmission<T>(budget:Budget,operation:()=>Promise<T>):Promise<T>{
+  const result=budget.admissionTail.then(async()=>{
+    if(!budget.active||budget.failed||performance.now()>=budget.deadline)refuse(budget);
+    try{return await operation();}catch(error){if(error instanceof ResourceLimitError)budget.failed=true;throw error;}
+  });
+  budget.admissionTail=result.then(()=>undefined,()=>undefined);
+  return result;
 }
 
 /** Internal explicit SELECT admission; no SQL parsing or rewriting is used.
@@ -58,6 +71,7 @@ export async function readComplete(
 ):Promise<any[]>{
   const budget=guarded.get(tx);
   if(!budget?.active||budget.failed||performance.now()>=budget.deadline)refuse(budget);
+  return serializedAdmission(budget,async()=>{
   if(!/^\s*SELECT\b/i.test(sourceSql)||sourceSql.includes(";")||!Number.isInteger(maximum)||maximum<1||
     !columns.length||columns.some(c=>!/^[_a-zA-Z][_a-zA-Z0-9]*$/.test(c)))refuse(budget);
   const remaining=MAX_READ_BYTES-budget.bytes;
@@ -77,6 +91,7 @@ export async function readComplete(
     count>maximum||bytes>remaining)refuse(budget);
   budget.bytes+=bytes;
   return rows.map(row=>Object.fromEntries(columns.map(c=>[c,row[c]])));
+  });
 }
 
 export function readBytesRemaining(tx:Transaction):number{
@@ -89,7 +104,9 @@ export function assertReadBytesAvailable(tx:Transaction,bytes:number):void{
 }
 
 /** Charge derived copies as they are built, after SQL admitted their inputs. */
-export function chargeReadBytes(tx:Transaction,bytes:number):void{
-  assertReadBytesAvailable(tx,bytes);
-  guarded.get(tx)!.bytes+=bytes;
+export async function chargeReadBytes(tx:Transaction,bytes:number):Promise<void>{
+  const budget=guarded.get(tx);if(!budget?.active||budget.failed)refuse(budget);
+  return serializedAdmission(budget,async()=>{
+    assertReadBytesAvailable(tx,bytes);budget.bytes+=bytes;
+  });
 }
