@@ -42,6 +42,34 @@ async function ready(unit: BootstrapUnit, context: OrgContext): Promise<Onboardi
   return result.data;
 }
 
+/** Reused only inside the authenticated, actor-locked bootstrap transaction.
+ * Creates the same private workspace as explicit first setup; no domain seed,
+ * historical import, membership reassignment or rollout override is permitted.
+ * The caller shares its one admission with these metadata/audit writes.
+ */
+export async function ensurePersonalWorkspaceContext(unit: BootstrapUnit, admitMutation: () => Promise<void>): Promise<OrgContext> {
+  const found = await memberships(unit);
+  if (found.length > 1) throw new BoundaryError(403);
+  if (found.length === 1) return unit.resolveContext(); // strictly no-op
+  await admitMutation();
+  const organizationId = randomUUID();
+  const organization = await unit.tx.query(`INSERT INTO public.organizations (org_id,display_name)
+    VALUES ($1,'Personal workspace') RETURNING *`, [organizationId]);
+  const membership = await unit.tx.query(`INSERT INTO public.organization_members (org_id,user_id,role)
+    VALUES ($1,$2,'owner') RETURNING *`, [organizationId, unit.actorUserId]);
+  const settings = await unit.tx.query(`INSERT INTO public.user_settings (user_id)
+    VALUES ($1) ON CONFLICT (user_id) DO NOTHING RETURNING *`, [unit.actorUserId]);
+  if (organization.rows.length !== 1 || membership.rows.length !== 1 || settings.rows.length > 1) throw new BoundaryError(503);
+  const context = await unit.resolveContext();
+  if (context.orgId !== organizationId || context.role !== "owner") throw new BoundaryError(403);
+  const audit = createAuditService(unit.tx, unit.db, context);
+  const reason = "Personal workspace first setup";
+  await audit.append("organizations", [organizationId], "create", reason, null, organization.rows[0]);
+  await audit.append("organization_members", [organizationId, unit.actorUserId], "create", reason, null, membership.rows[0]);
+  if (settings.rows.length === 1) await audit.append("user_settings", [unit.actorUserId], "create", reason, null, settings.rows[0]);
+  return context;
+}
+
 /** Existing tables only; no history/template, identity or rollout overrides. */
 export function createPersonalWorkspaceService(units: Units) {
   if (!units || typeof units.run !== "function") throw new BoundaryError(503);
@@ -105,26 +133,7 @@ export function createPersonalWorkspaceService(units: Units) {
       authenticatedBootstrapActor(request); // authentication precedes input validation and DB access
       if (!WorkspaceEnsureInputSchema.safeParse(input).success) throw new BoundaryError(400);
       return units.run<OnboardingReady>(request, unit => withOwnerWriteBudget(unit.tx,unit.actorUserId,async ({admitMutation}) => {
-        const found = await memberships(unit);
-        if (found.length > 1) throw new BoundaryError(403);
-        if (found.length === 1) return ready(unit, await unit.resolveContext()); // strictly no-op
-        await admitMutation();
-        const organizationId = randomUUID();
-        const organization = await unit.tx.query(`INSERT INTO public.organizations (org_id,display_name)
-          VALUES ($1,'Personal workspace') RETURNING *`, [organizationId]);
-        const membership = await unit.tx.query(`INSERT INTO public.organization_members (org_id,user_id,role)
-          VALUES ($1,$2,'owner') RETURNING *`, [organizationId, unit.actorUserId]);
-        const settings = await unit.tx.query(`INSERT INTO public.user_settings (user_id)
-          VALUES ($1) ON CONFLICT (user_id) DO NOTHING RETURNING *`, [unit.actorUserId]);
-        if (organization.rows.length !== 1 || membership.rows.length !== 1 || settings.rows.length > 1) throw new BoundaryError(503);
-        const context = await unit.resolveContext();
-        if (context.orgId !== organizationId || context.role !== "owner") throw new BoundaryError(403);
-        const audit = createAuditService(unit.tx, unit.db, context);
-        const reason = "Personal workspace first setup";
-        await audit.append("organizations", [organizationId], "create", reason, null, organization.rows[0]);
-        await audit.append("organization_members", [organizationId, unit.actorUserId], "create", reason, null, membership.rows[0]);
-        if (settings.rows.length === 1) await audit.append("user_settings", [unit.actorUserId], "create", reason, null, settings.rows[0]);
-        return ready(unit, context);
+        return ready(unit, await ensurePersonalWorkspaceContext(unit, admitMutation));
       }));
     },
   });

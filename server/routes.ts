@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, historyReads } from "./storage";
+import { createLegacyDeviationMutations } from "./services/legacy-deviation-mutations";
 import { ResourceLimitError } from "./lib/read-budget";
 import { WriteResourceLimitError } from "./lib/write-resource-budget";
 import { BoundaryError } from "./lib/org-context";
@@ -12,6 +13,7 @@ import {
   updateSessionSchema,
   insertDeviationSchema,
   updateDeviationSchema,
+  deviationLifecycleSchema,
   anomalyCheckRequestSchema,
   insertUserSettingsSchema,
 } from "@shared/schema";
@@ -44,6 +46,9 @@ export async function registerRoutes(
     config: readLegacyWriteThroughConfig(process.env),
     getPool: async () => (await import("./db")).pool,
   }),
+  deviationMutations = createLegacyDeviationMutations(createAuthenticatedBootstrapUnit({
+    connect: async () => (await import("./db")).pool.connect(),
+  })),
 ): Promise<Server> {
   app.use("/api/v2/activities", createActivityV2Router({
     authenticate: isAuthenticated,
@@ -332,11 +337,11 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Invalid deviation data", errors: parsed.error.flatten() });
     }
     try {
-      const userId: string = req.user.claims.sub;
-      const row = await storage.createDeviation({ ...parsed.data, userId });
+      const row = await deviationMutations.create(req, parsed.data);
       res.status(201).json(serializeDeviation(row));
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof BoundaryError) return res.status(error.status).json({ message: error.message });
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to create deviation" });
     }
@@ -349,12 +354,12 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Invalid deviation patch", errors: parsed.error.flatten() });
     }
     try {
-      const userId: string = req.user.claims.sub;
-      const row = await storage.updateDeviation(userId, req.params.id, parsed.data);
+      const row = await deviationMutations.edit(req, req.params.id, parsed.data);
       if (!row) return res.status(404).json({ message: "Deviation not found" });
       res.json(serializeDeviation(row));
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof BoundaryError) return res.status(error.status).json({ message: error.message });
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to update deviation" });
     }
@@ -362,13 +367,15 @@ export async function registerRoutes(
 
   // POST /api/deviations/:id/end — mark active deviation ended now
   app.post("/api/deviations/:id/end", isAuthenticated, async (req: any, res) => {
+    const parsed = deviationLifecycleSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ message: "Invalid change reason", errors: parsed.error.flatten() });
     try {
-      const userId: string = req.user.claims.sub;
-      const row = await storage.endDeviation(userId, req.params.id);
+      const row = await deviationMutations.end(req, req.params.id, parsed.data);
       if (!row) return res.status(404).json({ message: "Deviation not found or already ended" });
       res.json(serializeDeviation(row));
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof BoundaryError) return res.status(error.status).json({ message: error.message });
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to end deviation" });
     }
@@ -376,13 +383,15 @@ export async function registerRoutes(
 
   // DELETE /api/deviations/:id — soft delete
   app.delete("/api/deviations/:id", isAuthenticated, async (req: any, res) => {
+    const parsed = deviationLifecycleSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ message: "Invalid change reason", errors: parsed.error.flatten() });
     try {
-      const userId: string = req.user.claims.sub;
-      const row = await storage.softDeleteDeviation(userId, req.params.id);
+      const row = await deviationMutations.softDelete(req, req.params.id, parsed.data);
       if (!row) return res.status(404).json({ message: "Deviation not found" });
       res.json(serializeDeviation(row));
     } catch (error) {
       if (respondWriteError(error,res)) return;
+      if (error instanceof BoundaryError) return res.status(error.status).json({ message: error.message });
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to delete deviation" });
     }

@@ -94,6 +94,7 @@ export interface DeviationDraft {
 }
 
 export interface DeviationPatch {
+  changeReason: string;
   reason?: string;
   startAt?: string;
   endAt?: string | null;
@@ -157,8 +158,8 @@ interface AppState {
   fetchDeviations: () => Promise<void>;
   createDeviation: (draft: DeviationDraft) => Promise<Deviation | null>;
   updateDeviation: (id: string, patch: DeviationPatch) => Promise<Deviation | null>;
-  endDeviation: (id: string) => Promise<Deviation | null>;
-  deleteDeviation: (id: string) => Promise<boolean>;
+  endDeviation: (id: string, changeReason: string) => Promise<Deviation | null>;
+  deleteDeviation: (id: string, changeReason: string) => Promise<boolean>;
   // Returns the saved row (or a local stand-in in demo mode) so callers
   // can act on the new id; null on network/server failure.
   addSession: (session: Omit<Session, 'id'>) => Promise<Session | null>;
@@ -598,20 +599,22 @@ export const useAppStore = create<AppState>()(
           await get().invalidateAfterMutation(); return saved;
         } catch { return null; }
       },
-      endDeviation: async (id) => {
+      endDeviation: async (id, changeReason) => {
         const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch("/api/deviations/" + encodeURIComponent(id) + "/end", { method: "POST" });
+          const res = await fetch("/api/deviations/" + encodeURIComponent(id) + "/end", { method: "POST",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changeReason }) });
           if (!res.ok) return null;
           const saved: Deviation = await res.json();
           if (owner !== legacyOwner || generation !== ownerGeneration) return null;
           await get().invalidateAfterMutation(); return saved;
         } catch { return null; }
       },
-      deleteDeviation: async (id) => {
+      deleteDeviation: async (id, changeReason) => {
         const owner = legacyOwner, generation = ownerGeneration;
         try {
-          const res = await fetch("/api/deviations/" + encodeURIComponent(id), { method: "DELETE" });
+          const res = await fetch("/api/deviations/" + encodeURIComponent(id), { method: "DELETE",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changeReason }) });
           if (!res.ok || owner !== legacyOwner || generation !== ownerGeneration) return false;
           await get().invalidateAfterMutation(); return true;
         } catch { return false; }

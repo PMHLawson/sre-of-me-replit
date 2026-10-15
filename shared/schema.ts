@@ -355,7 +355,11 @@ export const insertDeviationSchema = createInsertSchema(deviations)
     excludeFromComposite: z.boolean().optional(),
   });
 
+export const deviationChangeReasonSchema = z.string().trim().min(1).max(500);
+export const deviationLifecycleSchema = z.object({ changeReason: deviationChangeReasonSchema.optional() });
 export const updateDeviationSchema = z.object({
+  // Required by the service for an actual change; genuine no-ops stay free.
+  changeReason: deviationChangeReasonSchema.optional(),
   // Length is checked against the owned locked row so exact historical text
   // can be retained. New or changed reasons still use explanationSchema.
   reason: z.string().min(1).refine(value=>value.trim().length>0).optional(),

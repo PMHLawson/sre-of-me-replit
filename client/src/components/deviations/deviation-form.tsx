@@ -83,6 +83,7 @@ function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: Deviatio
   const [domain, setDomain] = useState<Domain>('fitness');
   const [reason, setReason] = useState('');
   const [reasonDirty, setReasonDirty] = useState(false);
+  const [changeReason, setChangeReason] = useState('');
   const detail = useAppStore(s => editing ? s.deviationDetails[editing.id] : undefined);
   const full = editing?.textComplete === false ? detail?.value : editing;
   const ready = !editing || (!!full && full.textComplete !== false);
@@ -107,7 +108,7 @@ function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: Deviatio
       setEndLocal('');
       setExcludeFromComposite(true);
     }
-    setError(null); setReasonDirty(false);
+    setError(null); setReasonDirty(false); setChangeReason('');
   }, [open, editing?.id]);
   useEffect(() => { if (open && ready && full && !reasonDirty) setReason(full.reason); },
     [open, ready, full?.reason, reasonDirty]);
@@ -117,6 +118,10 @@ function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: Deviatio
     setError(null);
     if (!reason.trim()) {
       setError('Reason is required.');
+      return;
+    }
+    if (isEdit && (!changeReason.trim() || changeReason.trim().length > 500)) {
+      setError('Explain why you are changing this deviation (up to 500 characters).');
       return;
     }
     if (!startLocal) {
@@ -133,6 +138,7 @@ function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: Deviatio
     try {
       if (isEdit) {
         const patch: DeviationPatch = {
+          changeReason: changeReason.trim(),
           ...(reasonDirty ? { reason } : {}),
           startAt: startIso,
           endAt: endIso,
@@ -175,6 +181,12 @@ function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: Deviatio
           </DialogDescription>
         </DialogHeader>
 
+        {isEdit && <div className="space-y-2">
+          <Label htmlFor="deviation-change-reason">Why are you changing this deviation?</Label>
+          <Textarea id="deviation-change-reason" value={changeReason} onChange={event => setChangeReason(event.target.value)}
+            maxLength={500} required data-testid="input-deviation-change-reason" />
+          <p className="text-sm text-muted-foreground">This explanation is saved in its edit history. The original deviation reason is separate.</p>
+        </div>}
         {!ready && editing && <div><p>Load the complete saved reason before editing.</p><DeviationText deviation={editing} force /></div>}
         <div className="space-y-4 py-2">
           <div className="space-y-2">

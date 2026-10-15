@@ -15,11 +15,9 @@ import {
   type InsertSession,
   type UpdateSession,
   type Deviation,
-  type InsertDeviation,
-  type UpdateDeviation,
   type UserSettings,
   type InsertUserSettings,
-  normalizeComplianceWindowDays,activityTextWithinLimit,insertSessionSchema,updateSessionSchema,insertDeviationSchema,updateDeviationSchema,insertUserSettingsSchema,
+  normalizeComplianceWindowDays,activityTextWithinLimit,insertSessionSchema,updateSessionSchema,insertUserSettingsSchema,
 } from "@shared/schema";
 import { sql,eq,desc,gte,and,isNull,lte,or,asc,gt,isNotNull } from "drizzle-orm";
 
@@ -39,14 +37,10 @@ export interface IStorage {
   purgeExpiredDeletedSessions(olderThan: Date): Promise<number>;
 
   // Deviations
-  createDeviation(deviation: InsertDeviation & { userId: string }): Promise<Deviation>;
   getActiveDeviations(userId: string, now?: Date): Promise<Deviation[]>;
   getPlannedDeviations(userId: string, now?: Date): Promise<Deviation[]>;
   getAllDeviations(userId: string): Promise<Deviation[]>;
   getDeviation(userId: string, id: string): Promise<Deviation | undefined>;
-  updateDeviation(userId: string, id: string, patch: UpdateDeviation): Promise<Deviation | undefined>;
-  endDeviation(userId: string, id: string, endedAt?: Date): Promise<Deviation | undefined>;
-  softDeleteDeviation(userId: string, id: string): Promise<Deviation | undefined>;
 
   // User settings (C3.1)
   /** Returns the user's settings; creates a default row on first call so
@@ -66,12 +60,6 @@ const sessionMutationColumns=`s.id,s.user_id AS "userId",s.domain,s.duration_min
  CASE WHEN s.anomaly_note IS NULL THEN 'absent' ELSE 'not_loaded' END AS "anomalyNoteAvailability"`;
 const sessionMutationFields=["id","userId","domain","durationMinutes","timestamp","deletedAt","isAnomaly","notes","anomalyNote",
  "hasNotes","hasAnomalyNote","notesBytes","anomalyNoteBytes","notesAvailability","anomalyNoteAvailability"];
-const deviationMutationColumns=`d.id,d.user_id AS "userId",d.domain,d.start_at AS "startAt",d.end_at AS "endAt",
- d.ended_at AS "endedAt",d.deleted_at AS "deletedAt",d.exclude_from_composite AS "excludeFromComposite",
- ''::text AS reason,d.reason IS NOT NULL AS "hasReason",COALESCE(octet_length(d.reason),0) AS "reasonBytes",
- CASE WHEN d.reason IS NULL THEN 'absent' ELSE 'not_loaded' END AS "reasonAvailability"`;
-const deviationMutationFields=["id","userId","domain","startAt","endAt","endedAt","deletedAt","excludeFromComposite","reason",
- "hasReason","reasonBytes","reasonAvailability"];
 const settingsMutationColumns=`user_id AS "userId",day_start_hour AS "dayStartHour",timezone,window_days AS "windowDays",
  notifications_enabled AS "notificationsEnabled",notification_tier AS "notificationTier",updated_at AS "updatedAt"`;
 const settingsMutationFields=["userId","dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier","updatedAt"];
@@ -83,16 +71,6 @@ async function sessionMutation(tx:Transaction,userId:string,id:string,condition=
   WHERE s.user_id=$1 AND s.id=$2 AND ${condition} LIMIT 2 FOR UPDATE`,
   [userId,id,...values],[...sessionMutationFields,...(extra?["notesSame","anomalyNoteSame","anomalyNoteNonBlank","timestampSame","notesMayShorten","anomalyNoteMayShorten"]:[])],1);
  return rows[0] as Session & Record<string,any>|undefined;
-}
-async function deviationMutation(tx:Transaction,userId:string,id:string,condition="d.deleted_at IS NULL",reason?:string){
- const hasReason=reason!==undefined;
- const extra=hasReason?`,d.reason IS NOT DISTINCT FROM $3::text AS "reasonSame",
-  ($4::int <= char_length(d.reason)+char_length(regexp_replace(d.reason,'[^𐀀-􏿿]','','g')) AND $5::int <= octet_length(d.reason) AND ($4::int < char_length(d.reason)+char_length(regexp_replace(d.reason,'[^𐀀-􏿿]','','g')) OR $5::int < octet_length(d.reason))) AS "reasonMayShorten"`:"";
- const rows=await readComplete(tx,`SELECT ${deviationMutationColumns}${extra}
-  FROM public.deviations d WHERE d.user_id=$1 AND d.id=$2 AND ${condition} LIMIT 2 FOR UPDATE`,
-  [userId,id,...(hasReason?[reason,reason!.length,new TextEncoder().encode(reason).byteLength]:[])],
-  [...deviationMutationFields,...(hasReason?["reasonSame","reasonMayShorten"]:[])],1);
- return rows[0] as Deviation & Record<string,any>|undefined;
 }
 async function settingsMutation(tx:Transaction,userId:string){
  return (await readComplete(tx,`SELECT ${settingsMutationColumns} FROM public.user_settings WHERE user_id=$1 FOR UPDATE`,
@@ -265,16 +243,6 @@ export class DatabaseStorage implements IStorage {
 
   // ----- Deviations -----
 
-  async createDeviation(input:InsertDeviation&{userId:string}):Promise<Deviation>{
-    const parsed=insertDeviationSchema.safeParse(input);if(!parsed.success)throw new BoundaryError(400);const p=parsed.data;
-    return this.write(input.userId,async(tx,{admitMutation})=>{
-      await admitMutation();
-      const created=await tx.query(`INSERT INTO public.deviations(user_id,domain,reason,start_at,end_at,exclude_from_composite)
-        VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[input.userId,p.domain,p.reason,p.startAt,p.endAt??null,p.excludeFromComposite??true]);
-      return (await deviationMutation(tx,input.userId,created.rows[0].id))!;
-    });
-  }
-
   async getActiveDeviations(userId: string, now: Date = new Date()): Promise<Deviation[]> {
     return this.database
       .select()
@@ -326,41 +294,6 @@ export class DatabaseStorage implements IStorage {
         ),
       );
     return row;
-  }
-
-  async updateDeviation(userId:string,id:string,patch:UpdateDeviation):Promise<Deviation|undefined>{
-    const parsed=updateDeviationSchema.safeParse(patch);if(!parsed.success)throw new BoundaryError(400);const p=parsed.data;
-    return this.write(userId,async(tx,{admitMutation})=>{
-      const current=await deviationMutation(tx,userId,id,"d.deleted_at IS NULL",p.reason);if(!current)return undefined;
-      const update:Record<string,unknown>={};
-      if(p.reason!==undefined&&!current.reasonSame){
-        if(!insertDeviationSchema.shape.reason.safeParse(p.reason).success&&!current.reasonMayShorten)throw new BoundaryError(400);
-        update.reason=p.reason;
-      }
-      if(p.startAt!==undefined&&new Date(p.startAt).getTime()!==current.startAt.getTime())update.start_at=p.startAt;
-      if(p.endAt!==undefined&&(p.endAt===null?null:new Date(p.endAt).getTime())!==(current.endAt?.getTime()??null))update.end_at=p.endAt;
-      if(p.excludeFromComposite!==undefined&&p.excludeFromComposite!==current.excludeFromComposite)update.exclude_from_composite=p.excludeFromComposite;
-      const names=Object.keys(update);if(!names.length){const {reasonSame,reasonMayShorten,...summary}=current;return summary;}
-      await admitMutation();await tx.query(`UPDATE public.deviations SET ${names.map((name,index)=>name+"=$"+(index+3)).join(",")}
-        WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`,[userId,id,...Object.values(update)]);
-      return deviationMutation(tx,userId,id);
-    });
-  }
-
-  async endDeviation(userId:string,id:string,endedAt:Date=new Date()):Promise<Deviation|undefined>{
-    return this.write(userId,async(tx,{admitMutation})=>{
-      const current=await deviationMutation(tx,userId,id,"d.deleted_at IS NULL AND d.ended_at IS NULL");if(!current)return undefined;
-      await admitMutation();await tx.query("UPDATE public.deviations SET ended_at=$3 WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL AND ended_at IS NULL",[userId,id,endedAt]);
-      return deviationMutation(tx,userId,id);
-    });
-  }
-
-  async softDeleteDeviation(userId:string,id:string):Promise<Deviation|undefined>{
-    return this.write(userId,async(tx,{admitMutation})=>{
-      const current=await deviationMutation(tx,userId,id);if(!current)return undefined;
-      await admitMutation();await tx.query("UPDATE public.deviations SET deleted_at=clock_timestamp() WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL",[userId,id]);
-      return deviationMutation(tx,userId,id,"TRUE");
-    });
   }
 
   async getUserSettings(userId:string):Promise<UserSettings>{
