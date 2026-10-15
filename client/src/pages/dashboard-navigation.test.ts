@@ -10,6 +10,7 @@ const testState = vi.hoisted(() => ({
 }));
 
 vi.mock('@/store', () => ({
+  boundLegacyOwner: () => 'test-owner',
   useAppStore: (selector: (state: any) => unknown) => selector({
     getDomainStatus: () => ({
       score: 73,
@@ -25,6 +26,7 @@ vi.mock('@/store', () => ({
     }),
     sessions: [],
     sessionsLoaded: true,
+    dataOwner: 'test-owner', policyStateLoaded: true, deviationsLoaded: true, refreshCurrent: vi.fn(),
     escalationStateLoaded: true,
     policyState: {},
     escalationState: {

@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { DeviationSection } from '@/components/deviations/deviation-section';
 import { useLocation } from 'wouter';
 import { format, parseISO, startOfWeek, endOfWeek } from 'date-fns';
 import { ArrowLeft, Plus } from 'lucide-react';
@@ -35,11 +36,21 @@ interface WeekBucket {
 
 export default function History() {
   const [_, setLocation] = useLocation();
-  const sessions = useAppStore((state) => state.sessions);
-  const deviations = useAppStore((state) => state.deviations);
+  const contextSessions = useAppStore(state => state.sessions);
+  const contextReady = useAppStore(state => state.sessionsLoaded && !state.sessionsError);
+  const contextError = useAppStore(state => state.sessionsError);
+  const demo = useAppStore(state => state.demoState !== "default");
+  const storedHistory = useAppStore(state => state.historySessions);
+  const sessions = demo ? contextSessions : storedHistory;
+  const historyLoaded = useAppStore(state => state.historyLoaded);
+  const historyLoading = useAppStore(state => state.historyLoading);
+  const historyError = useAppStore(state => state.historyError);
+  const historyComplete = useAppStore(state => state.historyComplete);
+  const fetchHistory = useAppStore(state => state.fetchHistory);
+  useEffect(() => { if (!demo && !historyLoaded && !historyLoading && !historyError) void fetchHistory(); },
+    [demo, historyLoaded, historyLoading, historyError, fetchHistory]);
   const updateSession = useAppStore((state) => state.updateSession);
   const deleteSession = useAppStore((state) => state.deleteSession);
-  const [visibleWeeks, setVisibleWeeks] = useState(2); // 2 weeks default = 14 days
   const [editing, setEditing] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState<Session | null>(null);
   const [heatmapDays, setHeatmapDays] = useState(30);
@@ -48,7 +59,7 @@ export default function History() {
   // Week totals are computed from session entries only — deviation events do
   // not contribute minutes to the totals row above each week.
   const weekBuckets = useMemo<WeekBucket[]>(() => {
-    const entries = buildActivityLog(sessions, deviations);
+    const entries = buildActivityLog(sessions, []);
     if (entries.length === 0) return [];
 
     const weeks: WeekBucket[] = [];
@@ -86,9 +97,9 @@ export default function History() {
 
     weeks.sort((a, b) => b.weekStart.getTime() - a.weekStart.getTime());
     return weeks;
-  }, [sessions, deviations]);
+  }, [sessions]);
 
-  const visibleWeekBuckets = weekBuckets.slice(0, visibleWeeks);
+  const visibleWeekBuckets = weekBuckets;
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans transition-colors duration-300">
@@ -104,7 +115,7 @@ export default function History() {
           <div>
             <h1 className="text-xl font-bold tracking-tight">History</h1>
             <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-0.5">
-              {weekBuckets.length} weeks · {sessions.length} sessions
+              {sessions.length} shown practice records{!demo && !historyComplete ? ' · more available' : ''}
             </p>
             <p
               className="text-xs italic text-muted-foreground/70 mt-1.5"
@@ -142,7 +153,8 @@ export default function History() {
               ))}
             </div>
           </div>
-          <CalendarHeatMap sessions={sessions} days={heatmapDays} />
+          {demo || contextReady ? <CalendarHeatMap sessions={contextSessions} days={heatmapDays} /> :
+            <p role="status">{contextError ? "The complete calendar range could not be loaded. No totals are shown." : "Loading the complete calendar range…"}</p>}
         </section>
 
         {visibleWeekBuckets.map((week) => (
@@ -171,7 +183,7 @@ export default function History() {
                     </span>
                   ))}
                   <span className="text-[11px] font-bold font-mono text-primary ml-auto">
-                    Total: {week.totalMinutes}m
+                    Shown subtotal: {week.totalMinutes}m
                   </span>
                 </div>
               </div>
@@ -197,32 +209,29 @@ export default function History() {
         ))}
 
         {/* Calendar-week context note */}
-        {visibleWeekBuckets.length >= 2 && (
+        {visibleWeekBuckets.length >= 1 && (
           <div className="bg-primary/5 border border-primary/20 rounded-2xl p-4 text-sm text-muted-foreground">
-            <span className="font-bold text-foreground">Week totals: </span>
-            Each header shows minutes logged per domain for that calendar week
-            (Mon–Sun). Dashboard trend arrows use rolling 7-day windows anchored
+            <span className="font-bold text-foreground">Shown-record subtotals: </span>
+            Each header adds only the practice records currently loaded for that calendar week
+            (Mon–Sun). A page may split a week; these are not complete weekly totals. Dashboard trend arrows use rolling 7-day windows anchored
             to your configured timezone and day-start hour — they will not always
             align exactly with the calendar weeks shown here.
           </div>
         )}
 
-        {visibleWeeks < weekBuckets.length && (
-          <button
-            onClick={() => setVisibleWeeks((prev) => prev + 2)}
-            className="w-full py-4 text-sm font-bold text-primary bg-primary/10 rounded-2xl active:scale-[0.98] transition-all border border-primary/20 hover:bg-primary/20"
-            data-testid="button-load-older"
-          >
-            Load Older Weeks ({weekBuckets.length - visibleWeeks} more)
-          </button>
+        {historyLoading && <p role="status">Loading practice history…</p>}
+        {historyError && <div role="alert"><p>{historyError}</p>
+          <button className="underline" onClick={() => void fetchHistory(historyLoaded)}>Try again</button></div>}
+        {!demo && historyLoaded && !historyComplete && <button
+          onClick={() => void fetchHistory(true)} disabled={historyLoading}
+          className="w-full py-4 text-primary" data-testid="button-load-older">
+          Load older practice records</button>}
+        {(demo || historyLoaded) && !historyError && sessions.length === 0 && (
+          <div className="text-center py-12 text-muted-foreground">No active practice records.</div>
         )}
-
-        {weekBuckets.length === 0 && (
-          <div className="text-center py-12 text-muted-foreground font-medium">
-            No activity logged yet.
-          </div>
-        )}
-
+        <p className="text-sm text-muted-foreground">Practice records include saved future dates. Deviation history is listed separately below.
+          Loading older records does not change current scores.</p>
+        <DeviationSection />
         <RecentlyDeletedSection />
       </main>
 

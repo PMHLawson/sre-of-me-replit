@@ -9,9 +9,9 @@ import { createWorkspaceEntrySession, type WorkspaceEntrySnapshot } from "@/lib/
 const mocks = vi.hoisted(() => ({ legacy: vi.fn(), onboardingProps: vi.fn(), fetchSessions: vi.fn(), fetchPolicyState: vi.fn(), fetchEscalationState: vi.fn(), fetchDeviations: vi.fn(),
   user: { id: "owner-a" } as { id: string } | null, loading: false }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: mocks.user, isLoading: mocks.loading }) }));
-vi.mock("@/store", () => ({ useAppStore: Object.assign((select: (state: unknown) => unknown) => select({ theme: "dark", demoState: "default",
+vi.mock("@/store", () => ({ bindLegacyOwner: vi.fn(), useAppStore: Object.assign((select: (state: unknown) => unknown) => select({ theme: "dark", demoState: "default",
   fetchSessions: mocks.fetchSessions, fetchPolicyState: mocks.fetchPolicyState, fetchEscalationState: mocks.fetchEscalationState,
-  fetchDeviations: mocks.fetchDeviations, setNotificationPermission: vi.fn() }), { setState: vi.fn() }) }));
+  refreshCurrent: mocks.fetchSessions, resetLegacyReads: vi.fn(), fetchDeviations: mocks.fetchDeviations, setNotificationPermission: vi.fn() }), { setState: vi.fn(), getState: () => ({ resetLegacyReads: vi.fn() }) }) }));
 vi.mock("@/components/ui/toaster", () => ({ Toaster: () => null }));
 vi.mock("@/components/ui/tooltip", () => ({ TooltipProvider: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/pages/dashboard", () => ({ default: () => { mocks.legacy("dashboard"); return "legacy-dashboard"; } }));

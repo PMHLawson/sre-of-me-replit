@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { DeviationText } from '@/components/session-text';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, CalendarOff, CalendarClock, Pencil, X, Trash2 } from 'lucide-react';
 import {
   useAppStore,
@@ -72,12 +73,12 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
               </span>
             )}
           </div>
-          <p
+          <div
             className="text-sm font-medium text-foreground mt-1 break-words"
             data-testid={`text-deviation-reason-${deviation.id}`}
           >
-            {deviation.reason}
-          </p>
+            <DeviationText deviation={deviation} />
+          </div>
           <p className="text-xs text-muted-foreground mt-1 font-mono">
             {formatRange(deviation.startAt, deviation.endAt)}
           </p>
@@ -118,6 +119,16 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
 export function DeviationSection() {
   const deviations = useAppStore((s) => s.deviations);
   const deviationsLoaded = useAppStore((s) => s.deviationsLoaded);
+  const currentError = useAppStore(s => s.deviationsError);
+  const pages = useAppStore(s => s.deviationPages);
+  const loaded = useAppStore(s => s.deviationPagesLoaded);
+  const loading = useAppStore(s => s.deviationPagesLoading);
+  const error = useAppStore(s => s.deviationPagesError);
+  const complete = useAppStore(s => s.deviationPagesComplete);
+  const fetchPages = useAppStore(s => s.fetchDeviationPages);
+  const [browse, setBrowse] = useState(false);
+  useEffect(() => { if (browse && !loaded && !loading && !error) void fetchPages(); },
+    [browse, loaded, loading, error, fetchPages]);
   const createDeviation = useAppStore((s) => s.createDeviation);
   const updateDeviation = useAppStore((s) => s.updateDeviation);
   const endDeviation = useAppStore((s) => s.endDeviation);
@@ -179,6 +190,7 @@ export function DeviationSection() {
         </Button>
       </div>
 
+      {currentError && <p role="alert">Current deviations could not be verified.</p>}
       {!deviationsLoaded ? (
         <div
           className="bg-card border border-border/50 rounded-2xl p-4 text-sm text-muted-foreground"
@@ -242,6 +254,16 @@ export function DeviationSection() {
         </>
       )}
 
+      <button className="underline" onClick={() => setBrowse(v => !v)}>{browse ? 'Hide' : 'Browse'} saved deviation history</button>
+      {browse && <div className="space-y-3" data-testid="deviation-history">
+        <p>{pages.length} shown deviations{!complete ? ' · more may be available' : ''}</p>
+        {loading && <p role="status">Loading…</p>}
+        {error && <div role="alert"><p>{error}</p><button onClick={() => void fetchPages(loaded)}>Try again</button></div>}
+        {pages.map(d => <div key={d.id} className="border p-3 rounded"><p>{DOMAIN_LABEL[d.domain as Domain]} · {formatRange(d.startAt, d.endAt)}</p>
+          <DeviationText deviation={d} /></div>)}
+        {loaded && !complete && <button disabled={loading} onClick={() => void fetchPages(true)}>Load more deviations</button>}
+        {loaded && !error && !pages.length && <p>No saved deviations.</p>}
+      </div>}
       <DeviationForm
         open={formOpen}
         onOpenChange={setFormOpen}
