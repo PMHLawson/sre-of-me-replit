@@ -245,7 +245,8 @@ export async function registerRoutes(
 
   // PATCH /api/sessions/:id — edit a non-deleted session. Body must include
   // `reason` so every change is captured in the edit-history audit table.
-  // C1.1 — Mirrors the POST guard: isAnomaly=true requires a non-empty note.
+  // Reject explicit blank explanations here. Omission is checked against
+  // the owned locked row so unchanged historical text need not be resubmitted.
   app.patch("/api/sessions/:id", isAuthenticated, async (req: any, res) => {
     const parsed = updateSessionSchema.safeParse(req.body);
     if (!parsed.success) {
