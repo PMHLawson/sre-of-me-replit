@@ -1,13 +1,14 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { withTransactionReadBudget, readComplete, chargeReadBytes } from "../lib/transaction-read-budget";
+import { withOwnerWriteBudget } from "../lib/write-resource-budget";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS, READ_TIMEOUT_MS } from "../lib/read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema,
   validateProspectiveRevision, validateObservationContext, type DomainConfiguration } from "../../shared/domain-config";
 import { createAuditService } from "../lib/audit-service";
 import { ActivityCreateInputSchema, ActivityIdSchema, ActivitySubmissionKeySchema, ActivityListInputSchema,
   ActivityCursorPayloadSchema, ActivityTimestampSchema, ActivityViewSchema, validatePracticeValues,
-  ActivityEditInputSchema,ActivityLifecycleInputSchema,
+  ActivityEditInputSchema,ActivityLifecycleInputSchema,ActivityContextSchema,ActivityValuesSchema,
   type ActivityEditInput,type ActivityLifecycleInput,type ActivityView, type ActivityCursorPayload } from "../../shared/activity";
 import { assertContext, revalidate, bounded, BoundaryError, type OrgContext, type OwnershipDatabase, type Transaction } from "../lib/org-context";
 
@@ -21,7 +22,11 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
 const domainInput = z.object({ domainId:id,slug:id,displayName:text }).strict();
 const domainPatch = z.object({ displayName:text.optional(),deactivatedAt:at.nullable().optional(),tombstonedAt:at.nullable().optional() }).strict()
   .refine(v => Object.keys(v).length > 0);
-const observationInput = z.object({ observation:ObservationSchema,idempotencyKey:id,sourceBindingId:id.optional() }).strict();
+// Write-only envelope limits do not re-parse or truncate grandfathered observations.
+const newObservationSchema=ObservationSchema.extend({
+  notes:z.string().max(4000).optional(),context:ActivityContextSchema.optional(),values:ActivityValuesSchema,
+});
+const observationInput = z.object({ observation:newObservationSchema,idempotencyKey:id,sourceBindingId:id.optional() }).strict();
 const bindingInput = z.object({ bindingId:id,domainId:id,sourceKind:id,externalId:id,
   metadata:z.object({ description:text.optional() }).strict().nullable().optional() }).strict();
 const deviationInput = z.object({ deviationId:id,startAt:at,endAt:at.nullable(),scope:z.enum(["all","selected"]),
@@ -35,7 +40,7 @@ const evaluationInput = z.object({ resultId:id,domainId:id,policyVersionId:id,wi
   eligibleDays:z.number().finite().nonnegative(),
   // No user-authored arbitrary scoring/explanation objects or nested identities.
   // This boundary stores a declared summary, not a scoring implementation.
-  result:z.object({ summary:text }).strict(),components:z.array(z.object({ measurementId:id,value:z.number().finite() }).strict()),
+  result:z.object({ summary:text }).strict(),components:z.array(z.object({ measurementId:id,value:z.number().finite() }).strict()).max(1000),
   explanation:z.object({ summary:text }).strict() }).strict().refine(v => Date.parse(v.windowEnd)>Date.parse(v.windowStart));
 
 const tables = {
@@ -164,7 +169,13 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   const scope=[context.orgId,context.actorUserId];
   // Nested calls reuse the pinned operation's monotonic deadline and byte budget.
   const run=<T>(fn:(tx:Transaction)=>Promise<T>) => bounded(() => db.transaction(raw =>
-    withTransactionReadBudget(raw,async tx=>{await revalidate(tx,db,context);return fn(tx);}))); 
+    withTransactionReadBudget(raw,tx=>withOwnerWriteBudget(tx,context.actorUserId,async()=>{
+      await revalidate(tx,db,context);return fn(tx);
+    })))); 
+  // Admission remains lazy: reads, equal retries and refused/no-op edits never charge.
+  // The helper retains one admission across nested and sequential store calls on
+  // this same pinned transaction (including policy append plus domain rename).
+  const admitWrite=(tx:Transaction)=>withOwnerWriteBudget(tx,context.actorUserId,budget=>budget.admitMutation()); 
   // These are complete-result safety budgets, not truncation or retention.
   // A caller receives all matching rows or an explicit unavailable result.
   const rowBudget=(kind:Kind)=>kind==="policy"||kind==="observation"||kind==="evaluation"?MAX_READ_ROWS:MAX_COLLECTION_ROWS;
@@ -188,6 +199,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function insert(tx:Transaction,kind:Kind,values:Record<string,unknown>,reason:string) {
     const row={org_id:scope[0],owner_user_id:scope[1],...values},columns=Object.keys(row);
+    await admitWrite(tx);
     const result=await tx.query(`INSERT INTO public.${tables[kind].table} (${columns.join(",")})
       VALUES (${columns.map((_,i)=>`$${i+1}`).join(",")}) RETURNING *`,Object.values(row));
     const after=result.rows[0];
@@ -196,6 +208,17 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function update(tx:Transaction,kind:Kind,keys:string[],patch:Record<string,unknown>,reason:string) {
     const before=await get(tx,kind,keys,true),columns=Object.keys(patch),spec=tables[kind];
+    const unchanged=columns.every(column=>{
+      const existing=before[column],proposed=patch[column];
+      if(existing instanceof Date||proposed instanceof Date) {
+        const left=existing===null?NaN:new Date(existing).getTime();
+        const right=proposed===null?NaN:new Date(proposed as string|Date).getTime();
+        return Number.isFinite(left)&&left===right;
+      }
+      return semanticEqual(existing,proposed);
+    });
+    if(unchanged||(Object.hasOwn(patch,"deleted_at")&&before.deleted_at!==null))return before;
+    await admitWrite(tx);
     const r=await tx.query(`UPDATE public.${spec.table} SET ${columns.map((k,i)=>`${k}=$${i+3+keys.length}`).join(",")}
       WHERE org_id=$1 AND owner_user_id=$2 AND ${spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")} RETURNING *`,
     [...scope,...keys,...Object.values(patch)]);
@@ -204,6 +227,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function remove(tx:Transaction,kind:"association"|"binding",keys:string[],reason:string) {
     const before=await get(tx,kind,keys,true),spec=tables[kind];
+    await admitWrite(tx);
     await tx.query(`DELETE FROM public.${spec.table} WHERE org_id=$1 AND owner_user_id=$2 AND ${
       spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")}`,[...scope,...keys]);
     await createAuditService(tx,db,context).append(spec.table,keys,"delete",reason,before,null);
@@ -217,6 +241,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function appendPolicy(tx:Transaction,input:unknown,reason:unknown) {
     const c=parse(DomainConfigurationSchema,input),r=parse(reasonSchema,reason);owned(c);
+    if(Buffer.byteLength(JSON.stringify(c),"utf8")>102400)throw new BoundaryError(400);
     const previous=await history(tx,c.domainId),last=previous.at(-1);
     if(previous.length>=MAX_READ_ROWS||c.measurements.length>MAX_COLLECTION_ROWS)throw new ResourceLimitError();
     // Capture actual server time only AFTER acquiring domain/history locks.
@@ -447,17 +472,20 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       const observation=proposedObservation(row,p as ActivityEditInput);
       if(semanticEqual(observation,row.observation))throw new BoundaryError(400);
       await activePractice(tx,row,observation);
+      await admitWrite(tx);
       changed=(await tx.query(`UPDATE public.observations SET policy_version_id=$4,observed_at=$5,observation=$6::jsonb
         WHERE org_id=$1 AND owner_user_id=$2 AND observation_id=$3 RETURNING *`,[...scope,activityId,observation.policyVersionId,
         observation.observedAt,JSON.stringify(observation)])).rows;
     } else if(operation==="delete") {
       if(row.deleted_at!==null)throw new BoundaryError(400);
       const now=clock();if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new BoundaryError(503);
+      await admitWrite(tx);
       changed=(await tx.query(`UPDATE public.observations SET deleted_at=$4 WHERE org_id=$1 AND owner_user_id=$2
         AND observation_id=$3 RETURNING *`,[...scope,activityId,now.toISOString()])).rows;
     } else {
       if(row.deleted_at===null)throw new BoundaryError(400);
       await activePractice(tx,row,row.observation);
+      await admitWrite(tx);
       changed=(await tx.query(`UPDATE public.observations SET deleted_at=NULL WHERE org_id=$1 AND owner_user_id=$2
         AND observation_id=$3 RETURNING *`,[...scope,activityId])).rows;
     }
@@ -570,6 +598,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       createWithPolicy:(input:unknown,configuration:unknown,reason:unknown)=>run(async tx=>{
         const p=parse(domainInput,input),c=parse(DomainConfigurationSchema,configuration),r=parse(reasonSchema,reason);owned(c);
         if(c.measurements.length>MAX_COLLECTION_ROWS)throw new ResourceLimitError();
+        if(Buffer.byteLength(JSON.stringify(c),"utf8")>102400)throw new BoundaryError(400);
         if(c.domainId!==p.domainId||c.displayName!==p.displayName||c.revision!==1||c.previousVersionId!==undefined)
           throw new BoundaryError(400);
         let domain;

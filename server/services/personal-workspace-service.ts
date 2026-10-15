@@ -3,6 +3,7 @@ import { OnboardingReadySchema, OnboardingSettingsSchema, OnboardingSettingsPatc
   WorkspaceEnsureInputSchema, type OnboardingReady, type OnboardingStatus, type OnboardingSettings } from "../../shared/onboarding";
 import { authenticatedBootstrapActor, type BootstrapUnit, type createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap-unit";
 import { createAuditService } from "../lib/audit-service";
+import { withOwnerWriteBudget } from "../lib/write-resource-budget";
 import { assertContext, revalidate, BoundaryError, type OrgContext } from "../lib/org-context";
 
 type Units = ReturnType<typeof createAuthenticatedBootstrapUnit>;
@@ -60,7 +61,7 @@ export function createPersonalWorkspaceService(units: Units) {
       authenticatedBootstrapActor(request);
       const parsed = OnboardingSettingsPatchSchema.safeParse(input);
       if (!parsed.success) throw new BoundaryError(400);
-      return units.run<OnboardingSettings>(request, async unit => {
+      return units.run<OnboardingSettings>(request, unit => withOwnerWriteBudget(unit.tx,unit.actorUserId,async ({admitMutation}) => {
         const found = await memberships(unit);
         if (found.length !== 1) throw new BoundaryError(403);
         const context = await unit.resolveContext();
@@ -80,6 +81,7 @@ export function createPersonalWorkspaceService(units: Units) {
         if (!changed.length) return existing.data;
         const values: unknown[] = [context.actorUserId, ...changed.map(field => parsed.data[field])];
         const assignments = changed.map((field, index) => `${columns[field]}=$${index + 2}`);
+        await admitMutation();
         const updated = await unit.tx.query(`UPDATE public.user_settings SET ${assignments.join(",")},updated_at=now()
           WHERE user_id=$1 RETURNING *`, values);
         if (updated.rows.length !== 1) throw new BoundaryError(503);
@@ -91,15 +93,16 @@ export function createPersonalWorkspaceService(units: Units) {
         await createAuditService(unit.tx, unit.db, context).append("user_settings", [context.actorUserId], "update",
           "Personal day settings update", before, after);
         return saved.data;
-      });
+      }));
     },
     ensure: async (request: Request, input: unknown): Promise<OnboardingReady> => {
       authenticatedBootstrapActor(request); // authentication precedes input validation and DB access
       if (!WorkspaceEnsureInputSchema.safeParse(input).success) throw new BoundaryError(400);
-      return units.run<OnboardingReady>(request, async unit => {
+      return units.run<OnboardingReady>(request, unit => withOwnerWriteBudget(unit.tx,unit.actorUserId,async ({admitMutation}) => {
         const found = await memberships(unit);
         if (found.length > 1) throw new BoundaryError(403);
         if (found.length === 1) return ready(unit, await unit.resolveContext()); // strictly no-op
+        await admitMutation();
         const organizationId = randomUUID();
         const organization = await unit.tx.query(`INSERT INTO public.organizations (org_id,display_name)
           VALUES ($1,'Personal workspace') RETURNING *`, [organizationId]);
@@ -116,7 +119,7 @@ export function createPersonalWorkspaceService(units: Units) {
         await audit.append("organization_members", [organizationId, unit.actorUserId], "create", reason, null, membership.rows[0]);
         if (settings.rows.length === 1) await audit.append("user_settings", [unit.actorUserId], "create", reason, null, settings.rows[0]);
         return ready(unit, context);
-      });
+      }));
     },
   });
 }

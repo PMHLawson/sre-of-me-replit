@@ -3,6 +3,7 @@ import { ActivityCreateInputSchema, ActivityIdSchema, ActivityListInputSchema, A
   ActivityEditInputSchema,ActivityLifecycleInputSchema } from "../../shared/activity";
 import { authenticatedBootstrapActor } from "../lib/authenticated-bootstrap-unit";
 import { BoundaryError } from "../lib/org-context";
+import { WriteResourceLimitError } from "../lib/write-resource-budget";
 import { ResourceLimitError } from "../lib/read-budget";
 import { ActivityInputError, parseActivityInput, type createActivityServiceV2 } from "../services/activity-service-v2";
 
@@ -39,7 +40,9 @@ export function createActivityV2Router(options: { service: Service; authenticate
     }).then(value => response.status(creation && (value as { created?: unknown })?.created === true ? 201 : 200).json(value))
       .catch(error => {
         const safe = error instanceof BoundaryError ? error : new BoundaryError(503);
+        if(safe instanceof WriteResourceLimitError&&safe.retryAfterSeconds!==null)response.setHeader("Retry-After",String(safe.retryAfterSeconds));
         response.status(safe.status).json({ message: safe.message,
+        ...(safe instanceof WriteResourceLimitError ? {code:safe.code,retryAfterSeconds:safe.retryAfterSeconds} : {}),
         ...(safe instanceof ResourceLimitError ? { code: safe.code } : {}), ...(safe instanceof ActivityInputError ? { issues: safe.issues } : {}) });
       });
   };
