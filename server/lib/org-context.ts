@@ -8,8 +8,8 @@ export interface OwnershipDatabase {
   transaction<T>(operation: (tx: Transaction) => Promise<T>): Promise<T>;
 }
 export class BoundaryError extends Error {
-  constructor(public readonly status: 400 | 401 | 403 | 404 | 503) {
-    super(({400:"Invalid request",401:"Authentication required",403:"Access denied",404:"Not found",503:"Service unavailable"})[status]);
+  constructor(public readonly status: 400 | 401 | 403 | 404 | 429 | 503) {
+    super(({400:"Invalid request",401:"Authentication required",403:"Access denied",404:"Not found",429:"Write allowance exceeded",503:"Service unavailable"})[status]);
   }
 }
 export interface OrgContext {
