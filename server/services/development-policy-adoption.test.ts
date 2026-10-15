@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import express, { type Request } from "express";
-import { Pool } from "pg";
+import { Pool, type QueryConfig } from "pg";
 import { startFixture, verifyFixture } from "../lib/ownership-fixture";
 import { BoundaryError, type Transaction } from "../lib/org-context";
 import { OWNER_WRITE_BUDGET_ADMISSION_UPDATE,OWNER_WRITE_BUDGET_OBSERVATION_UPDATE } from "../lib/write-resource-budget";
@@ -13,6 +13,15 @@ vi.mock("../replit_integrations/auth", () => { throw Error("FORBIDDEN ambient au
 import { runPolicyAdoption } from "../../script/run-policy-adoption";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+function sqlForTrace(input: unknown): string {
+  const text=typeof input==="string"?input:
+    input!==null&&typeof input==="object"?(input as {text?:unknown}).text:undefined;
+  // Native pinned reads use QueryConfig (including query_timeout), while the
+  // maintenance adapter uses strings. Trace every actual query; refuse unknown
+  // shapes instead of dropping them and weakening the no-footprint assertion.
+  if(typeof text!=="string"||text.length===0)throw Error("SQL trace requires a nonempty query text");
+  return text;
+}
 const origin = "https://owned-synthetic.replit.dev";
 const t = Date.parse("2026-01-01T00:00:00.000Z");
 const env = () => ({ SOMR_POLICY_ADOPTION: "enabled", NODE_ENV: "development", SOMR_POLICY_ADOPTION_ORIGIN: origin,
@@ -135,9 +144,12 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
     return JSON.stringify(rows);
   }
   it("performs the reviewed seed/import then clean collection reconciliation, preserving all original records and idempotence", async () => {
-    const sent:string[]=[];
+    const sent:string[]=[],queryShapes=new Set<string>();
     const recordedPool={connect:async()=>{const client=await pool.connect();return{
-      query:(sql:string,values?:unknown[])=>{sent.push(sql);return client.query(sql,values);},
+      query:(input:string|QueryConfig,values?:unknown[])=>{
+        sent.push(sqlForTrace(input));queryShapes.add(typeof input==="string"?"string":"config");
+        return client.query(input,values);
+      },
       release:(destroy?:boolean)=>client.release(destroy),
     };}};
     const before = await legacy(), services = await prepareAdoptionServices(recordedPool as any, config);
@@ -162,6 +174,7 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
     expect((await f.client.query("SELECT to_jsonb(a) raw FROM audit_events a ORDER BY audit_event_id")).rows).toEqual(audits);
     expect(sent.filter(sql=>sql===OWNER_WRITE_BUDGET_OBSERVATION_UPDATE)).toEqual([]);
     expect(sent.filter(sql=>sql.includes("AS used_bytes"))).toEqual([]);
+    expect([...queryShapes].sort()).toEqual(["config","string"]);
     const finalCounter=await counter();
     expect(Number(finalCounter[0].observed_bytes)).toBe(0);expect(finalCounter[0].observed_at).toBeNull();
     expect(await legacy()).toBe(before);
@@ -183,7 +196,9 @@ describe("checked-out adoption transaction and real synthetic seed/import/reconc
   it("allows only the exact reviewed owner-counter statements and refuses altered SQL or invalid values before transmission",async()=>{
     const sent:string[]=[];
     const wrapped={connect:async()=>{const client=await pool.connect();return{
-      query:(sql:string,values?:unknown[])=>{sent.push(sql);return client.query(sql,values);},
+      query:(input:string|QueryConfig,values?:unknown[])=>{
+        sent.push(sqlForTrace(input));return client.query(input,values);
+      },
       release:(destroy?:boolean)=>client.release(destroy),
     };}};
     const db=createAdoptionDatabase(wrapped as any,config.binding!);
