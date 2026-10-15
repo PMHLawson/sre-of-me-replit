@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { startFixture, verifyFixture } from "./lib/ownership-fixture";
 import { createAuthenticatedBootstrapUnit } from "./lib/authenticated-bootstrap-unit";
 import { createLegacyDeviationMutations } from "./services/legacy-deviation-mutations";
-import { createAuditService } from "./lib/audit-service";
+import { captureLegacyDeviationChange } from "./lib/legacy-deviation-audit";
 import { withOwnerWriteBudget } from "./lib/write-resource-budget";
 
 const auth = vi.hoisted(() => ({ actor: null as string | null }));
@@ -192,7 +192,7 @@ it("a caught callback failure cannot commit a partial event or its business chan
   await expect(units.run(a.req,unit=>withOwnerWriteBudget(unit.tx,a.actor,async ({admitMutation})=>{
     const context = await unit.resolveContext(); await admitMutation();
     try {
-      await createAuditService(unit.tx,unit.db,context).captureLegacyDeviation(saved.id,"update","Synthetic callback failure",async ()=>{
+      await captureLegacyDeviationChange(unit.tx,unit.db,context,saved.id,"update","Synthetic callback failure",async ()=>{
         await unit.tx.query("UPDATE deviations SET exclude_from_composite=false WHERE user_id=$1 AND id=$2",[a.actor,saved.id]);
         throw Error("Synthetic application failure after write");
       });
@@ -265,8 +265,37 @@ it("actual HTTP routes enforce explanations and use the authenticated actor, not
   response = await call("/api/deviations","POST",payload); expect(response.status).toBe(401);
 });
 
+it("historical shortening independently preserves the UTF16 and UTF8 limits, including ambiguous supplementary characters",async () => {
+  const a = await owner();
+  const cases = [
+    {old:"🙂".repeat(300),next:"a".repeat(601),accept:false},
+    {old:"a".repeat(600),next:"\u0800".repeat(599),accept:false},
+    {old:"🙂".repeat(300),next:"🙃".repeat(300),accept:false},
+    {old:"🙂".repeat(300),next:"a".repeat(600),accept:true},
+    {old:"🙂a".repeat(300),next:"\u0800¢".repeat(300),accept:true},
+  ];
+  let accepted = 0;
+  for (const item of cases) {
+    const id = randomUUID();
+    await f.client.query("INSERT INTO deviations(id,user_id,domain,reason,start_at) VALUES($1,$2,'meditation',$3,$4)",[id,a.actor,item.old,payload.startAt]);
+    const before = await row(id), beforeAudit = await events(a.actor);
+    const change = service.edit(a.req,id,{reason:item.next,changeReason:"Synthetic independent text-bound comparison"});
+    if (!item.accept) {
+      await expect(change).rejects.toMatchObject({status:400});
+      expect(await row(id)).toEqual(before); expect(await events(a.actor)).toEqual(beforeAudit);
+    } else {
+      await change; accepted++;
+      const audit = (await events(a.actor)).at(-1);
+      expect(audit.before.reason).toBe(item.old); expect(audit.after.reason).toBe(item.next);
+      expect((await row(id)).reason).toBe(item.next);
+    }
+    expect(await used(a.actor)).toBe(accepted);
+  }
+});
+
 it("preserves oversized historical reasons inside SQL snapshots without transferring the old text through service results",async () => {
   const a = await owner(), id = randomUUID(), old = "Synthetic exact old text🙂".repeat(400000);
+  expect(Buffer.byteLength(old)).toBeGreaterThan(8*1024*1024);
   await f.client.query("INSERT INTO deviations(id,user_id,domain,reason,start_at) VALUES($1,$2,'meditation',$3,$4)",[id,a.actor,old,payload.startAt]);
   let largest = 0;
   const tracked = { connect: async () => {
@@ -280,11 +309,15 @@ it("preserves oversized historical reasons inside SQL snapshots without transfer
   }};
   const bounded = createLegacyDeviationMutations(createAuthenticatedBootstrapUnit(tracked));
   expect((await bounded.edit(a.req,id,{reason:old}))?.id).toBe(id); expect(await used(a.actor)).toBe(0);
+  await bounded.edit(a.req,id,{excludeFromComposite:false,changeReason:"Synthetic huge reason retained"});
   await bounded.edit(a.req,id,{reason:"Shortened synthetic history",changeReason:"Synthetic deliberate shortening"});
   expect(largest).toBeLessThan(4096);
-  const proof = (await f.client.query("SELECT \"before\"->>'reason'=$2 AS exact_before,\"after\"->>'reason'=$3 AS exact_after FROM audit_events WHERE actor_user_id=$1 AND entity_type='legacy_deviation'",
+  const proof = (await f.client.query("SELECT reason,\"before\"->>'reason'=$2 AS exact_before,\"after\"->>'reason'=$2 AS exact_retained_after,\"after\"->>'reason'=$3 AS exact_shortened_after FROM audit_events WHERE actor_user_id=$1 AND entity_type='legacy_deviation' ORDER BY occurred_at,audit_event_id",
     [a.actor,old,"Shortened synthetic history"])).rows;
-  expect(proof).toEqual([{exact_before:true,exact_after:true}]);
-  expect(await used(a.actor)).toBe(1);
+  expect(proof).toEqual([
+    {reason:"Synthetic huge reason retained",exact_before:true,exact_retained_after:true,exact_shortened_after:false},
+    {reason:"Synthetic deliberate shortening",exact_before:true,exact_retained_after:false,exact_shortened_after:true},
+  ]);
+  expect(await used(a.actor)).toBe(2);
 },30000);
 

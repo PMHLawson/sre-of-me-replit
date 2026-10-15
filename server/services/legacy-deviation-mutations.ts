@@ -3,7 +3,7 @@ import { z } from "zod";
 import { insertDeviationSchema, updateDeviationSchema, deviationLifecycleSchema, deviationChangeReasonSchema,
   type Deviation } from "../../shared/schema";
 import { authenticatedBootstrapActor, type BootstrapUnit, type createAuthenticatedBootstrapUnit } from "../lib/authenticated-bootstrap-unit";
-import { createAuditService } from "../lib/audit-service";
+import { captureLegacyDeviationChange } from "../lib/legacy-deviation-audit";
 import { BoundaryError, type Transaction } from "../lib/org-context";
 import { withOwnerWriteBudget } from "../lib/write-resource-budget";
 import { readComplete } from "../lib/transaction-read-budget";
@@ -25,11 +25,25 @@ async function selected(tx: Transaction, actor: string, id: string, condition = 
   input: {reason?: string; startAt?: string; endAt?: string|null} = {}) {
   const values: unknown[] = [actor,id], comparisons: string[] = [], extraFields: string[] = [];
   if (input.reason !== undefined) {
-    const at = values.length+1; values.push(input.reason,input.reason.length,new TextEncoder().encode(input.reason).byteLength);
+    const at = values.length+1; values.push(input.reason);
+    let mayShorten = "false";
+    if (!insertDeviationSchema.shape.reason.safeParse(input.reason).success) {
+      const units = values.length+1, bytes = units+1;
+      values.push(input.reason.length,new TextEncoder().encode(input.reason).byteLength);
+      const oldUnits = "(char_length(d.reason)+char_length(regexp_replace(d.reason,'[^𐀀-􏿿]+','','g')))";
+      // Exact retries need no Unicode recount. A new bounded reason needs no
+      // grandfathering check at all. For an overlong replacement, cheap byte
+      // and codepoint bounds prove obvious shortening before the exact UTF16
+      // fallback. Group BMP runs rather than replacing one match per character.
+      mayShorten = "CASE WHEN d.reason IS NOT DISTINCT FROM $"+at+"::text THEN false " +
+        "WHEN $"+bytes+"::int > octet_length(d.reason) THEN false " +
+        "WHEN $"+units+"::int < char_length(d.reason) THEN true " +
+        "WHEN $"+units+"::int <= char_length(d.reason) AND $"+bytes+"::int < octet_length(d.reason) THEN true " +
+        "ELSE CASE WHEN $"+bytes+"::int < octet_length(d.reason) THEN $"+units+"::int <= "+oldUnits+
+        " ELSE $"+units+"::int < "+oldUnits+" END END";
+    }
     comparisons.push('d.reason IS NOT DISTINCT FROM $'+at+'::text AS "reasonSame"',
-      '($'+(at+1)+'::int <= char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
-      'AND $'+(at+2)+'::int <= octet_length(d.reason) AND ($'+(at+1)+'::int < char_length(d.reason)+char_length(regexp_replace(d.reason,\'[^𐀀-􏿿]\',\'\',\'g\')) ' +
-      'OR $'+(at+2)+'::int < octet_length(d.reason))) AS "reasonMayShorten"');
+      mayShorten+' AS "reasonMayShorten"');
     extraFields.push("reasonSame","reasonMayShorten");
   }
   // Compare in PostgreSQL under the owned row lock. JS Date milliseconds lose
@@ -66,7 +80,7 @@ export function createLegacyDeviationMutations(units: Units) {
       return units.run(request, unit => withOwnerWriteBudget(unit.tx,unit.actorUserId,async ({admitMutation}) => {
         await unit.tx.query("SELECT set_config('TimeZone','UTC',true)");
         const context = await ready(unit,admitMutation), id = randomUUID();
-        return createAuditService(unit.tx,unit.db,context).captureLegacyDeviation(id,"create",p.reason,async () => {
+        return captureLegacyDeviationChange(unit.tx,unit.db,context,id,"create",p.reason,async () => {
           const inserted = await unit.tx.query("INSERT INTO public.deviations(id,user_id,domain,reason,start_at,end_at,exclude_from_composite) " +
             "VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",
             [id,unit.actorUserId,p.domain,p.reason,p.startAt,p.endAt??null,p.excludeFromComposite??true]);
@@ -94,7 +108,7 @@ export function createLegacyDeviationMutations(units: Units) {
         const names = Object.keys(changed);
         if (!names.length) return summary(before); // no bootstrap, audit or charge
         const reason = parse(deviationChangeReasonSchema,p.changeReason), context = await ready(unit,admitMutation);
-        return createAuditService(unit.tx,unit.db,context).captureLegacyDeviation(id,"update",reason,async () => {
+        return captureLegacyDeviationChange(unit.tx,unit.db,context,id,"update",reason,async () => {
           const assignments = names.map((name,index) => name+"=$"+(index+3));
           const updated = await unit.tx.query("UPDATE public.deviations SET "+assignments.join(",")+
             " WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id",
@@ -113,7 +127,7 @@ export function createLegacyDeviationMutations(units: Units) {
         const before = await selected(unit.tx,unit.actorUserId,id,"d.deleted_at IS NULL AND d.ended_at IS NULL");
         if (!before) return undefined;
         const reason = parse(deviationChangeReasonSchema,p.changeReason), context = await ready(unit,admitMutation);
-        return createAuditService(unit.tx,unit.db,context).captureLegacyDeviation(id,"update",reason,async () => {
+        return captureLegacyDeviationChange(unit.tx,unit.db,context,id,"update",reason,async () => {
           const changed = await unit.tx.query("UPDATE public.deviations SET ended_at=clock_timestamp() " +
             "WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL AND ended_at IS NULL RETURNING id",[unit.actorUserId,id]);
           if (changed.rows.length !== 1 || changed.rows[0].id !== id) throw new BoundaryError(503);
@@ -130,7 +144,7 @@ export function createLegacyDeviationMutations(units: Units) {
         const before = await selected(unit.tx,unit.actorUserId,id);
         if (!before) return undefined;
         const reason = parse(deviationChangeReasonSchema,p.changeReason), context = await ready(unit,admitMutation);
-        return createAuditService(unit.tx,unit.db,context).captureLegacyDeviation(id,"delete",reason,async () => {
+        return captureLegacyDeviationChange(unit.tx,unit.db,context,id,"delete",reason,async () => {
           const changed = await unit.tx.query("UPDATE public.deviations SET deleted_at=clock_timestamp() " +
             "WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id",[unit.actorUserId,id]);
           if (changed.rows.length !== 1 || changed.rows[0].id !== id) throw new BoundaryError(503);
