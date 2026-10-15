@@ -156,6 +156,19 @@ describe("generic repositories complete their bounded evidence or fail without w
     await expect(stores["bounds-a"].personalPractice.list({})).rejects.toMatchObject({status:503});
   });
 
+  it("binds dynamic generic collection limits as native PostgreSQL parameters",async()=>{
+    const from=fixture.queries.length;
+    expect((await stores["bounds-a"].observations.list())).toEqual([]);
+    const all=fixture.queries.slice(from).find(q=>q.sql.includes("SELECT * FROM public.observations"))!;
+    expect(all.sql).toContain("LIMIT $3");
+    expect(all.parameters).toEqual([configs["bounds-a"].organizationId,configs["bounds-a"].ownerUserId,MAX_READ_ROWS+1]);
+    const scopedFrom=fixture.queries.length;
+    expect((await stores["bounds-a"].policies.list(configs["bounds-a"].domainId))).toHaveLength(1);
+    const scoped=fixture.queries.slice(scopedFrom).find(q=>q.sql.includes("SELECT * FROM public.policy_versions"))!;
+    expect(scoped.sql).toContain("domain_id=$3");expect(scoped.sql).toContain("LIMIT $4");
+    expect(scoped.parameters.at(-1)).toBe(MAX_READ_ROWS+1);
+  });
+
   it("bounds every generic owner list and actor audit list without deleting or truncating",async()=>{
     const c=configs["bounds-a"];
     await fixture.client.query(

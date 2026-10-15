@@ -115,7 +115,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   async function list(tx:Transaction,kind:Kind,extra="",args:unknown[]=[]) {
     const maximum=rowBudget(kind);
     return complete((await tx.query(`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
-      ORDER BY ${tables[kind].keys.join(",")} LIMIT ${args.length+3}`,[...scope,...args,maximum+1])).rows,maximum);
+      ORDER BY ${tables[kind].keys.join(",")} LIMIT $${args.length+3}`,[...scope,...args,maximum+1])).rows,maximum);
   }
   async function insert(tx:Transaction,kind:Kind,values:Record<string,unknown>,reason:string) {
     const row={org_id:scope[0],owner_user_id:scope[1],...values},columns=Object.keys(row);

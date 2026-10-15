@@ -106,6 +106,8 @@ describe("legacy write-through and provenance keep complete bounded evidence",()
     const before=await state(),report=await reconcileLegacyObservations(f.db,request());
     expect(report.clean).toBe(false);expect(report.counts.ownedSessions).toBe(MAX_READ_ROWS);
     expect(report.drift.missing).toBe(MAX_READ_ROWS-4);expect(await state()).toBe(before);
+    const nativeRead=f.queries.find(q=>q.sql.includes("FROM public.sessions t WHERE t.user_id=$1")&&q.sql.includes("ORDER BY t.domain,t.timestamp,t.id"))!;
+    expect(nativeRead.sql).toContain("LIMIT $2 FOR SHARE");expect(nativeRead.parameters).toEqual(["legacy-bound-a",MAX_READ_ROWS+1]);
     await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp) VALUES('one-over','legacy-bound-a','music',1,'2020-02-01')");
     await refused(()=>service.reconcile(request()));
     const count=await f.client.query("SELECT count(*)::integer n FROM sessions WHERE user_id='legacy-bound-a'");

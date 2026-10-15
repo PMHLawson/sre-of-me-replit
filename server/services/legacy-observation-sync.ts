@@ -45,7 +45,7 @@ function ticks(value: string): bigint {
 }
 const json = (v: unknown) => JSON.parse(JSON.stringify(v));
 async function rows(tx: Transaction, table: string, where: string, values: unknown[], order: string) {
-  return completeRead((await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT ${values.length+1} FOR SHARE`,
+  return completeRead((await tx.query(`SELECT t.*,to_jsonb(t) AS raw FROM public.${table} t WHERE ${where} ORDER BY ${order} LIMIT $${values.length+1} FOR SHARE`,
     [...values,MAX_READ_ROWS+1])).rows as Row[]);
 }
 type State = Awaited<ReturnType<typeof read>>;
