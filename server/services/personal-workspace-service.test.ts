@@ -146,8 +146,9 @@ describe("personal workspace provision/status: accepted PostgreSQL schema and ac
   it("lost COMMIT acknowledgement is uncertain, destroys its client and converges on owned status/retry without duplicate audits", async () => {
     const releases: boolean[] = [];
     const uncertain = createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({ connect: async () => {
-      const client = await pool.connect(); return { query: async (sql: string, values?: any[]) => {
-        const result = await client.query(sql, values); if (sql === "COMMIT") throw Error("private lost commit acknowledgement"); return result;
+      const client = await pool.connect(); return { query: async (sql: any, values?: any[]) => {
+        const text=typeof sql==="string"?sql:sql.text;
+        const result = await client.query(sql, values); if (text === "COMMIT") throw Error("private lost commit acknowledgement"); return result;
       }, release: (destroy: boolean) => { releases.push(destroy); client.release(destroy); } } as any;
     } }));
     await expect(uncertain.ensure(request("commit-owner"), {})).rejects.toMatchObject({ status: 503, message: "Service unavailable" });
@@ -210,8 +211,9 @@ describe("personal workspace provision/status: accepted PostgreSQL schema and ac
   it("a lost settings COMMIT acknowledgement is reconciled from own status and deliberate replay produces no second update or audit", async () => {
     const releases: boolean[] = [];
     const uncertain = createPersonalWorkspaceService(createAuthenticatedBootstrapUnit({ connect: async () => {
-      const client = await pool.connect(); return { query: async (sql: string, values?: any[]) => {
-        const result = await client.query(sql, values); if (sql === "COMMIT") throw Error("private lost settings acknowledgement"); return result;
+      const client = await pool.connect(); return { query: async (sql: any, values?: any[]) => {
+        const text=typeof sql==="string"?sql:sql.text;
+        const result = await client.query(sql, values); if (text === "COMMIT") throw Error("private lost settings acknowledgement"); return result;
       }, release: (destroy: boolean) => { releases.push(destroy); client.release(destroy); } } as any;
     } }));
     await expect(uncertain.updateSettings(request("settings-commit"), { timezone: "Asia/Tokyo" })).rejects.toMatchObject({ status: 503 });
