@@ -46,7 +46,7 @@ describe("pinned ownership unit: actual owned PostgreSQL", () => {
         return (await tx.query("SELECT pg_backend_pid() pid,txid_current() tx")).rows[0];
       });
       expect(nested).toEqual(before);
-      expect(Object.isFrozen(u)).toBe(true);
+      expect(Object.isFrozen(u)).toBe(true);expect(Object.isFrozen(u.tx)).toBe(true);
       return "committed";
     });
     expect(result).toBe("committed");expect(connects).toBe(1);
