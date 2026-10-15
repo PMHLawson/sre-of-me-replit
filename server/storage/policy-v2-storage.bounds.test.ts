@@ -15,7 +15,7 @@ describe("generic repositories complete their bounded evidence or fail without w
   type Store=ReturnType<typeof createPolicyV2Storage>;
   const stores:Record<string,Store>={},contexts:Record<string,OrgContext>={},configs:Record<string,DomainConfiguration>={};
   const request=(user="bounds-a")=>({isAuthenticated:()=>true,user:{claims:{sub:user}}});
-  const clock=()=>new Date("2026-01-01T00:00:00Z");
+  const clock=()=>new Date("2026-01-20T00:00:00Z");
   const next=(user="bounds-a")=>({...configs[user],policyVersionId:"next-"+user,revision:2,
     previousVersionId:configs[user].policyVersionId,effectiveFrom:"2026-02-01T00:00:00Z"});
   async function state(){
@@ -57,7 +57,8 @@ describe("generic repositories complete their bounded evidence or fail without w
       const config=configs[user]={...configurationFor(user,MEASUREMENTS[1],10),
         organizationId:context.orgId,ownerUserId:user};
       const store=stores[user]=createPolicyV2Storage(fixture.db,context,{clock});
-      await store.domains.createWithPolicy({domainId:config.domainId,slug:user,displayName:config.displayName},config,"Synthetic setup");
+      await createPolicyV2Storage(fixture.db,context,{clock:()=>new Date(config.effectiveFrom)})
+        .domains.createWithPolicy({domainId:config.domainId,slug:user,displayName:config.displayName},config,"Synthetic setup");
     }
   });
   afterAll(async()=>{try{if(pool)await pool.end();}finally{if(fixture)await fixture.cleanup();}},60000);
