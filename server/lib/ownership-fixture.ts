@@ -80,6 +80,10 @@ export async function startFixture(label:string) {
       stdoutBytes:Buffer.byteLength(result.stdout||""),stderrBytes:Buffer.byteLength(result.stderr||""),
       stdoutSha256:crypto.createHash("sha256").update(result.stdout||"").digest("hex"),stderrSha256:crypto.createHash("sha256").update(result.stderr||"").digest("hex")});
     assert.equal(result.status,0);
+    // Reviewed additive SOMR-468 DDL for this disposable database only.
+    // Runtime startup and the deployed migration journal remain unchanged.
+    verifyFixture(root);
+    await c.query(fs.readFileSync("script/sql/write-resource-budgets.sql","utf8"));
     const client=c;
     const db:OwnershipDatabase={transaction:async fn=>{
       verifyFixture(root);await client.query("BEGIN");

@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, describe, it, expect } from "vitest";
+import { beforeEach,beforeAll, afterAll, describe, it, expect } from "vitest";
 import { Pool } from "pg";
 import { startFixture, verifyFixture } from "../lib/ownership-fixture";
 import { createOrgContextResolver } from "../lib/org-context";
@@ -14,6 +14,10 @@ const now = () => new Date("2026-03-01T00:00:00Z");
 const tables = ["users", "sessions", "session_edits", "user_settings", "deviations", "http_sessions", "organizations", "organization_members",
   "domains", "policy_versions", "dimension_definitions", "source_bindings", "observations", "audit_events", "deviations_v2", "deviation_domains", "evaluation_results"];
 describe("owned typed manual practice through actual pinned PostgreSQL service", () => {
+
+// Each test exercises an independent scenario in this disposable synthetic database.
+// Dedicated write-resource suites prove the unchanged real30/min500/day quotas.
+beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_resource_budgets");});
   let f: Awaited<ReturnType<typeof startFixture>>, pool: Pool, service: ReturnType<typeof createActivityServiceV2>;
   const configs: Record<string, DomainConfiguration> = {};
   async function snapshot() {

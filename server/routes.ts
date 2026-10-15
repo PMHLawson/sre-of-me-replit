@@ -2,6 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, historyReads } from "./storage";
 import { ResourceLimitError } from "./lib/read-budget";
+import { WriteResourceLimitError } from "./lib/write-resource-budget";
+import { BoundaryError } from "./lib/org-context";
 import { HistoryInputError, HistoryNotFound, HistoryChanged, parseHistoryPage, historyDays } from "./lib/legacy-history";
 import { policyResponse, stateBundle } from "./lib/history-state";
 import { createLegacySessionAdapter, readLegacyWriteThroughConfig, type LegacySessionAdapter } from "./services/legacy-session-adapter";
@@ -114,7 +116,9 @@ export async function registerRoutes(
       const userId: string = req.user.claims.sub;
       const settings = await storage.getUserSettings(userId);
       res.json(settings);
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to fetch settings" });
     }
   });
@@ -129,7 +133,9 @@ export async function registerRoutes(
       const userId: string = req.user.claims.sub;
       const row = await storage.upsertUserSettings(userId, parsed.data);
       res.json(row);
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to update settings" });
     }
   });
@@ -161,6 +167,7 @@ export async function registerRoutes(
       });
       res.status(201).json(serializeSession(session));
     } catch (error) {
+      if (respondWriteError(error,res)) return;
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "create")) return;
       res.status(500).json({ message: "Failed to create session" });
@@ -244,7 +251,7 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: "Invalid session patch", errors: parsed.error.flatten() });
     }
-    if (parsed.data.isAnomaly && !parsed.data.anomalyNote?.trim()) {
+    if (parsed.data.isAnomaly && parsed.data.anomalyNote !== undefined && !parsed.data.anomalyNote?.trim()) {
       return res.status(400).json({ message: "Anomaly note is required when isAnomaly is true" });
     }
     try {
@@ -255,6 +262,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (respondWriteError(error,res)) return;
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "edit")) return;
       res.status(500).json({ message: "Failed to update session" });
@@ -271,6 +279,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (respondWriteError(error,res)) return;
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "softDelete")) return;
       res.status(500).json({ message: "Failed to delete session" });
@@ -287,6 +296,7 @@ export async function registerRoutes(
       if (!row) return res.status(404).json({ message: "Deleted session not found" });
       res.json(serializeSession(row));
     } catch (error) {
+      if (respondWriteError(error,res)) return;
       if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       if (sessionMutations.respondError(error, res, "restore")) return;
       res.status(500).json({ message: "Failed to restore session" });
@@ -324,7 +334,9 @@ export async function registerRoutes(
       const userId: string = req.user.claims.sub;
       const row = await storage.createDeviation({ ...parsed.data, userId });
       res.status(201).json(serializeDeviation(row));
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to create deviation" });
     }
   });
@@ -340,7 +352,9 @@ export async function registerRoutes(
       const row = await storage.updateDeviation(userId, req.params.id, parsed.data);
       if (!row) return res.status(404).json({ message: "Deviation not found" });
       res.json(serializeDeviation(row));
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to update deviation" });
     }
   });
@@ -352,7 +366,9 @@ export async function registerRoutes(
       const row = await storage.endDeviation(userId, req.params.id);
       if (!row) return res.status(404).json({ message: "Deviation not found or already ended" });
       res.json(serializeDeviation(row));
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to end deviation" });
     }
   });
@@ -364,7 +380,9 @@ export async function registerRoutes(
       const row = await storage.softDeleteDeviation(userId, req.params.id);
       if (!row) return res.status(404).json({ message: "Deviation not found" });
       res.json(serializeDeviation(row));
-    } catch {
+    } catch (error) {
+      if (respondWriteError(error,res)) return;
+      if (error instanceof ResourceLimitError) return respondHistoryError(error,res);
       res.status(500).json({ message: "Failed to delete deviation" });
     }
   });
@@ -396,4 +414,13 @@ function respondHistoryError(error:unknown,res:{status:(n:number)=>any}){
   if(error instanceof HistoryNotFound)return res.status(404).json({message:"Record not found"});
   if(error instanceof HistoryChanged)return res.status(409).json({message:"Record changed. Reload its details before reading more text.",code:"HISTORY_CHANGED"});
   return res.status(503).json({message:"History is unavailable. Your records have not been changed."});
+}
+
+function respondWriteError(error:unknown,res:{status:(n:number)=>any;setHeader:(name:string,value:string)=>unknown}):boolean{
+  if(error instanceof WriteResourceLimitError){
+    if(error.retryAfterSeconds!==null)res.setHeader("Retry-After",String(error.retryAfterSeconds));
+    res.status(429).json({message:error.message,code:error.code,retryAfterSeconds:error.retryAfterSeconds});return true;
+  }
+  if(error instanceof BoundaryError&&error.status===400){res.status(400).json({message:error.message});return true;}
+  return false;
 }

@@ -35,11 +35,11 @@ describe("authenticated bootstrap transaction: actual disposable PostgreSQL", ()
     expect(invoked).toBe(false);
     const seen: string[] = [];
     const units = createAuthenticatedBootstrapUnit({ connect: async () => {
-      const client = await pool.connect(); return { query: (sql: string, values?: any[]) => { seen.push(sql); return client.query(sql, values); },
+      const client = await pool.connect(); return { query: (sql: any, values?: any[]) => { const text=typeof sql==="string"?sql:sql.text; seen.push(text); return client.query(sql, values); },
         release: (destroy: boolean) => client.release(destroy) } as any;
     } });
     await units.run(request("bootstrap-a"), async unit => { expect(unit.actorUserId).toBe("bootstrap-a"); seen.push("CALLBACK"); });
-    expect(seen.slice(0, 3)).toEqual(["BEGIN", "SELECT id FROM public.users WHERE id=$1 FOR UPDATE", "CALLBACK"]);
+    expect(seen.filter(sql=>!sql.startsWith("SELECT set_config")).slice(0, 3)).toEqual(["BEGIN", "SELECT id FROM public.users WHERE id=$1 FOR UPDATE", "CALLBACK"]);
   });
   it("mints a normal432 capability only after membership exists, on the same checked-out transaction", async () => {
     let escaped: BootstrapUnit | undefined;
@@ -89,13 +89,31 @@ describe("authenticated bootstrap transaction: actual disposable PostgreSQL", ()
       .rejects.toMatchObject({ status: 401 });
     expect((await fixture.client.query("SELECT id FROM bootstrap_probe ORDER BY id")).rows.map(row => row.id)).toEqual(["capability", "pending"]);
   });
+  it("a stalled actual PostgreSQL statement is cancelled and its earlier mutation is rolled back",async()=>{
+    const started=Date.now();
+    await expect(createAuthenticatedBootstrapUnit(pool).run(request("bootstrap-a"),async unit=>{
+      await unit.tx.query("INSERT INTO public.bootstrap_probe VALUES ('timeout-before',1)");
+      await unit.tx.query("SELECT pg_sleep(3)");
+    })).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+    expect(Date.now()-started).toBeLessThan(7000);
+    expect((await fixture.client.query("SELECT count(*)::int n FROM bootstrap_probe WHERE id='timeout-before'")).rows[0].n).toBe(0);
+  },10000);
+  it("an intentionally unawaited transaction escape is observed, refuses commit and leaves no prior row",async()=>{
+    await expect(createAuthenticatedBootstrapUnit(pool).run(request("bootstrap-a"),async unit=>{
+      await unit.tx.query("INSERT INTO public.bootstrap_probe VALUES ('unawaited-escape',1)");
+      void unit.tx.query("COMMIT");
+    })).rejects.toMatchObject({status:503});
+    expect((await fixture.client.query("SELECT count(*)::int n FROM bootstrap_probe WHERE id='unawaited-escape'")).rows[0].n).toBe(0);
+  });
+
 });
 
 describe("bootstrap unit transport cleanup, injected non-database failure only", () => {
   it("destroys uncertain BEGIN/COMMIT and failed rollback clients exactly once", async () => {
     for (const failure of ["BEGIN", "COMMIT", "ROLLBACK", "ABORTED_COMMIT"]) {
       const releases: boolean[] = [], calls: string[] = [];
-      const client: any = { query: async (sql: string) => {
+      const client: any = { query: async (config: any) => {
+        const sql=typeof config==="string"?config:config.text;
         calls.push(sql); if (sql === failure) throw Error("private transport");
         if (sql.startsWith("SELECT id FROM")) return { rows: [{ id: "synthetic" }], rowCount: 1 };
         return { rows: [], rowCount: 0, command: sql === "COMMIT" && failure === "ABORTED_COMMIT" ? "ROLLBACK" : sql };
@@ -107,4 +125,21 @@ describe("bootstrap unit transport cleanup, injected non-database failure only",
       expect(calls.filter(sql => sql === "COMMIT").length).toBe(["COMMIT", "ABORTED_COMMIT"].includes(failure) ? 1 : 0);
     }
   });
+  it("uses finite native response timeouts for control and data, destroys uncertain sockets, and sanitizes private details",async()=>{
+    for(const target of ["BEGIN","SELECT id FROM public.users","COMMIT"]){
+      const configs:Array<{text:string;query_timeout:number}>[]=[],releases:boolean[]=[];
+      const client:any={query:async(config:any)=>{
+        expect(typeof config).toBe("object");
+        expect(config.query_timeout).toBeGreaterThan(0);expect(config.query_timeout).toBeLessThanOrEqual(2500);
+        configs.push(config);
+        if(config.text.startsWith(target))throw Error("Query read timeout");
+        if(config.text.startsWith("SELECT id FROM"))return{rows:[{id:"transport-owner"}],command:"SELECT"};
+        return{rows:[],command:config.text};
+      },release:(destroy:boolean)=>releases.push(destroy)};
+      await expect(createAuthenticatedBootstrapUnit({connect:async()=>client}).run(request("transport-owner"),async()=>1))
+        .rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
+      expect(releases).toEqual([true]);expect(configs.some(c=>c.text==="ROLLBACK")).toBe(false);
+    }
+  });
+
 });

@@ -32,7 +32,7 @@ describe("actual explanation validators: presence, content and original length",
       expect(Object.hasOwn(payload, "reason")).toBe(input.present);
       const result = validator.schema.safeParse(payload);
       const valid = input.id === "omitted" || input.id === "undefined"
-        ? validator.optional : ["meaningful", "padded", "500"].includes(input.id);
+        ? validator.optional : ["meaningful", "padded", "500"].includes(input.id) || (validator.optional && input.id==="501");
       expect(result.success).toBe(valid);
       if (result.success) {
         // Validation must never normalize meaningful input or materialize omission.
@@ -47,8 +47,10 @@ describe("actual explanation validators: presence, content and original length",
       const result = validator.schema.parse({ ...validator.base, reason });
       expect(result.reason).toBe(reason);
     });
-    it(`${validator.id}/original-501-limit-not-trimmed-away`, () => {
-      expect(validator.schema.safeParse({ ...validator.base, reason: ` ${"x".repeat(499)} ` }).success).toBe(false);
+    it(`${validator.id}/original-501-limit-is-strict-on-new-text-or-deferred-to-owned-row-equality`, () => {
+      expect(validator.schema.safeParse({ ...validator.base, reason: ` ${"x".repeat(499)} ` }).success).toBe(validator.optional);
+      // Only deviation PATCH defers length: its owned storage transaction
+      // admits exact unchanged or strictly shortened historical text only.
     });
   }
 });

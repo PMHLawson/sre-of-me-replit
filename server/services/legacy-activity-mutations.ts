@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { z } from "zod";
-import { domainEnum, updateSessionSchema } from "../../shared/schema";
+import { domainEnum,updateSessionSchema,activityTextSchema,activityTextChangeWithinLimit } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase } from "../lib/org-context";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS } from "../lib/read-budget";
 import { withTransactionReadBudget, readComplete } from "../lib/transaction-read-budget";
 import { createAuditService } from "../lib/audit-service";
+import { withOwnerWriteBudget } from "../lib/write-resource-budget";
 import { verifyLegacyImportProvenance } from "./legacy-observation-sync";
 import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
 
@@ -14,14 +15,14 @@ type Request = Parameters<ReturnType<typeof createPinnedOwnershipUnit>["run"]>[0
 type Row = Record<string, any>;
 type State = { legacy: Row; canonical: Row };
 type MappingEvidence={domain:Row;configurations:import("../../shared/domain-config").DomainConfiguration[]};
-type MutationUnit=OwnershipUnit & {readonly mappingEvidence:Map<string,Promise<MappingEvidence>>};
+type MutationUnit=OwnershipUnit & {readonly mappingEvidence:Map<string,Promise<MappingEvidence>>;readonly admitMutation:()=>Promise<void>};
 const readColumns={"domain":["domain_id","org_id","owner_user_id","slug","display_name","deactivated_at","tombstoned_at"],"policy":["policy_version_id","org_id","owner_user_id","domain_id","revision","effective_from","previous_version_id","configuration","evaluation_policy","raw"],"dimension":["org_id","owner_user_id","domain_id","policy_version_id","measurement_id","definition"],"binding":["binding_id","org_id","owner_user_id","domain_id","source_kind","external_id","metadata"]} as const;
 const version = "legacy-activity-mutation-v1";
 const entity = "legacy_session_mutation";
 const id = z.string().min(1).max(200).refine(x => x.trim() === x && !/[\u0000-\u001f\u007f]/.test(x) && x !== "__proto__");
 const createSchema = z.object({ domain: z.enum(domainEnum), durationMinutes: z.number().int().positive(),
-  timestamp: z.string().datetime({offset:true}), notes: z.string().optional(),
-  isAnomaly: z.boolean().optional(), anomalyNote: z.string().nullable().optional() }).strict();
+  timestamp: z.string().datetime({offset:true}), notes: activityTextSchema.optional(),
+  isAnomaly: z.boolean().optional(), anomalyNote: activityTextSchema.nullable().optional() }).strict();
 const editSchema = updateSessionSchema.strict();
 function parse<S extends z.ZodTypeAny>(schema:S,input:unknown):z.infer<S> {
   const r=schema.safeParse(input);if(!r.success)throw new BoundaryError(400);return r.data;
@@ -152,15 +153,23 @@ async function get(u:MutationUnit,key:string):Promise<State> {
 }
 async function writeCanonical(u:MutationUnit,legacy:Row,creating:boolean){
   const row=await mapping(u,legacy),columns=Object.keys(row),values=Object.values(row);
+  // Compare the complete canonical row inside PostgreSQL. Its historical note
+  // is already validated by the admitted provenance read; never RETURN it again.
+  const exact="to_jsonb(observations)=$"+(values.length+1)+"::jsonb AS exact",parameters=[...values,row];
   const result=creating?await u.tx.query(`INSERT INTO public.observations (${columns.join(",")})
-    VALUES (${columns.map((_,i)=>`$${i+1}`).join(",")}) RETURNING to_jsonb(observations) raw`,values):
-    await u.tx.query(`UPDATE public.observations SET ${columns.filter(k=>!["observation_id","org_id","owner_user_id"].includes(k)).map(k=>`${k}=$${columns.indexOf(k)+1}`).join(",")}
-    WHERE observation_id=$1 AND org_id=$2 AND owner_user_id=$3 RETURNING to_jsonb(observations) raw`,values);
-  requireValid(result.rows.length===1&&equal(result.rows[0].raw,row));return row;
+    VALUES (${columns.map((_,i)=>"$"+(i+1)).join(",")}) RETURNING ${exact}`,parameters):
+    await u.tx.query(`UPDATE public.observations SET ${columns.filter(k=>!["observation_id","org_id","owner_user_id"].includes(k)).map(k=>k+"=$"+(columns.indexOf(k)+1)).join(",")}
+    WHERE observation_id=$1 AND org_id=$2 AND owner_user_id=$3 RETURNING ${exact}`,parameters);
+  requireValid(result.rows.length===1&&result.rows[0].exact===true);return row;
 }
 async function append(u:MutationUnit,operation:string,sequence:number,reason:string,before:State|null,after:State,edit?:Row){
   await createAuditService(u.tx,u.db,u.context).append(entity,[after.legacy.id],operation==="create"?"create":"update",reason,before,
     {version,operation,sequence,state:after,...(edit?{legacyEdit:edit}:{})});
+}
+function mutationSummary(row:Row):Row {
+  return {...row,notes:null,anomaly_note:null,hasNotes:row.notes!==null,hasAnomalyNote:row.anomaly_note!==null,
+    notesBytes:Buffer.byteLength(row.notes??"","utf8"),anomalyNoteBytes:Buffer.byteLength(row.anomaly_note??"","utf8"),
+    notesAvailability:row.notes===null?"absent":"not_loaded",anomalyNoteAvailability:row.anomaly_note===null?"absent":"not_loaded"};
 }
 /** Private mutation service only. No routes, ambient connection, seed/import, purge or startup hooks. */
 export function createLegacyActivityMutations(unit:ReturnType<typeof createPinnedOwnershipUnit>){
@@ -173,21 +182,25 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
       const context=await createOrgContextResolver(db)(request);
       if(context.orgId!==original.context.orgId||context.actorUserId!==original.context.actorUserId||
         context.role!==original.context.role||context.rolloutMode!==original.context.rolloutMode)throw new BoundaryError(403);
-      const u:MutationUnit={tx,db,context,mappingEvidence:new Map()};
       await revalidate(tx,db,context);
-      // Transaction-local canonical timestamp serialization, preserving microseconds.
-      await tx.query("SELECT set_config('TimeZone','UTC',true)");
-      return operation(u);
+      return withOwnerWriteBudget(tx,context.actorUserId,async({admitMutation})=>{
+        const u:MutationUnit={tx,db,context,mappingEvidence:new Map(),admitMutation};
+        // Transaction-local canonical timestamp serialization, preserving microseconds.
+        await tx.query("SELECT set_config('TimeZone','UTC',true)");
+        return operation(u);
+      });
     });
   });
   const transition=(request:Request,input:unknown,restore:boolean)=>run(request,async u=>{
     const key=parse(id,input),before=await get(u,key),sequence=await lineage(u,before,true);
     if(restore?before.legacy.deleted_at===null:before.legacy.deleted_at!==null)throw new BoundaryError(404);
+    await u.admitMutation();
     const r=await u.tx.query(`UPDATE public.sessions SET deleted_at=${restore?"NULL":"clock_timestamp()"}
-      WHERE id=$1 AND user_id=$2 RETURNING to_jsonb(sessions) raw`,[key,u.context.actorUserId]);
-    requireValid(r.rows.length===1);const after={legacy:r.rows[0].raw,canonical:await writeCanonical(u,r.rows[0].raw,false)};
+      WHERE id=$1 AND user_id=$2 RETURNING to_jsonb(deleted_at) AS at`,[key,u.context.actorUserId]);
+    requireValid(r.rows.length===1);const legacy={...before.legacy,deleted_at:r.rows[0].at};
+    const after={legacy,canonical:await writeCanonical(u,legacy,false)};
     await append(u,restore?"restore":"soft-delete",sequence+1,restore?"Restore recorded activity":"Soft-delete recorded activity",before,after);
-    await lineage(u,after);return after.legacy;
+    await lineage(u,after);return mutationSummary(after.legacy);
   });
   return Object.freeze({
     create:(request:Request,input:unknown)=>run(request,async u=>{
@@ -196,15 +209,21 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
       const prospective={id:randomUUID(),user_id:u.context.actorUserId,domain:p.domain,duration_minutes:p.durationMinutes,
         timestamp:p.timestamp,notes:p.notes??null,is_anomaly:anomaly,anomaly_note:anomaly?p.anomalyNote:null,deleted_at:null};
       await mapping(u,prospective); // Complete target metadata before the first INSERT.
+      await u.admitMutation();
       const r=await u.tx.query(`INSERT INTO public.sessions(id,user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(sessions) raw`,
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(timestamp) AS at`,
         [prospective.id,u.context.actorUserId,p.domain,p.durationMinutes,p.timestamp,p.notes??null,anomaly,anomaly?p.anomalyNote:null]);
-      requireValid(r.rows.length===1);const after={legacy:r.rows[0].raw,canonical:await writeCanonical(u,r.rows[0].raw,true)};
-      await append(u,"create",1,"Record activity",null,after);await lineage(u,after);return after.legacy;
+      requireValid(r.rows.length===1);const legacy={...prospective,timestamp:r.rows[0].at};
+      const after={legacy,canonical:await writeCanonical(u,legacy,true)};
+      await append(u,"create",1,"Record activity",null,after);await lineage(u,after);return mutationSummary(after.legacy);
     }),
     edit:(request:Request,input:unknown,patch:unknown)=>run(request,async u=>{
       const key=parse(id,input),p=parse(editSchema,patch),before=await get(u,key),sequence=await lineage(u,before,true);
       if(before.legacy.deleted_at!==null)throw new BoundaryError(404);
+      for(const [field,column] of [["notes","notes"],["anomalyNote","anomaly_note"]] as const){
+        const text=p[field];
+        if(typeof text==="string")requireValid(activityTextChangeWithinLimit(text,before.legacy[column]));
+      }
       const columns:Record<string,unknown>={},prior:Record<string,unknown>={};
       for(const [field,column]of [["domain","domain"],["durationMinutes","duration_minutes"],["timestamp","timestamp"],
         ["notes","notes"],["isAnomaly","is_anomaly"]]as const){
@@ -213,19 +232,22 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
         if(!same){columns[column]=value;prior[field]=before.legacy[column];}
       }
       const anomaly=p.isAnomaly??before.legacy.is_anomaly;
-      const note=anomaly?(p.anomalyNote??before.legacy.anomaly_note??null):null;
+      const note=p.isAnomaly===undefined&&p.anomalyNote===undefined?before.legacy.anomaly_note:anomaly?(p.anomalyNote??before.legacy.anomaly_note??null):null;
       if(p.isAnomaly===true)requireValid(typeof note==="string"&&!!note.trim());
       if(note!==before.legacy.anomaly_note){columns.anomaly_note=note;prior.anomalyNote=before.legacy.anomaly_note;}
       await mapping(u,{...before.legacy,...columns}); // Target policy overflow must precede any edit/audit insert.
+      await u.admitMutation();
+      const editId=randomUUID(),changedFields=JSON.stringify(prior);
       const e=await u.tx.query(`INSERT INTO public.session_edits(id,session_id,user_id,edited_at,reason,changed_fields)
-        VALUES($1,$2,$3,clock_timestamp(),$4,$5) RETURNING to_jsonb(session_edits) raw`,[randomUUID(),key,u.context.actorUserId,p.reason,JSON.stringify(prior)]);
+        VALUES($1,$2,$3,clock_timestamp(),$4,$5) RETURNING to_jsonb(edited_at) AS at`,[editId,key,u.context.actorUserId,p.reason,changedFields]);
       requireValid(e.rows.length===1);
+      const legacyEdit={id:editId,session_id:key,user_id:u.context.actorUserId,edited_at:e.rows[0].at,reason:p.reason,changed_fields:changedFields};
       let legacy=before.legacy;const names=Object.keys(columns);
-      if(names.length){const r=await u.tx.query(`UPDATE public.sessions SET ${names.map((k,i)=>`${k}=$${i+3}`).join(",")}
-        WHERE id=$1 AND user_id=$2 RETURNING to_jsonb(sessions) raw`,[key,u.context.actorUserId,...Object.values(columns)]);
-        requireValid(r.rows.length===1);legacy=r.rows[0].raw;}
+      if(names.length){const r=await u.tx.query(`UPDATE public.sessions SET ${names.map((k,i)=>k+"=$"+(i+3)).join(",")}
+        WHERE id=$1 AND user_id=$2 RETURNING to_jsonb(timestamp) AS at`,[key,u.context.actorUserId,...Object.values(columns)]);
+        requireValid(r.rows.length===1);legacy={...before.legacy,...columns,timestamp:r.rows[0].at};}
       const after={legacy,canonical:await writeCanonical(u,legacy,false)};
-      await append(u,"edit",sequence+1,p.reason,before,after,e.rows[0].raw);await lineage(u,after);return legacy;
+      await append(u,"edit",sequence+1,p.reason,before,after,legacyEdit);await lineage(u,after);return mutationSummary(legacy);
     }),
     softDelete:(request:Request,key:unknown)=>transition(request,key,false),
     restore:(request:Request,key:unknown)=>transition(request,key,true),

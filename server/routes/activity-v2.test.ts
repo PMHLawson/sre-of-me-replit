@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, it, expect, vi } from "vitest";
+import { beforeEach,beforeAll, afterAll, it, expect, vi } from "vitest";
 import express from "express";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { Pool } from "pg";
@@ -373,3 +373,7 @@ it("real registerRoutes activity mount authenticates and validates before its la
     expect(legacy.softDelete).not.toHaveBeenCalled(); expect(legacy.restore).not.toHaveBeenCalled();
   } finally { await new Promise<void>((resolve, reject) => mounted.close(error => error ? reject(error) : resolve())); }
 });
+
+// Each test exercises an independent scenario in this disposable synthetic database.
+// Dedicated write-resource suites prove the unchanged real30/min500/day quotas.
+beforeEach(async()=>{if(fixture)await fixture.client.query("DELETE FROM public.owner_write_resource_budgets");});

@@ -1,4 +1,7 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryConfig } from "pg";
+import { performance } from "node:perf_hooks";
+import { withTransactionReadBudget } from "./transaction-read-budget";
+import { ResourceLimitError, READ_TIMEOUT_MS } from "./read-budget";
 import { BoundaryError, createOrgContextResolver,
   type OwnershipDatabase, type OrgContext, type Transaction } from "./org-context";
 
@@ -37,6 +40,21 @@ export function createAuthenticatedBootstrapUnit(pool: Pick<Pool, "connect">) {
       let client: PoolClient | undefined;
       let began = false, committed = false, destroy = false, active = false, commitAttempted = false, failed = false;
       const pending: Promise<unknown>[] = [];
+      const deadline=performance.now()+READ_TIMEOUT_MS*6;
+      const nativeQuery=async(sql:string,values:unknown[]=[],cleanup=false)=>{
+        const remaining=cleanup?READ_TIMEOUT_MS:Math.floor(deadline-performance.now());
+        if(remaining<1)throw new ResourceLimitError();
+        const config:QueryConfig & {query_timeout:number}={text:sql,values,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
+        try{return await client!.query(config);}catch(error){
+          const code=String((error as {code?:unknown})?.code??"");
+          if((error as Error)?.message==="Query read timeout"){destroy=true;throw new ResourceLimitError();}
+          if(!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){
+            destroy=true;throw new BoundaryError(503);
+          }
+          if(["57014","55P03"].includes(code))throw new ResourceLimitError();
+          throw error;
+        }
+      };
       const track = <V>(promise: Promise<V>) => {
         pending.push(promise); void promise.catch(() => { failed = true; }); return promise;
       };
@@ -49,45 +67,53 @@ export function createAuthenticatedBootstrapUnit(pool: Pick<Pool, "connect">) {
           if (typeof sql !== "string" || !/^\s*(SELECT|INSERT|UPDATE|DELETE|LOCK)\b/i.test(sql) || sql.includes(";")) {
             failed = true; return track(refused());
           }
-          return track(Promise.resolve().then(() => client!.query(sql, values)));
+          return track(Promise.resolve().then(() => nativeQuery(sql, values)));
         },
       });
+      let currentTx=tx;
       const db: OwnershipDatabase = Object.freeze({
         transaction<V>(nested: (transaction: Transaction) => Promise<V>): Promise<V> {
           if (!active) return refused();
-          return track(Promise.resolve().then(() => nested(tx)));
-        },
-      });
-      const unit: BootstrapUnit = Object.freeze({ actorUserId: actor, db, tx,
-        resolveContext: () => {
-          if (!active) return refused();
-          return track(Promise.resolve().then(async () => {
-            const context = await createOrgContextResolver(db)(request);
-            if (context.actorUserId !== actor) throw new BoundaryError(401);
-            return context;
-          }));
+          return track(Promise.resolve().then(() => nested(currentTx)));
         },
       });
       try {
         client = await pool.connect();
-        await client.query("BEGIN"); began = true; active = true;
-        const persisted = await tx.query("SELECT id FROM public.users WHERE id=$1 FOR UPDATE", [actor]);
-        if (persisted.rows.length !== 1 || persisted.rows[0].id !== actor) throw new BoundaryError(403);
-        const result = await operation(unit);
-        active = false;
+        await nativeQuery("BEGIN"); began = true; active = true;
+        const result=await withTransactionReadBudget(tx,async guardedTx=>{
+          currentTx=guardedTx;
+          const persisted=await guardedTx.query("SELECT id FROM public.users WHERE id=$1 FOR UPDATE",[actor]);
+          if(persisted.rows.length!==1||persisted.rows[0].id!==actor)throw new BoundaryError(403);
+          const unit: BootstrapUnit = Object.freeze({ actorUserId: actor, db, tx:guardedTx,
+            resolveContext: () => {
+              if (!active) return refused();
+              return track(Promise.resolve().then(async () => {
+                const context = await createOrgContextResolver(db)(request);
+                if (context.actorUserId !== actor) throw new BoundaryError(401);
+                return context;
+              }));
+            },
+          });
+
+          const value=await operation(unit);
+          await Promise.allSettled(pending);
+          if(failed)throw new BoundaryError(503);
+          return value;
+        },deadline);
+        active=false;
         await Promise.allSettled(pending);
-        if (failed) throw new BoundaryError(503);
-        commitAttempted = true;
-        const commit = await client.query("COMMIT");
+        if(failed)throw new BoundaryError(503);
+        commitAttempted=true;
+        const commit=await nativeQuery("COMMIT");
         if (commit.command !== "COMMIT") throw new BoundaryError(503);
         committed = true; return result;
       } catch (error) {
         active = false; await Promise.allSettled(pending);
-        if (client && began && !committed) {
-          try { await client.query("ROLLBACK"); } catch { destroy = true; }
+        if (client && began && !committed && !destroy) {
+          try { await nativeQuery("ROLLBACK",[],true); } catch { destroy = true; }
         }
         if (client && ((!began) || (commitAttempted && !committed))) destroy = true;
-        throw destroy ? new BoundaryError(503) : sanitized(error);
+        throw error instanceof ResourceLimitError ? error : destroy ? new BoundaryError(503) : sanitized(error);
       } finally {
         active = false;
         if (client) { try { client.release(destroy); } catch { throw new BoundaryError(503); } }

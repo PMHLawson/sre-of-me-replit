@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, describe, it, expect } from "vitest";
+import { beforeEach,beforeAll, afterAll, describe, it, expect } from "vitest";
 import { Pool } from "pg";
 import { startFixture, verifyFixture } from "../lib/ownership-fixture";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
@@ -16,6 +16,10 @@ const payload = (slug: string, measurement = MEASUREMENTS[2], target: number | b
   slug, configuration: draftForTest(configurationFor(slug, measurement, target)), reason: "Synthetic configuration test",
 });
 describe("actual management service, pinned ownership and persistence", () => {
+
+// Each test exercises an independent scenario in this disposable synthetic database.
+// Dedicated write-resource suites prove the unchanged real30/min500/day quotas.
+beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_resource_budgets");});
   let f: Awaited<ReturnType<typeof startFixture>>, pool: Pool, service: ReturnType<typeof createDomainServiceV2>;
   const created: Record<string, Awaited<ReturnType<typeof service.create>>> = {};
   const tables = ["users", "sessions", "session_edits", "user_settings", "deviations", "http_sessions", "organizations", "organization_members",

@@ -32,17 +32,34 @@ export const sessions = pgTable("sessions", {
   anomalyNote: text("anomaly_note"),
 });
 
+/** Limits apply only to NEW/CHANGED activity text, never stored goal amounts or historical data. */
+export const ACTIVITY_TEXT_MAX_CHARACTERS=4000;
+export const ACTIVITY_TEXT_MAX_UTF8_BYTES=16*1024;
+export function activityTextWithinLimit(value:string):boolean {
+  // Match the existing activity boundary: JavaScript UTF-16 code units.
+  return value.length<=ACTIVITY_TEXT_MAX_CHARACTERS&&
+    new TextEncoder().encode(value).byteLength<=ACTIVITY_TEXT_MAX_UTF8_BYTES;
+}
+export function activityTextChangeWithinLimit(value:string,prior:string|null|undefined):boolean {
+  if(activityTextWithinLimit(value)||value===prior)return true;
+  if(typeof prior!=="string")return false;
+  const bytes=new TextEncoder().encode(value).byteLength,oldBytes=new TextEncoder().encode(prior).byteLength;
+  return value.length<=prior.length&&bytes<=oldBytes&&(value.length<prior.length||bytes<oldBytes);
+}
+export const activityTextSchema=z.string().refine(activityTextWithinLimit,
+  {message:"Activity text must contain at most4000 characters and16KiB of UTF-8 text"});
+
 export const insertSessionSchema = createInsertSchema(sessions)
   .omit({ id: true, deletedAt: true })
   .extend({
     domain: z.enum(domainEnum),
     durationMinutes: z.number().int().positive(),
     timestamp: z.string().datetime({ offset: true }),
-    notes: z.string().optional(),
+    notes: activityTextSchema.optional(),
     // Backward-compatible: existing POST callers omit these and the row
     // defaults to isAnomaly=false / anomalyNote=null.
     isAnomaly: z.boolean().optional(),
-    anomalyNote: z.string().nullable().optional(),
+    anomalyNote: activityTextSchema.nullable().optional(),
   });
 
 /** POST /api/sessions/anomaly-check request payload. */
@@ -81,6 +98,7 @@ export const updateSessionSchema = z.object({
   domain: z.enum(domainEnum).optional(),
   durationMinutes: z.number().int().positive().optional(),
   timestamp: z.string().datetime({ offset: true }).optional(),
+  // Exact unchanged historical text is checked against the owned locked row.
   notes: z.string().nullable().optional(),
   reason: explanationSchema,
   // C1.1 — Anomaly fields mirror insertSessionSchema so the edit path can
@@ -338,7 +356,9 @@ export const insertDeviationSchema = createInsertSchema(deviations)
   });
 
 export const updateDeviationSchema = z.object({
-  reason: explanationSchema.optional(),
+  // Length is checked against the owned locked row so exact historical text
+  // can be retained. New or changed reasons still use explanationSchema.
+  reason: z.string().min(1).refine(value=>value.trim().length>0).optional(),
   startAt: z.string().datetime({ offset: true }).optional(),
   endAt: z.string().datetime({ offset: true }).nullable().optional(),
   excludeFromComposite: z.boolean().optional(),
