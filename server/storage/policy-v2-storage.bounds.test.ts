@@ -298,8 +298,9 @@ describe("generic repositories complete their bounded evidence or fail without w
     const bootstrapReads:number[]=[];
     const connect=async()=>{
       const client=await pool.connect();
-      return {query:async(sql:string,values?:unknown[])=>{
-        const result=await client.query(sql,values);
+      return {query:async(input:any,values?:unknown[])=>{
+        const sql=typeof input==="string"?input:input.text;
+        const result=await client.query(input,typeof input==="string"?values:undefined);
         if(sql.includes("FROM public.organization_members WHERE user_id=$1"))bootstrapReads.push(result.rows.length);
         return result;
       },release:(destroy?:boolean)=>client.release(destroy)} as unknown as PoolClient;
