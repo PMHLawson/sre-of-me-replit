@@ -30,7 +30,7 @@ const deviationSummary=(r:any):DeviationSummary=>({...r,startAt:iso(r.startAt),e
   endedAt:nullableIso(r.endedAt),deletedAt:nullableIso(r.deletedAt),reason:"",reasonAvailability:r.hasReason?"not_loaded":"absent"});
 const calcSession=(r:any):Session=>({id:r.id,userId:r.userId,domain:r.domain,durationMinutes:r.durationMinutes,
   timestamp:new Date(r.timestamp),deletedAt:null,notes:null,isAnomaly:r.isAnomaly??false,anomalyNote:null});
-interface Cursor {v:1;scope:string;at:string;id:string}
+interface Cursor {v:2;scope:string;at:string;id:string}
 export interface PageInput {limit:number;cursor?:string;state?:"active"|"planned"}
 export function parseHistoryPage(query:Record<string,unknown>,deviation=false):PageInput {
   if(Object.keys(query).some(k=>!["limit","cursor",...(deviation?["state"]:[])].includes(k))||
@@ -43,19 +43,31 @@ export function parseHistoryPage(query:Record<string,unknown>,deviation=false):P
     ...(query.state!==undefined?{state:query.state as "active"|"planned"}:{})};
 }
 function cursorScope(userId:string,kind:string,state?:string){return createHash("sha256").update(JSON.stringify([userId,kind,state??null])).digest("hex");}
+/** Nested base64url avoids JSON-escape expansion of arbitrary owned legacy IDs. */
+const encodedCursor=(scope:string,at:string,id:string)=>{
+  if(!validId(id))throw new ResourceLimitError();
+  const value=Buffer.from(JSON.stringify({v:2,scope,at,id64:Buffer.from(id,"utf8").toString("base64url")})).toString("base64url");
+  if(value.length>4096)throw new ResourceLimitError();
+  return value;
+};
 function decodeCursor(value:string|undefined,scope:string):Cursor|undefined {
   if(value===undefined)return;
   try{
     if(!/^[A-Za-z0-9_-]+$/.test(value)||value.length>4096)throw 0;
-    const parsed=JSON.parse(Buffer.from(value,"base64url").toString("utf8"));
+    const bytes=Buffer.from(value,"base64url"),json=bytes.toString("utf8");
+    if(bytes.toString("base64url")!==value||!Buffer.from(json,"utf8").equals(bytes))throw 0;
+    const parsed=JSON.parse(json);
     // PostgreSQL exact timestamp text retains microseconds; NEVER derive a cursor from pg's Date.
-    if(!parsed||Object.keys(parsed).sort().join(",")!=="at,id,scope,v"||parsed.v!==1||parsed.scope!==scope||
-      !validId(parsed.id)||typeof parsed.at!=="string"||parsed.at.length>64||
+    if(!parsed||Object.keys(parsed).sort().join(",")!=="at,id64,scope,v"||parsed.v!==2||parsed.scope!==scope||
+      typeof parsed.id64!=="string"||!(/^[A-Za-z0-9_-]+$/).test(parsed.id64)||
+      typeof parsed.at!=="string"||parsed.at.length>64||
       !/^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d(?::?\d\d)?)$/.test(parsed.at))throw 0;
-    return parsed;
+    const idBytes=Buffer.from(parsed.id64,"base64url"),id=idBytes.toString("utf8");
+    if(idBytes.length>2048||idBytes.toString("base64url")!==parsed.id64||
+      !Buffer.from(id,"utf8").equals(idBytes)||!validId(id)||encodedCursor(scope,parsed.at,id)!==value)throw 0;
+    return {v:2,scope,at:parsed.at,id};
   }catch{throw new HistoryInputError();}
 }
-const encodedCursor=(scope:string,at:string,id:string)=>Buffer.from(JSON.stringify({v:1,scope,at,id})).toString("base64url");
 export function historyDays(query:Record<string,unknown>):number {
   if(Object.keys(query).some(k=>k!=="days")||query.days!==undefined&&
     (typeof query.days!=="string"||!/^\d{1,3}$/.test(query.days)))throw new HistoryInputError();

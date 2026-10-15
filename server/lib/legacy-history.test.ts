@@ -42,6 +42,43 @@ describe("real bounded legacy reads against a nonce-owned synthetic database",()
     await expect(reads.page("history-a","deleted",{limit:1,cursor:p.nextCursor!})).rejects.toBeInstanceOf(HistoryInputError);
     const next=await reads.page("history-a","sessions",{limit:1,cursor:p.nextCursor!});expect(next.items[0].id).toBe("second");
   });
+  it.each([
+    ["JSON control expansion", "\u0001".repeat(512)],
+    ["maximum ASCII bytes", "x".repeat(2048)],
+    ["maximum control bytes", String.fromCharCode(1).repeat(2048)],
+    ["maximum UTF8 bytes", "😀".repeat(512)],
+    ["maximum quoting bytes", String.fromCharCode(92).repeat(2048)],
+  ])("round-trips %s opaque IDs through microsecond keyset pages",async(_label,id)=>{
+    expect(Buffer.byteLength(id,"utf8")).toBeLessThanOrEqual(2048);
+    await insert(id,"2026-10-15T12:00:00.000002Z");
+    await insert("next-microsecond","2026-10-15T12:00:00.000001Z");
+    const first=await reads.page("history-a","sessions",{limit:1});
+    expect(first.items[0].id).toBe(id);expect(first.nextCursor).not.toBeNull();
+    expect(first.nextCursor!.length).toBeLessThanOrEqual(4096);
+    const payload=JSON.parse(Buffer.from(first.nextCursor!,"base64url").toString("utf8"));
+    expect(payload.v).toBe(2);expect(Buffer.from(payload.id64,"base64url").toString("utf8")).toBe(id);
+    expect(payload.at).toContain(".000002");
+    const next=await reads.page("history-a","sessions",{limit:1,cursor:first.nextCursor!});
+    expect(next.items.map(row=>row.id)).toEqual(["next-microsecond"]);expect(next.complete).toBe(true);
+    await expect(reads.page("history-b","sessions",{limit:1,cursor:first.nextCursor!})).rejects.toBeInstanceOf(HistoryInputError);
+    await expect(reads.page("history-a","deleted",{limit:1,cursor:first.nextCursor!})).rejects.toBeInstanceOf(HistoryInputError);
+  });
+  it("refuses noncanonical, invalid UTF8 and old-version cursors without normalizing IDs",async()=>{
+    await insert("opaque","2026-10-15T12:00:00.000002Z");
+    await insert("next","2026-10-15T12:00:00.000001Z");
+    const first=await reads.page("history-a","sessions",{limit:1}),token=first.nextCursor!;
+    const payload=JSON.parse(Buffer.from(token,"base64url").toString("utf8"));
+    const encode=(body:unknown)=>Buffer.from(JSON.stringify(body)).toString("base64url");
+    const invalid=[
+      token+"=",
+      encode({...payload,v:1}),
+      encode({...payload,id64:payload.id64+"="}),
+      encode({...payload,id64:Buffer.from([255]).toString("base64url")}),
+      Buffer.from(" "+JSON.stringify(payload)).toString("base64url"),
+    ];
+    for(const cursor of invalid)await expect(reads.page("history-a","sessions",{limit:1,cursor})).rejects.toBeInstanceOf(HistoryInputError);
+    expect((await reads.page("history-a","sessions",{limit:1,cursor:token})).items[0].id).toBe("next");
+  });
   it("keeps huge exact Unicode/whitespace out of lists and reconstructs it only by explicit chunks",async()=>{
     const text="  "+("😀漢字é\r\n\t ".repeat(2000))+"  ";
     await insert("unicode",now.toISOString(),text);
