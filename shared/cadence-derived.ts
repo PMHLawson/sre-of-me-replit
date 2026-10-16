@@ -7,7 +7,7 @@
  */
 import { DomainConfigurationSchema, validateObservationContext,
   type DomainConfiguration, type Observation, type QualificationPredicate } from "./domain-config";
-import { assembleWindow, instant, logicalDay, type Interval } from "./evaluator-window";
+import { assembleWindow, instant as millisecondInstant, logicalDay, type Interval } from "./evaluator-window";
 import { add, sub, mul, div, compare, decimal, rational, numericEvidence,
   type Fraction } from "./derived-exact";
 
@@ -65,6 +65,14 @@ export type CadenceResult = {
   episodeOpen: boolean; evidence: CadenceEvidence;
 } | { status: "unavailable"; reason: string; evidence: CadenceEvidence };
 
+// The shared civil-time assembler operates in exact integer milliseconds.
+// Preserve finer source timestamps elsewhere; never silently round them here.
+function instant(value:string):number {
+  if(typeof value!=="string")throw Error("invalid_instant");
+  const fraction=value.match(/T\d\d:\d\d:\d\d\.(\d+)/)?.[1];
+  if(fraction && /[1-9]/.test(fraction.slice(3)))throw Error("unsupported_precision");
+  return millisecondInstant(value);
+}
 const zero = () => rational(BigInt(0), BigInt(1));
 const positive = (f: Fraction) => compare(f, zero()) > 0;
 const nonnegative = (f: Fraction) => positive(f) ? f : zero();

@@ -230,6 +230,16 @@ describe("trusted effective episodes and hostile evidence",()=>{
     if(e.policy.qualification?.kind==="condition")e.policy.qualification.condition.basis={kind:"period",windowDays:7};
     expect(createCadenceDeriver([e]).evaluate(input(e,2)).status).toBe("unavailable");
   });
+  it("retains finer timestamp evidence and refuses instead of aliasing different boundaries",()=>{
+    const e=episode(),o=observation(e,"microsecond","2026-01-01T04:00:00.000001Z");
+    const i=input(e,7,[o]),before=structuredClone(i),r=createCadenceDeriver([e]).evaluate(i);
+    expect(r).toMatchObject({status:"unavailable",reason:"unsupported_precision"});
+    expect(r.evidence.rawObservations).toEqual([o]);expect(i).toEqual(before);
+    const badThrough=input(e,7);badThrough.history.coveredThrough="2026-01-08T04:00:00.000001Z";
+    expect(createCadenceDeriver([e]).evaluate(badThrough)).toMatchObject({status:"unavailable",reason:"unsupported_precision"});
+    const lossless=observation(e,"lossless","2026-01-01T04:00:00.000000Z");
+    expect(createCadenceDeriver([e]).evaluate(input(e,7,[lossless])).status).toBe("available");
+  });
   it("refuses excessive work as unavailable without retaining or deleting a shortened history",()=>{
     const e=episode(),far=input(e,MAX_CADENCE_HISTORY_DAYS+1);
     expect(createCadenceDeriver([e]).evaluate(far)).toMatchObject({status:"unavailable",reason:"history_resource_limit"});
