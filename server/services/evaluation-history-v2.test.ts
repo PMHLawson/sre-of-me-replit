@@ -246,4 +246,48 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     await expect(loader().load(now)).rejects.toMatchObject({status:503,code:"RESOURCE_LIMIT_EXCEEDED"});
     expect((await f.client.query("SELECT count(*)::int AS count FROM observations")).rows[0].count).toBe(2001);
   });
+
+  it.each(["missing","extra","changed"] as const)("refuses %s stored measurement definitions with raw evidence retained",async(kind)=>{
+    if(kind==="missing")await f.client.query("DELETE FROM dimension_definitions WHERE policy_version_id=$1 AND measurement_id=$2",
+      [config.policyVersionId,frequency.measurementId]);
+    if(kind==="extra")await f.client.query(`INSERT INTO dimension_definitions(org_id,owner_user_id,domain_id,
+      policy_version_id,measurement_id,definition) VALUES($1,$2,$3,$4,'extra-definition',$5)`,
+      [context.orgId,context.actorUserId,config.domainId,config.policyVersionId,{...frequency,measurementId:"extra-definition"}]);
+    if(kind==="changed")await f.client.query(`UPDATE dimension_definitions SET definition=jsonb_set(definition,
+      '{meaning}',to_jsonb('Corrupted stored definition'::text)) WHERE policy_version_id=$1 AND measurement_id=$2`,
+      [config.policyVersionId,frequency.measurementId]);
+    const result=await loader().load(now);
+    expect(result).toMatchObject({status:"unavailable",reason:"persisted_history_mismatch"});
+    expect(result.evidence.snapshot?.databaseEvidence?.validationErrors).toContain("persisted_dimension_mismatch");
+    expect(result.evidence.snapshot?.databaseEvidence?.dimensions).toHaveLength(kind==="missing"?1:kind==="extra"?3:2);
+    expect(result.evidence.snapshot?.configurations).toHaveLength(1);
+  });
+  it.each([false,true])("keeps a future policy pending without invalidating current assessment (registered=%s)",async(registerFuture)=>{
+    await add("current-event","2026-01-10T12:00:00Z");
+    const next=structuredClone(config);
+    Object.assign(next,{policyVersionId:"future-policy",revision:2,previousVersionId:config.policyVersionId,
+      effectiveFrom:"2026-01-20T00:00:00Z"});
+    next.targets.normal.conditions=next.targets.normal.conditions.map(c=>
+      c.measurementId===frequency.measurementId?conditionFor(frequency,3):c);
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.policies.append(next,"Synthetic future policy");
+    await add("future-policy-event","2026-01-20T12:00:00Z",10,next);
+    const current={...episode,effectiveEnd:next.effectiveFrom};
+    const future:CadenceEpisode={...episode,episodeId:"future-episode",policy:next,
+      origin:{...episode.origin,at:next.effectiveFrom}};
+    const registered=registerFuture?[current,future]:[current];
+    // Future activation evidence does not exist yet and is not fabricated.
+    const result=await loader(verifier([current]),registered).load(now);
+    expect(result.status).toBe("available");
+    expect(result.reason).toBeUndefined();
+    expect(result.segments.map(s=>s.status)).toEqual(["assessed","pending"]);
+    expect(result.segments[0].cadence.status).toBe("available");
+    expect(result.segments[0].history?.coveredThrough).toBe("2026-01-15T00:00:00.000Z");
+    expect(result.segments[1]).toMatchObject({status:"pending",policy:next,history:null,
+      cadence:{status:"unavailable",reason:"policy_not_effective"}});
+    expect(result.segments[1].episode?.episodeId??null).toBe(registerFuture?future.episodeId:null);
+    expect(result.evidence.dispositions.find(d=>d.observationId==="future-policy-event")).toMatchObject({
+      kind:"future",reason:"future_policy_not_assessed"});
+    expect(result.aggregate).toEqual({status:"unavailable",reason:"cross-version-aggregate-not-approved"});
+  });
 });

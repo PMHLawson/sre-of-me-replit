@@ -47,7 +47,8 @@ type Disposition = {
   reason?:string;
 };
 type Segment = {
-  episode:CadenceEpisode; policyInterval:{start:string;end:string|null};
+  status:"assessed"|"pending"; policy:DomainConfiguration;
+  episode:CadenceEpisode|null; policyInterval:{start:string;end:string|null};
   history:{sourceId:string;coveredFrom:string;coveredThrough:string;observations:Observation[];breaks:Interval[]}|null;
   cadence:ReturnType<ReturnType<typeof createCadenceDeriver>["evaluate"]>|{status:"unavailable";reason:string};
 };
@@ -81,12 +82,11 @@ function createHistoryAssembler(source:EvaluationHistorySource,
   if(!source||typeof source.load!=="function"||typeof source.verifyCoverage!=="function"||!validScope(scope))
     throw Error("invalid_history_source");
   const bound=structuredClone(scope),registered=structuredClone(episodes);
-  const derive=createCadenceDeriver(registered);
   return Object.freeze({async load(now:string):Promise<EvaluationHistoryAssembly> {
     const output:EvaluationHistoryAssembly={status:"unavailable",snapshotFingerprint:null,
       evidence:{snapshot:null,coverage:null,dispositions:[]},segments:[],
       aggregate:{status:"unavailable",reason:"scoring-recipe-not-supplied"},
-      completeness:{kind:"unverified",databaseIntegration:"not-installed"}};
+      completeness:{kind:"unverified",databaseIntegration:"scoped-read-loader"}};
     const fail=(reason:string)=>{output.status="unavailable";output.reason=reason;return output;};
     let snapshot:HistorySnapshot;
     try {
@@ -158,7 +158,8 @@ function createHistoryAssembler(source:EvaluationHistorySource,
       const interval=intervals.get(policy.policyVersionId)!;
       const group=registered.filter(e=>e.policy.policyVersionId===policy.policyVersionId)
         .sort((a,b)=>instant(a.origin.at)-instant(b.origin.at));
-      if(!group.length||instant(group[0].origin.at)!==instant(interval.start))invalid=true;
+      if(!group.length){if(instant(policy.effectiveFrom)<=instant(now))invalid=true;continue;}
+      if(instant(group[0].origin.at)!==instant(interval.start))invalid=true;
       for(let i=0;i<group.length;i++){
         const end=group[i+1]?.origin.at??interval.end;
         if((end===null)!==(group[i].effectiveEnd===null)||
@@ -185,6 +186,7 @@ function createHistoryAssembler(source:EvaluationHistorySource,
     if(receipt&&[receipt.completeFrom,receipt.completeThrough,...(receipt.origins??[]).map(o=>o.at)].some(unsupportedPrecision))
       return fail("unsupported_timestamp_precision");
     if(!receipt)return fail("history_coverage_unverified");
+    const proofEpisodes=registered.filter(e=>instant(e.origin.at)<=instant(now));
     try{
       if(!validId(receipt.receiptId)||receipt.snapshotId!==snapshot.snapshotId||
         receipt.snapshotFingerprint!==output.snapshotFingerprint||!same(receipt.scope,bound)||
@@ -192,16 +194,45 @@ function createHistoryAssembler(source:EvaluationHistorySource,
           corrections:snapshot.corrections.length,breaks:snapshot.breaks.length})||
         instant(receipt.completeThrough)<instant(now)||instant(receipt.completeThrough)>instant(snapshot.capturedAt)||
         instant(receipt.completeFrom)>Math.min(...registered.map(e=>instant(e.origin.at)))||
-        !Array.isArray(receipt.origins)||receipt.origins.length!==registered.length||
-        new Set(receipt.origins.map(o=>o.episodeId)).size!==registered.length)throw Error();
-      for(const episode of registered){
+        !Array.isArray(receipt.origins)||receipt.origins.length>registered.length||
+        new Set(receipt.origins.map(o=>o.episodeId)).size!==receipt.origins.length||
+        receipt.origins.some(o=>!registered.some(e=>e.episodeId===o.episodeId)))throw Error();
+      for(const episode of proofEpisodes){
         const origin=receipt.origins.find(o=>o.episodeId===episode.episodeId);
         if(!origin||!validId(origin.evidenceId)||!["verified-empty-domain-activation","verified-source-reconciliation"].includes(origin.kind)||
           origin.sourceId!==episode.origin.sourceId||instant(origin.at)!==instant(episode.origin.at))throw Error();
       }
     }catch{return fail("history_coverage_receipt_mismatch");}
     output.completeness.kind="verified-by-injected-server-source";
-    for(const episode of registered){
+    // Future policies remain visible pending evidence. They are not missed
+    // practice and are not assessed using today's policy/target.
+    const effective=registered.filter(e=>instant(e.origin.at)<=instant(now));
+    const derive=createCadenceDeriver(effective);
+    for(const policy of ordered.filter(p=>instant(p.effectiveFrom)>instant(now))){
+      const pending=registered.filter(e=>e.policy.policyVersionId===policy.policyVersionId);
+      for(const episode of pending.length?pending:[null]){
+        output.segments.push({status:"pending",policy:structuredClone(policy),episode:structuredClone(episode),
+          policyInterval:intervals.get(policy.policyVersionId)!,history:null,
+          cadence:{status:"unavailable",reason:"policy_not_effective"}});
+      }
+      for(const row of observations.filter(r=>r.observation.policyVersionId===policy.policyVersionId)){
+        const d=output.evidence.dispositions[row.index];
+        if(row.deletedAt===null){d.kind="future";d.reason="future_policy_not_assessed";}
+        const e=pending.find(e=>inside(instant(row.observation.observedAt),e.origin.at,e.effectiveEnd));
+        d.episodeId=e?.episodeId??null;
+      }
+    }
+    for(const episode of registered.filter(e=>instant(e.policy.effectiveFrom)<=instant(now)&&instant(e.origin.at)>instant(now))){
+      output.segments.push({status:"pending",policy:structuredClone(episode.policy),episode:structuredClone(episode),
+        policyInterval:intervals.get(episode.policy.policyVersionId)!,history:null,
+        cadence:{status:"unavailable",reason:"episode_not_effective"}});
+      for(const row of observations.filter(r=>r.observation.policyVersionId===episode.policy.policyVersionId&&
+        inside(instant(r.observation.observedAt),episode.origin.at,episode.effectiveEnd))){
+        const d=output.evidence.dispositions[row.index];d.episodeId=episode.episodeId;
+        if(row.deletedAt===null){d.kind="future";d.reason="future_episode_not_assessed";}
+      }
+    }
+    for(const episode of effective){
       const policyInterval=intervals.get(episode.policy.policyVersionId)!;
       let through:string;
       try{
@@ -222,11 +253,13 @@ function createHistoryAssembler(source:EvaluationHistorySource,
       const history={sourceId:episode.origin.sourceId,coveredFrom:episode.origin.at,coveredThrough:through,
         observations:selected,breaks:breaks.map(b=>structuredClone(b.interval))};
       const cadence=derive.evaluate({episodeId:episode.episodeId,now,history});
-      output.segments.push({episode:structuredClone(episode),policyInterval,history,cadence});
+      output.segments.push({status:"assessed",policy:structuredClone(episode.policy),episode:structuredClone(episode),policyInterval,history,cadence});
     }
+    output.segments.sort((a,b)=>instant(a.episode?.origin.at??a.policy.effectiveFrom)-instant(b.episode?.origin.at??b.policy.effectiveFrom));
     output.aggregate.reason=output.segments.length>1?"cross-version-aggregate-not-approved":"scoring-recipe-not-supplied";
-    output.status=output.segments.every(s=>s.cadence.status==="available")?"available":"unavailable";
-    if(output.status==="unavailable")output.reason="cadence_segment_unavailable";
+    const assessed=output.segments.filter(s=>s.status==="assessed");
+    output.status=assessed.length>0&&assessed.every(s=>s.cadence.status==="available")?"available":"unavailable";
+    if(output.status==="unavailable")output.reason=assessed.length?"cadence_segment_unavailable":"no_effective_episode";
     return output;
   }});
 }
@@ -239,7 +272,7 @@ export type BreakDisposition = { source:"v2"|"legacy"; id:string; fingerprint:st
 export type BreakResolution = { breaks:HistoryBreak[]; dispositions:BreakDisposition[]; evidenceId:string };
 export type DatabaseHistoryEvidence = {
   kind:"one-statement-owner-domain-snapshot-v1";
-  domain:unknown[]; policies:unknown[]; observations:unknown[]; corrections:unknown[];
+  domain:unknown[]; policies:unknown[]; dimensions:unknown[]; observations:unknown[]; corrections:unknown[];
   deviations:unknown[]; legacyDeviations:unknown[]; associations:unknown[]; bindings:unknown[];
   validationErrors:string[]; breakResolution:BreakResolution|null;
 };
@@ -278,6 +311,9 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
       'policies',(SELECT coalesce(jsonb_agg(to_jsonb(p)),'[]'::jsonb) FROM
         (SELECT *,effective_from=date_trunc('milliseconds',effective_from) AS __millisecond_time
          FROM public.policy_versions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY revision LIMIT $4) p),
+      'dimensions',(SELECT coalesce(jsonb_agg(to_jsonb(m)),'[]'::jsonb) FROM
+        (SELECT * FROM public.dimension_definitions WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3
+         ORDER BY policy_version_id,measurement_id LIMIT $4) m),
       'observations',(SELECT coalesce(jsonb_agg(to_jsonb(o)),'[]'::jsonb) FROM
         (SELECT *,observed_at=date_trunc('milliseconds',observed_at) AS __millisecond_time,
           (deleted_at IS NULL OR deleted_at=date_trunc('milliseconds',deleted_at)) AS __deleted_millisecond_time
@@ -304,7 +340,7 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
     if(rows.length!==1)throw new BoundaryError(503);
     const payload=rows[0].snapshot;
     if(!payload||typeof payload!=="object")throw new BoundaryError(503);
-    const names=["domain","policies","observations","corrections","deviations","legacyDeviations","associations","bindings"] as const;
+    const names=["domain","policies","dimensions","observations","corrections","deviations","legacyDeviations","associations","bindings"] as const;
     for(const name of names){
       if(!Array.isArray(payload[name]))throw new BoundaryError(503);
       if(payload[name].length>(name==="domain"?1:MAX_READ_ROWS))throw new ResourceLimitError();
@@ -325,6 +361,19 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
           row.revision!==c.data.revision||(row.previous_version_id??null)!==(c.data.previousVersionId??null)||
           instant(row.effective_from)!==instant(c.data.effectiveFrom))throw Error();
       }catch{errors.push("persisted_policy_mismatch");}
+    }
+    // Stored definitions are a second persisted representation. A complete
+    // configuration alone cannot conceal a missing, extra or corrupt definition.
+    const dimensions=payload.dimensions as any[];
+    const expected=payload.policies.flatMap((row:any)=>{
+      const c=DomainConfigurationSchema.safeParse(row.configuration);
+      return c.success?c.data.measurements.map(m=>({policy:c.data.policyVersionId,definition:m})):[];
+    });
+    if(dimensions.length!==expected.length||dimensions.some(row=>!scoped(row)))errors.push("persisted_dimension_mismatch");
+    for(const measurement of expected){
+      const matches=dimensions.filter(row=>row.policy_version_id===measurement.policy&&
+        row.measurement_id===measurement.definition.measurementId);
+      if(matches.length!==1||!same(matches[0].definition,measurement.definition))errors.push("persisted_dimension_mismatch");
     }
     for(const row of payload.observations){
       const o=ObservationSchema.safeParse(row.observation);
