@@ -104,6 +104,21 @@ describe("approved eligible-day cadence arithmetic",()=>{
     expect(r.evidence.ledger.at(-1)).toMatchObject({kind:"today-pending",dayCredit:1,exposure:fraction(0)});
     expect(r.evidence.pendingObservationIds).toEqual(["today1","today2","today3"]);
   });
+  it("clips a qualifying Today ledger entry to a mid-day effective origin",()=>{
+    const e=episode();e.origin.at="2026-01-01T12:00:00.000Z";e.policy.effectiveFrom=e.origin.at;
+    const now="2026-01-01T13:00:00.000Z",o=observation(e,"after-origin","2026-01-01T12:30:00.000Z");
+    const r=available(createCadenceDeriver([e]).evaluate({episodeId:e.episodeId,now,history:{
+      sourceId:e.origin.sourceId,coveredFrom:e.origin.at,coveredThrough:e.origin.at,observations:[o],breaks:[]}}));
+    expect(r.evidence.ledger).toHaveLength(1);
+    expect(r.evidence.ledger[0]).toMatchObject({start:e.origin.at,end:now,kind:"today-pending",dayCredit:1,exposure:fraction(0)});
+  });
+  it("clips a qualifying Today ledger entry to an effective end earlier than the evaluation instant",()=>{
+    const e=episode();e.effectiveEnd="2026-01-01T12:00:00.000Z";
+    const now="2026-01-01T13:00:00.000Z",o=observation(e,"before-end","2026-01-01T11:00:00.000Z");
+    const r=available(createCadenceDeriver([e]).evaluate({episodeId:e.episodeId,now,history:{
+      sourceId:e.origin.sourceId,coveredFrom:e.origin.at,coveredThrough:origin,observations:[o],breaks:[]}}));
+    expect(r.evidence.ledger[0]).toMatchObject({start:origin,end:e.effectiveEnd,kind:"today-pending",dayCredit:1,exposure:fraction(0)});
+  });
   it("unmet Today, below-floor Today, and future practice add no miss or recovery credit",()=>{
     const e=episode(3,7,7),os=[observation(e,"short",midday(7),9),observation(e,"future",midday(8),1000)];
     const r=available(createCadenceDeriver([e]).evaluate(input(e,7,os)));
@@ -165,6 +180,22 @@ describe("trusted effective episodes and hostile evidence",()=>{
     const e=episode();e.effectiveEnd=at(3);
     const r=available(createCadenceDeriver([e]).evaluate(input(e,20)));
     expect(r.through).toBe(at(3));expect(r.gap).toMatchObject(fraction(3));expect(r.evidence.ledger).toHaveLength(3);
+  });
+  it("replays a three-day closed episode unchanged even many years later",()=>{
+    const e=episode();e.effectiveEnd=at(3);
+    const derive=createCadenceDeriver([e]),early=available(derive.evaluate(input(e,4)));
+    const lateInput=input(e,4);lateInput.now="2050-01-01T12:00:00.000Z";
+    const late=available(derive.evaluate(lateInput));
+    expect(late).toEqual(early);expect(late.evidence.ledger).toHaveLength(3);
+  });
+  it("retains the exact last completed partial civil day of a closed episode",()=>{
+    const e=episode();e.effectiveEnd=new Date(Date.parse(at(3))+6*3600000).toISOString();
+    const derive=createCadenceDeriver([e]),early=available(derive.evaluate(input(e,4)));
+    const lateInput=input(e,4);lateInput.now="2050-01-01T12:00:00.000Z";
+    const late=available(derive.evaluate(lateInput));
+    expect(late).toEqual(early);expect(late.evidence.ledger).toHaveLength(4);
+    expect(late.evidence.ledger.at(-1)).toMatchObject({end:e.effectiveEnd,exposure:fraction(1,4)});
+    expect(late.gap).toMatchObject(fraction(13,4));
   });
   it("keeps changed-frequency policy episodes separate, without announcing old-episode recovery",()=>{
     const old=episode();old.effectiveEnd=at(3);

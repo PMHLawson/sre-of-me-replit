@@ -73,6 +73,20 @@ function instant(value:string):number {
   if(fraction && /[1-9]/.test(fraction.slice(3)))throw Error("unsupported_precision");
   return millisecondInstant(value);
 }
+/**
+ * Locate the civil boundary on/after a closed episode's exact end using a
+ * constant-size probe. This is boundary arithmetic, not future practice
+ * coverage. The real ledger is assembled only through that terminal day and
+ * clipped to the effective interval; later evaluation dates add no work.
+ */
+function terminalCivilBoundary(at:number,boundary:DomainConfiguration["boundary"]):string {
+  const probe=new Date(at+3*86400000).toISOString();
+  const days=assembleWindow({now:probe,windowDays:5,boundary,breaks:[],
+    coverage:{start:new Date(at-7*86400000).toISOString(),end:probe}}).days;
+  const terminal=days.find(d=>instant(d.start)<at && at<=instant(d.end));
+  if(!terminal)throw Error("civil_boundary_unavailable");
+  return terminal.end;
+}
 const zero = () => rational(BigInt(0), BigInt(1));
 const positive = (f: Fraction) => compare(f, zero()) > 0;
 const nonnegative = (f: Fraction) => positive(f) ? f : zero();
@@ -195,14 +209,16 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
           return unavailable("break_interval_unavailable");
       }
       const today = logicalDay(input.now,e.policy.boundary);
-      const elapsed = (Date.parse(today+"T12:00:00Z")-Date.parse(originDay+"T12:00:00Z"))/86400000;
-      if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > MAX_CADENCE_HISTORY_DAYS)
-        return unavailable("history_resource_limit");
       const completed = assembleWindow({now:input.now,windowDays:1,boundary:e.policy.boundary,
         coverage:{start:e.origin.at,end:new Date(Math.max(origin+1,now+1)).toISOString()},breaks:[]});
       const completedEnd = instant(completed.end);
       const through = Math.max(origin, Math.min(completedEnd, e.effectiveEnd === null ? Infinity : instant(e.effectiveEnd)));
       if (instant(h.coveredThrough) !== through) return unavailable("history_incomplete");
+      const assemblyNow = through < completedEnd ? terminalCivilBoundary(through,e.policy.boundary) : completed.end;
+      const assemblyDay = logicalDay(assemblyNow,e.policy.boundary);
+      const elapsed = (Date.parse(assemblyDay+"T12:00:00Z")-Date.parse(originDay+"T12:00:00Z"))/86400000;
+      if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > MAX_CADENCE_HISTORY_DAYS)
+        return unavailable("history_resource_limit");
       const seen = new Set<string>(), byDay = new Map<string,string[]>(), pending:string[] = [];
       for (const o of h.observations) {
         if (!validateObservationContext(e.policy,o).success || seen.has(o.observationId))
@@ -218,7 +234,7 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
         if (day === today) pending.push(o.observationId);
         else {const ids=byDay.get(day)??[];ids.push(o.observationId);byDay.set(day,ids);}
       }
-      const days = elapsed ? assembleWindow({now:input.now,windowDays:elapsed,boundary:e.policy.boundary,
+      const days = elapsed ? assembleWindow({now:assemblyNow,windowDays:elapsed,boundary:e.policy.boundary,
         coverage:{start:e.origin.at,end:new Date(Math.max(origin+1,through)).toISOString()},breaks:h.breaks}).days
         .filter(d=>d.coveredMs>0 && instant(d.coveredInterval!.start)<through) : [];
       let gap=zero(), late=zero(), open=false;
@@ -265,7 +281,9 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
         rational(BigInt(d.coveredMs-d.exemptMs),BigInt(d.durationMs)),byDay.get(d.day)??[]);
       // Known actuals receive one immediate day credit. Unfinished Today adds no
       // elapsed exposure, and below-floor Today cannot reset a gap or recover.
-      if(pending.length)step(today,completed.end,input.now,"today-pending",zero(),pending);
+      if(pending.length)step(today,new Date(Math.max(origin,completedEnd)).toISOString(),
+        new Date(Math.min(now,e.effectiveEnd===null?Infinity:instant(e.effectiveEnd))).toISOString(),
+        "today-pending",zero(),pending);
       if(!positive(totalExposure)&&totalCredit===0)return unavailable("no_eligible_coverage");
       const state=evidence.ledger.at(-1)!.state;
       return {status:"available",episodeId:e.episodeId,policyVersionId:e.policy.policyVersionId,
