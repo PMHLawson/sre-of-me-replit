@@ -33,10 +33,10 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     createEvaluationHistoryLoader(f.db,context,config.domainId,episodes,verification);
   beforeAll(async()=>{
     f=await startFixture("evaluation-history");
-    await f.client.query(`INSERT INTO users(id) VALUES ('history-owner'),('history-other');
+    await f.client.query(`INSERT INTO users(id) VALUES ('history-owner'),('history-other'),('history-peer');
       INSERT INTO organizations(org_id,display_name) VALUES ('history-org','History'),('history-other-org','Other');
       INSERT INTO organization_members(org_id,user_id,role) VALUES
-        ('history-org','history-owner','owner'),('history-other-org','history-other','owner');`);
+        ('history-org','history-owner','owner'),('history-other-org','history-other','owner'),('history-org','history-peer','member');`);
     context=await createOrgContextResolver(f.db)({isAuthenticated:()=>true,user:{claims:{sub:"history-owner"}}});
     other=await createOrgContextResolver(f.db)({isAuthenticated:()=>true,user:{claims:{sub:"history-other"}}});
   },60000);
@@ -194,7 +194,8 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     const verification=verifier();
     verification.resolveBreaks=async evidence=>({evidenceId:"synthetic-approved-exception-receipt",
       breaks:[{breakId:"legacy-break",scope:{organizationId:context.orgId,ownerUserId:context.actorUserId,domainId:config.domainId},
-        interval:{start:"2026-01-03T00:00:00Z",end:"2026-01-04T00:00:00Z"}}],
+        interval:{start:"2026-01-03T00:00:00Z",end:"2026-01-04T00:00:00Z"},
+        source:{kind:"legacy",id:"legacy-break",fingerprint:historyBreakFingerprint(evidence.legacyDeviations[0])}}],
       dispositions:evidence.legacyDeviations.map((row:any)=>({source:"legacy",id:row.id,
         fingerprint:historyBreakFingerprint(row),kind:"approved-exempt"}))});
     const result=await loader(verification).load(now);
@@ -289,5 +290,53 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     expect(result.evidence.dispositions.find(d=>d.observationId==="future-policy-event")).toMatchObject({
       kind:"future",reason:"future_policy_not_assessed"});
     expect(result.aggregate).toEqual({status:"unavailable",reason:"cross-version-aggregate-not-approved"});
+  });
+
+  it("retains system and other-member corrections for owned entities, while excluding foreign entities",async()=>{
+    await add("owned-audited-event","2026-01-10T12:00:00Z");
+    await f.client.query(`INSERT INTO domains(domain_id,org_id,owner_user_id,slug,display_name)
+      VALUES('peer-domain','history-org','history-peer','peer-domain','Peer'),
+        ('foreign-org-domain','history-other-org','history-other','foreign-domain','Foreign')`);
+    const entries=[
+      ["system-owned",context.orgId,"system",null,"observations",JSON.stringify(["owned-audited-event"])],
+      ["peer-owned",context.orgId,"user","history-peer","observations",JSON.stringify(["owned-audited-event"])],
+      ["owner-foreign",context.orgId,"user",context.actorUserId,"domains",JSON.stringify(["peer-domain"])],
+      ["system-foreign",context.orgId,"system",null,"domains",JSON.stringify(["peer-domain"])],
+      ["system-foreign-org","history-other-org","system",null,"domains",JSON.stringify(["foreign-org-domain"])],
+    ];
+    for(const entry of entries)await f.client.query(`INSERT INTO audit_events
+      (audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      VALUES($1,$2,$3,$4,$5,$6,'update',clock_timestamp(),'Synthetic correction',null,'{}'::jsonb)`,entry);
+    const result=await loader().load(now),corrections=result.evidence.snapshot?.corrections as any[];
+    expect(result.status).toBe("available");
+    expect(corrections.find(row=>row.audit_event_id==="system-owned")).toMatchObject({actor_kind:"system",actor_user_id:null});
+    expect(corrections.find(row=>row.audit_event_id==="peer-owned")).toMatchObject({actor_kind:"user",actor_user_id:"history-peer"});
+    const ids=corrections.map(row=>row.audit_event_id);
+    for(const excluded of ["owner-foreign","system-foreign","system-foreign-org"])expect(ids).not.toContain(excluded);
+    expect(result.evidence.snapshot?.databaseEvidence?.validationErrors).toEqual([]);
+  });
+  it.each(["not-applicable","deleted","unlinked","unknown-source","unsupported-source-kind","wrong-fingerprint","approved-without-interval"] as const)(
+    "refuses contradictory or unproven emitted exception intervals: %s",async(kind)=>{
+    await f.client.query(`INSERT INTO deviations(id,user_id,domain,reason,start_at,end_at)
+      VALUES('linked-source',$1,'meditation','Synthetic declaration','2026-01-03T00:00:00Z','2026-01-04T00:00:00Z')`,[context.actorUserId]);
+    const verification=verifier();
+    verification.resolveBreaks=async evidence=>{
+      const fingerprint=historyBreakFingerprint(evidence.legacyDeviations[0]);
+      const emitted:any={breakId:"emitted-break",scope:{organizationId:context.orgId,ownerUserId:context.actorUserId,domainId:config.domainId},
+        interval:{start:"2026-01-03T00:00:00Z",end:"2026-01-04T00:00:00Z"},
+        source:{kind:"legacy",id:"linked-source",fingerprint}};
+      if(kind==="unlinked")delete emitted.source;
+      if(kind==="unknown-source")emitted.source.id="invented-source";
+      if(kind==="unsupported-source-kind")emitted.source.kind="ad-hoc";
+      if(kind==="wrong-fingerprint")emitted.source.fingerprint="0".repeat(64);
+      return {evidenceId:"synthetic-exception-receipt",
+        breaks:kind==="approved-without-interval"?[]:[emitted],
+        dispositions:[{source:"legacy",id:"linked-source",fingerprint,
+          kind:kind==="not-applicable"?"not-applicable":kind==="deleted"?"deleted":"approved-exempt"}]};
+    };
+    const result=await loader(verification).load(now);
+    expect(result).toMatchObject({status:"unavailable",reason:"exception_adapter_unavailable"});
+    expect(result.evidence.snapshot?.databaseEvidence?.legacyDeviations).toHaveLength(1);
+    expect(result.segments).toEqual([]);
   });
 });

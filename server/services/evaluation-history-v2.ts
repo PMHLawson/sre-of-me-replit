@@ -16,7 +16,8 @@ import { MAX_READ_ROWS, ResourceLimitError } from "../lib/read-budget";
  */
 export type HistoryScope = { organizationId:string; ownerUserId:string; domainId:string };
 export type HistoryObservation = { observation:unknown; deletedAt:string|null };
-export type HistoryBreak = { breakId:string; scope:HistoryScope; interval:Interval };
+export type HistoryBreak = { breakId:string; scope:HistoryScope; interval:Interval;
+  source:{kind:"v2"|"legacy";id:string;fingerprint:string} };
 export type HistorySnapshot = {
   snapshotId:string; capturedAt:string; scope:HistoryScope;
   configurations:unknown[]; observations:HistoryObservation[]; corrections:unknown[]; breaks:HistoryBreak[];
@@ -172,7 +173,9 @@ function createHistoryAssembler(source:EvaluationHistorySource,
     for(const b of snapshot.breaks){
       try{
         if(!b||!validId(b.breakId)||breakIds.has(b.breakId)||!same(b.scope,bound)||
-          Object.keys(b).some(k=>!["breakId","scope","interval"].includes(k))||
+          Object.keys(b).some(k=>!["breakId","scope","interval","source"].includes(k))||
+          !b.source||!["v2","legacy"].includes(b.source.kind)||!validId(b.source.id)||!/^[a-f0-9]{64}$/.test(b.source.fingerprint)||
+          Object.keys(b.source).some(k=>!["kind","id","fingerprint"].includes(k))||
           instant(b.interval.end)<=instant(b.interval.start))throw Error();
         breakIds.add(b.breakId);breaks.push(b);
       }catch{invalid=true;}
@@ -319,7 +322,7 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
           (deleted_at IS NULL OR deleted_at=date_trunc('milliseconds',deleted_at)) AS __deleted_millisecond_time
          FROM public.observations WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3 ORDER BY observation_id LIMIT $4) o),
       'corrections',(SELECT coalesce(jsonb_agg(to_jsonb(a)),'[]'::jsonb) FROM
-        (SELECT * FROM public.audit_events WHERE org_id=$1 AND actor_kind='user' AND actor_user_id=$2 AND (
+        (SELECT * FROM public.audit_events WHERE org_id=$1 AND (
           (entity_type='domains' AND entity_id=jsonb_build_array($3::text)::text) OR
           (entity_type='policy_versions' AND entity_id IN
             (SELECT jsonb_build_array(policy_version_id)::text FROM public.policy_versions
@@ -385,9 +388,22 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
           instant(row.observed_at)!==instant(o.data.observedAt))throw Error();
       }catch{errors.push("persisted_observation_mismatch");}
     }
-    for(const row of payload.corrections)
-      if(row.org_id!==scope.organizationId||row.actor_user_id!==scope.ownerUserId||row.actor_kind!=="user")
-        errors.push("correction_scope_mismatch");
+    // Correction ownership follows the referenced entity, not the actor.
+    // Legitimate system/other-member changes to this owner's entity are evidence.
+    const ownedEntities=new Map<string,Set<string>>([
+      ["domains",new Set([domainId])],
+      ["policy_versions",new Set<string>(payload.policies.map((row:any)=>row.policy_version_id))],
+      ["observations",new Set<string>(payload.observations.map((row:any)=>row.observation_id))],
+    ]);
+    for(const row of payload.corrections){
+      try{
+        const identity=JSON.parse(row.entity_id);
+        if(row.org_id!==scope.organizationId||!["user","system"].includes(row.actor_kind)||
+          (row.actor_kind==="user"&&!validId(row.actor_user_id))||
+          (row.actor_user_id!==null&&!validId(row.actor_user_id))||
+          !Array.isArray(identity)||identity.length!==1||!ownedEntities.get(row.entity_type)?.has(identity[0]))throw Error();
+      }catch{errors.push("correction_scope_mismatch");}
+    }
     for(const name of ["deviations","associations"] as const)
       if(payload[name].some((row:any)=>!scoped(row,false)))errors.push("exception_scope_mismatch");
     if(payload.legacyDeviations.some((row:any)=>row.user_id!==scope.ownerUserId))errors.push("legacy_exception_scope_mismatch");
@@ -407,7 +423,15 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
         resolution.dispositions.length!==rawBreaks.length||rawBreaks.some(b=>{
           const matches=resolution!.dispositions.filter(d=>d.source===b.source&&d.id===b.id&&d.fingerprint===digest(b.row));
           return matches.length!==1||!["approved-exempt","deleted","not-applicable"].includes(matches[0].kind);
-        }))resolution=null;
+        })||resolution.breaks.some(b=>{
+          const origin=b?.source;
+          if(!origin||!["v2","legacy"].includes(origin.kind)||!validId(origin.id)||!/^[a-f0-9]{64}$/.test(origin.fingerprint))return true;
+          const raw=rawBreaks.filter(r=>r.source===origin.kind&&r.id===origin.id&&digest(r.row)===origin.fingerprint);
+          const disposition=resolution!.dispositions.filter(d=>d.source===origin.kind&&d.id===origin.id&&
+            d.fingerprint===origin.fingerprint);
+          return raw.length!==1||disposition.length!==1||disposition[0].kind!=="approved-exempt";
+        })||resolution.dispositions.some(d=>d.kind==="approved-exempt"&&!resolution!.breaks.some(b=>
+          b?.source?.kind===d.source&&b.source.id===d.id&&b.source.fingerprint===d.fingerprint)))resolution=null;
     }
     evidence.breakResolution=resolution;
     const snapshot:HistorySnapshot={snapshotId:digest({scope,capturedAt:payload.capturedAt,raw:payload}),
