@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { SessionText } from '@/components/session-text';
+import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, RotateCcw, Trash2 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { useAppStore, type Domain } from '@/store';
@@ -21,15 +22,17 @@ export function RecentlyDeletedSection() {
   const deletedSessionsError = useAppStore((s) => s.deletedSessionsError);
   const fetchDeletedSessions = useAppStore((s) => s.fetchDeletedSessions);
   const restoreSession = useAppStore((s) => s.restoreSession);
+  const loading = useAppStore(s => s.deletedLoading);
+  const complete = useAppStore(s => s.deletedComplete);
 
   const [expanded, setExpanded] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (expanded && !deletedSessionsLoaded) {
+    if (expanded && !deletedSessionsLoaded && !loading && !deletedSessionsError) {
       void fetchDeletedSessions();
     }
-  }, [expanded, deletedSessionsLoaded, fetchDeletedSessions]);
+  }, [expanded, deletedSessionsLoaded, loading, deletedSessionsError, fetchDeletedSessions]);
 
   // Show items in reverse-deletion order (most recently deleted first). Fall back
   // to the original timestamp if deletedAt is somehow missing.
@@ -74,7 +77,7 @@ export function RecentlyDeletedSection() {
               className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground bg-muted px-2 py-0.5 rounded-full"
               data-testid="text-recently-deleted-count"
             >
-              {count}
+              {count} shown
             </span>
           )}
         </div>
@@ -85,7 +88,7 @@ export function RecentlyDeletedSection() {
 
       {expanded && (
         <div className="border-t border-border/50 p-3 space-y-2">
-          {!deletedSessionsLoaded && (
+          {loading && (
             <div
               className="text-center py-6 text-xs text-muted-foreground font-medium"
               data-testid="text-recently-deleted-loading"
@@ -94,7 +97,7 @@ export function RecentlyDeletedSection() {
             </div>
           )}
 
-          {deletedSessionsLoaded && deletedSessionsError && (
+          {deletedSessionsError && (
             <div
               className="text-center py-6 space-y-2"
               data-testid="text-recently-deleted-error"
@@ -103,7 +106,7 @@ export function RecentlyDeletedSection() {
                 {deletedSessionsError}
               </p>
               <button
-                onClick={() => void fetchDeletedSessions()}
+                onClick={() => void fetchDeletedSessions(deletedSessionsLoaded)}
                 className="text-xs font-bold text-primary underline underline-offset-2 hover:text-primary/80"
                 data-testid="button-recently-deleted-retry"
               >
@@ -117,11 +120,11 @@ export function RecentlyDeletedSection() {
               className="text-center py-8 text-sm text-muted-foreground font-medium"
               data-testid="text-recently-deleted-empty"
             >
-              Nothing here. Deleted sessions appear here within the retention window.
+              Nothing here. Practices you delete remain available here for restoration.
             </div>
           )}
 
-          {deletedSessionsLoaded && !deletedSessionsError &&
+          {deletedSessionsLoaded &&
             sortedDeleted.map((session) => {
               const dom = session.domain as Domain;
               const isRestoring = restoringId === session.id;
@@ -143,11 +146,7 @@ export function RecentlyDeletedSection() {
                         · {format(parseISO(session.timestamp), 'MMM d, yyyy h:mm a')}
                       </span>
                     </div>
-                    {session.notes && (
-                      <p className="text-xs text-muted-foreground mt-1 line-clamp-1">
-                        {session.notes}
-                      </p>
-                    )}
+                    <SessionText session={session} />
                     {session.deletedAt && (
                       <p
                         className="text-[10px] font-mono text-muted-foreground/70 mt-1"
@@ -169,6 +168,8 @@ export function RecentlyDeletedSection() {
                 </div>
               );
             })}
+          {deletedSessionsLoaded && !complete && <button className="underline" disabled={loading}
+            onClick={() => void fetchDeletedSessions(true)}>Load more deleted practices</button>}
         </div>
       )}
     </section>

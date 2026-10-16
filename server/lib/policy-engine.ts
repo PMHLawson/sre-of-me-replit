@@ -74,7 +74,9 @@ export const SERVICE_WEIGHT: Record<Domain, number> = {
 
 export type ComplianceColor = "green" | "yellow" | "red";
 
+const logicalDayMemo = Symbol("request-local-logical-day-memo");
 export interface PolicyEngineOptions {
+  [logicalDayMemo]?: Map<string,string>;
   /** Hour-of-day boundary for "logical day" assignment. Sessions logged before this hour count as the previous calendar day. Default 4. */
   dayStartHour?: number;
   /** Length of the compliance window in days. Default 7. */
@@ -101,6 +103,15 @@ export interface PolicyEngineOptions {
   userCreatedAt?: Date;
 }
 
+/** A fresh per-evaluation cache; never stored globally or accepted from an HTTP caller. */
+export function withLogicalDayMemo(opts:PolicyEngineOptions):PolicyEngineOptions {
+  return {...opts,[logicalDayMemo]:new Map()};
+}
+/** Exact legacy sustained anchor, shared with the bounded-input planner. */
+export function sustainedWindowAnchor(day:string):Date {
+  const [y,m,d]=day.split("-").map(Number);
+  return new Date(Date.UTC(y,m-1,d+1,18));
+}
 /** True if the deviation is currently active at `now`. */
 function isDeviationActiveNow(d: ActiveDeviation, now: Date): boolean {
   if (d.endedAt) return false;
@@ -160,6 +171,8 @@ export function logicalDay(timestamp: Date | string, opts: PolicyEngineOptions =
   const startHour = opts.dayStartHour ?? DEFAULT_DAY_START_HOUR;
   const tz = opts.timezone ?? DEFAULT_TIMEZONE;
   const d = typeof timestamp === "string" ? new Date(timestamp) : new Date(timestamp);
+  const memoKey=tz+"|"+startHour+"|"+d.getTime();
+  const cached=opts[logicalDayMemo]?.get(memoKey);if(cached!==undefined)return cached;
   const local = partsInTimezone(d, tz);
   // If the local hour is before the boundary, the session belongs to the previous calendar day.
   // Construct the local calendar date and subtract a day if needed.
@@ -169,7 +182,7 @@ export function logicalDay(timestamp: Date | string, opts: PolicyEngineOptions =
   const y = a.getUTCFullYear();
   const m = String(a.getUTCMonth() + 1).padStart(2, "0");
   const day = String(a.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const result=`${y}-${m}-${day}`;opts[logicalDayMemo]?.set(memoKey,result);return result;
 }
 
 /**
@@ -525,12 +538,7 @@ export function computeSustainedOverachievement<T extends Session>(
     // so the trailing window covers D plus the 6 prior days.
     for (let i = window.length - 1; i >= 0; i--) {
       const day = window[i];
-      const [y, m, d] = day.split("-").map((n) => parseInt(n, 10));
-      // Anchor at next calendar day, 18:00 UTC — comfortably past any
-      // reasonable timezone's dayStartHour, keeping logical-day assignment
-      // unambiguous.
-      const nextDayUtc = Date.UTC(y, m - 1, d + 1, 18);
-      const nowForDay = new Date(nextDayUtc);
+      const nowForDay = sustainedWindowAnchor(day);
       const state = computeServiceState(domain, allSessions, { ...opts, now: nowForDay });
       if (state.overachievement_tier === "NONE") break;
       if (i === window.length - 1) tier = state.overachievement_tier;

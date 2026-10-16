@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -19,7 +19,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { Domain, Deviation, DeviationDraft, DeviationPatch } from '@/store';
+import { useAppStore, type Domain, type Deviation, type DeviationDraft, type DeviationPatch } from '@/store';
+import { DeviationText } from '@/components/session-text';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
   'martial-arts': 'Martial Arts',
@@ -57,10 +58,35 @@ interface DeviationFormProps {
 
 const DOMAINS: Domain[] = ['martial-arts', 'meditation', 'fitness', 'music'];
 
-export function DeviationForm({ open, onOpenChange, editing, onSubmit }: DeviationFormProps) {
+export function DeviationForm(props: DeviationFormProps) {
+  const detail = useAppStore(s => props.editing ? s.deviationDetails[props.editing.id] : undefined);
+  const fetchDetail = useAppStore(s => s.fetchDeviationDetail);
+  const demo = useAppStore(s => s.demoState !== "default");
+  const [freshOpen, setFreshOpen] = useState(false);
+  useEffect(() => {
+    let active = true; setFreshOpen(false);
+    if (props.open && props.editing && !demo)
+      void fetchDetail(props.editing.id).then(() => { if (active) setFreshOpen(true); });
+    return () => { active = false; };
+  }, [props.open, props.editing?.id, demo, fetchDetail]);
+  if (props.open && props.editing && !demo && (!freshOpen || detail?.status !== "ready")) {
+    return <Dialog open={props.open} onOpenChange={props.onOpenChange}><DialogContent>
+      <DialogHeader><DialogTitle>Load saved deviation</DialogTitle><DialogDescription>
+        Load the complete original reason before editing.
+      </DialogDescription></DialogHeader><DeviationText deviation={{ ...props.editing, textComplete: false }} force />
+      <Button disabled>Save changes</Button></DialogContent></Dialog>;
+  }
+  return <DeviationFormFields {...props} editing={!demo && props.editing ? detail?.value ?? null : props.editing} />;
+}
+function DeviationFormFields({ open, onOpenChange, editing, onSubmit }: DeviationFormProps) {
   const isEdit = !!editing;
   const [domain, setDomain] = useState<Domain>('fitness');
   const [reason, setReason] = useState('');
+  const [reasonDirty, setReasonDirty] = useState(false);
+  const [changeReason, setChangeReason] = useState('');
+  const detail = useAppStore(s => editing ? s.deviationDetails[editing.id] : undefined);
+  const full = editing?.textComplete === false ? detail?.value : editing;
+  const ready = !editing || (!!full && full.textComplete !== false);
   const [startLocal, setStartLocal] = useState(toLocalInputValue(new Date().toISOString()));
   const [endLocal, setEndLocal] = useState('');
   const [excludeFromComposite, setExcludeFromComposite] = useState(true);
@@ -71,7 +97,7 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
     if (!open) return;
     if (editing) {
       setDomain(editing.domain as Domain);
-      setReason(editing.reason);
+      setReason(full?.reason ?? '');
       setStartLocal(toLocalInputValue(editing.startAt));
       setEndLocal(toLocalInputValue(editing.endAt));
       setExcludeFromComposite(editing.excludeFromComposite);
@@ -82,13 +108,20 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
       setEndLocal('');
       setExcludeFromComposite(true);
     }
-    setError(null);
-  }, [open, editing]);
+    setError(null); setReasonDirty(false); setChangeReason('');
+  }, [open, editing?.id]);
+  useEffect(() => { if (open && ready && full && !reasonDirty) setReason(full.reason); },
+    [open, ready, full?.reason, reasonDirty]);
 
   const handleSubmit = async () => {
+    if (!ready) return;
     setError(null);
     if (!reason.trim()) {
       setError('Reason is required.');
+      return;
+    }
+    if (isEdit && (!changeReason.trim() || changeReason.trim().length > 500)) {
+      setError('Explain why you are changing this deviation (up to 500 characters).');
       return;
     }
     if (!startLocal) {
@@ -105,7 +138,8 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
     try {
       if (isEdit) {
         const patch: DeviationPatch = {
-          reason: reason.trim(),
+          changeReason: changeReason.trim(),
+          ...(reasonDirty ? { reason } : {}),
           startAt: startIso,
           endAt: endIso,
           excludeFromComposite,
@@ -118,7 +152,7 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
       } else {
         const draft: DeviationDraft = {
           domain,
-          reason: reason.trim(),
+          reason,
           startAt: startIso,
           endAt: endIso,
           excludeFromComposite,
@@ -147,6 +181,13 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
           </DialogDescription>
         </DialogHeader>
 
+        {isEdit && <div className="space-y-2">
+          <Label htmlFor="deviation-change-reason">Why are you changing this deviation?</Label>
+          <Textarea id="deviation-change-reason" value={changeReason} onChange={event => setChangeReason(event.target.value)}
+            maxLength={500} required data-testid="input-deviation-change-reason" />
+          <p className="text-sm text-muted-foreground">This explanation is saved in its edit history. The original deviation reason is separate.</p>
+        </div>}
+        {!ready && editing && <div><p>Load the complete saved reason before editing.</p><DeviationText deviation={editing} force /></div>}
         <div className="space-y-4 py-2">
           <div className="space-y-2">
             <Label htmlFor="deviation-domain">Domain</Label>
@@ -174,7 +215,8 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
               id="deviation-reason"
               placeholder="e.g. Travel for work, knee injury, planned sabbatical"
               value={reason}
-              onChange={(e) => setReason(e.target.value)}
+              onChange={(e) => { setReason(e.target.value); setReasonDirty(true); }}
+              disabled={!ready}
               rows={3}
               data-testid="input-deviation-reason"
             />
@@ -238,7 +280,7 @@ export function DeviationForm({ open, onOpenChange, editing, onSubmit }: Deviati
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={submitting || !ready}
             data-testid="button-deviation-submit"
           >
             {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Declare deviation'}

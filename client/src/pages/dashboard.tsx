@@ -1,3 +1,4 @@
+import { CurrentReadBoundary } from "@/components/current-read-boundary";
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
@@ -280,7 +281,8 @@ function ConnectedDomainCard({ domain }: { domain: Domain }) {
   );
 }
 
-export default function Dashboard() {
+export default function Dashboard() { return <CurrentReadBoundary><DashboardContent /></CurrentReadBoundary>; }
+function DashboardContent() {
   const [_, setLocation] = useLocation();
   const getDomainStatus = useAppStore(state => state.getDomainStatus);
   const sessions = useAppStore(state => state.sessions);
@@ -290,7 +292,7 @@ export default function Dashboard() {
   // Re-render when API-backed policy state arrives or refreshes.
   const policyState = useAppStore(state => state.policyState);
   const escalationState = useAppStore(state => state.escalationState);
-  const { user, logout } = useAuth();
+  const { user, logout, isLoggingOut } = useAuth();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -402,6 +404,8 @@ export default function Dashboard() {
                   </div>
                   <button
                     onClick={() => logout()}
+                    disabled={isLoggingOut}
+                    aria-busy={isLoggingOut}
                     className="w-full flex items-center gap-3 px-4 py-3 text-sm text-foreground hover:bg-muted/60 transition-colors"
                     data-testid="button-logout"
                   >

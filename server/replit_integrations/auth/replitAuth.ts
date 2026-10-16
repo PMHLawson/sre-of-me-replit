@@ -5,8 +5,14 @@ import passport from "passport";
 import session from "express-session";
 import type { Express, RequestHandler } from "express";
 import memoize from "memoizee";
-import connectPg from "connect-pg-simple";
+import { NonresurrectingStore } from "./nonresurrecting-store";
+import { EncryptedTokenSessionStore } from "./encrypted-session-store";
+import { createTokenVaultFromConfig } from "./token-vault";
+import { applyRefreshResponseAndPersist, applyTokenResponseToSessionUser } from "./session-user";
+import { deliberateLogout, registerLogout } from "./deliberate-logout";
 import { authStorage } from "./storage";
+import { pool } from "../../db";
+import { matchedOrigin, projectOrigins, trustedAddressGuard } from "../../../shared/trusted-addresses";
 
 const getOidcConfig = memoize(
   async () => {
@@ -20,13 +26,8 @@ const getOidcConfig = memoize(
 
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-  const pgStore = connectPg(session);
-  const sessionStore = new pgStore({
-    conString: process.env.DATABASE_URL,
-    createTableIfMissing: true,
-    ttl: sessionTtl,
-    tableName: "http_sessions",
-  });
+  const tokenVault = createTokenVaultFromConfig(process.env.OAUTH_TOKEN_ENCRYPTION_KEYRING);
+  const sessionStore = new EncryptedTokenSessionStore(new NonresurrectingStore(pool), tokenVault);
   return session({
     secret: process.env.SESSION_SECRET!,
     store: sessionStore,
@@ -45,10 +46,7 @@ function updateUserSession(
   user: any,
   tokens: client.TokenEndpointResponse & client.TokenEndpointResponseHelpers
 ) {
-  user.claims = tokens.claims();
-  user.access_token = tokens.access_token;
-  user.refresh_token = tokens.refresh_token;
-  user.expires_at = user.claims?.exp;
+  applyTokenResponseToSessionUser(user, tokens);
 }
 
 async function upsertUser(claims: any) {
@@ -62,6 +60,9 @@ async function upsertUser(claims: any) {
 }
 
 export async function setupAuth(app: Express) {
+  const origins = projectOrigins();
+  app.use(trustedAddressGuard(origins));
+  app.all("/api/logout", deliberateLogout);
   app.set("trust proxy", 1);
   app.use(getSession());
   app.use(passport.initialize());
@@ -79,54 +80,41 @@ export async function setupAuth(app: Express) {
     verified(null, user);
   };
 
-  const registeredStrategies = new Set<string>();
-
-  const ensureStrategy = (domain: string) => {
-    const strategyName = `replitauth:${domain}`;
-    if (!registeredStrategies.has(strategyName)) {
+  for (const origin of origins) {
+    const strategyName = `replitauth:${origin}`;
       const strategy = new Strategy(
         {
           name: strategyName,
           config,
           scope: "openid email profile offline_access",
-          callbackURL: `https://${domain}/api/callback`,
+          callbackURL: `${origin}/api/callback`,
         },
         verify
       );
       passport.use(strategy);
-      registeredStrategies.add(strategyName);
-    }
-  };
+  }
 
   passport.serializeUser((user: Express.User, cb) => cb(null, user));
   passport.deserializeUser((user: Express.User, cb) => cb(null, user));
 
   app.get("/api/login", (req, res, next) => {
-    ensureStrategy(req.hostname);
-    passport.authenticate(`replitauth:${req.hostname}`, {
+    passport.authenticate(`replitauth:${matchedOrigin(req)}`, {
       prompt: "login consent",
       scope: ["openid", "email", "profile", "offline_access"],
     })(req, res, next);
   });
 
   app.get("/api/callback", (req, res, next) => {
-    ensureStrategy(req.hostname);
-    passport.authenticate(`replitauth:${req.hostname}`, {
+    passport.authenticate(`replitauth:${matchedOrigin(req)}`, {
       successReturnToOrRedirect: "/",
       failureRedirect: "/api/login",
     })(req, res, next);
   });
 
-  app.get("/api/logout", (req, res) => {
-    req.logout(() => {
-      res.redirect(
-        client.buildEndSessionUrl(config, {
-          client_id: process.env.REPL_ID!,
-          post_logout_redirect_uri: `${req.protocol}://${req.hostname}`,
-        }).href
-      );
-    });
-  });
+  registerLogout(app, origin => client.buildEndSessionUrl(config, {
+    client_id: process.env.REPL_ID!,
+    post_logout_redirect_uri: origin,
+  }).href);
 }
 
 export const isAuthenticated: RequestHandler = async (req, res, next) => {
@@ -146,12 +134,22 @@ export const isAuthenticated: RequestHandler = async (req, res, next) => {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
+  let tokenResponse: client.TokenEndpointResponse & client.TokenEndpointResponseHelpers;
   try {
     const config = await getOidcConfig();
-    const tokenResponse = await client.refreshTokenGrant(config, refreshToken);
-    updateUserSession(user, tokenResponse);
-    return next();
+    tokenResponse = await client.refreshTokenGrant(config, refreshToken);
   } catch {
     return res.status(401).json({ message: "Unauthorized" });
   }
+  try {
+    await applyRefreshResponseAndPersist(
+      user,
+      req.session,
+      tokenResponse,
+      callback => req.session.save(callback),
+    );
+  } catch {
+    return res.status(503).json({ message: "Session update unavailable" });
+  }
+  return next();
 };

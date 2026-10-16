@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useLocation } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import { ArrowLeft, Loader2, Save } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useAppStore } from '@/store';
@@ -166,6 +166,14 @@ export default function SettingsPage() {
           </div>
         ) : (
           <>
+            <section className="bg-card border border-border/60 rounded-2xl p-5">
+              <h2 className="text-sm font-bold tracking-wide mb-2">Personal domains</h2>
+              <p className="text-xs text-muted-foreground mb-3">View your saved goals, measurements and reference benchmarks.</p>
+              <Link href="/domains" className="inline-flex underline text-sm font-semibold" data-testid="link-personal-domains">
+                Your domains
+              </Link>
+            </section>
+
             {/* Day-start hour */}
             <section className="bg-card border border-border/60 rounded-2xl p-5">
               <label className="block text-sm font-bold tracking-wide text-foreground mb-1">

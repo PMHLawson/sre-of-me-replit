@@ -6,6 +6,7 @@ import type { Session } from "@shared/schema";
 // All application boundaries are replaced BEFORE importing registered handlers.
 const fake = vi.hoisted(() => ({
   owner: "synthetic-retention-owner-ALPHA" as string | null,
+  historyReads:{page:vi.fn()},
   storage: {
     getSessions: vi.fn(), getDeletedSessions: vi.fn(),
     softDeleteSession: vi.fn(), restoreSession: vi.fn(),
@@ -13,7 +14,7 @@ const fake = vi.hoisted(() => ({
   },
 }));
 vi.mock("./db", () => { throw new Error("FORBIDDEN: real database module import"); });
-vi.mock("./storage", () => ({ storage: fake.storage }));
+vi.mock("./storage", () => ({ storage: fake.storage,historyReads:fake.historyReads }));
 vi.mock("./replit_integrations/auth/storage", () => ({ authStorage: {} }));
 vi.mock("./replit_integrations/auth", () => ({
   isAuthenticated: (req: Request, res: Response, next: NextFunction) => {
@@ -51,7 +52,7 @@ const cases = [
     storage: "restoreSession", error: "Failed to restore session", missing: "Deleted session not found" },
 ] as const;
 async function request(c: typeof cases[number]) {
-  const response = await fetch(`${base}${c.path}?userId=forged-query-owner&owner=forged-query-owner`, {
+  const response = await fetch(`${base}${c.path}${c.method==="GET"?"":"?userId=forged-query-owner&owner=forged-query-owner"}`, {
     method: c.method, headers: { "Content-Type": "application/json" },
     ...(c.method === "GET" ? {} : {
       body: JSON.stringify({ userId: "forged-body-owner", owner: "forged-body-owner", id: "forged-body-id" }),
@@ -94,14 +95,20 @@ describe("actual registered retention handlers with synthetic auth/storage only"
       const rows = [deleted, row(owner, new Date("2020-01-01T00:00:00Z"), "opaque old unpurged")];
       const value = c.name === "deleted" ? rows : c.name === "active" ? [active] :
         c.name === "delete" ? deleted : active;
-      fake.storage[c.storage].mockResolvedValue(value);
-      expect(await request(c)).toEqual({
-        status: 200, body: Array.isArray(value) ? value.map(serialized) : serialized(value),
-      });
-      // Independently verify actual handler arguments, not only programmed output.
-      expect(fake.storage[c.storage]).toHaveBeenCalledExactlyOnceWith(
-        owner, ...(c.method === "GET" ? [] : [ID]),
-      );
+      if(c.method==="GET"){
+        const items=(value as Session[]).map(r=>({...serialized(r),notes:null,anomalyNote:null,
+          hasNotes:r.notes!==null,hasAnomalyNote:r.anomalyNote!==null,
+          notesBytes:Buffer.byteLength(r.notes??""),anomalyNoteBytes:Buffer.byteLength(r.anomalyNote??""),
+          notesAvailability:r.notes===null?"absent":"not_loaded",anomalyNoteAvailability:r.anomalyNote===null?"absent":"not_loaded"}));
+        const page={items,nextCursor:null,complete:true};fake.historyReads.page.mockResolvedValue(page);
+        expect(await request(c)).toEqual({status:200,body:page});
+        expect(fake.historyReads.page).toHaveBeenCalledExactlyOnceWith(owner,c.name==="deleted"?"deleted":"sessions",{limit:50});
+        expect(fake.storage[c.storage]).not.toHaveBeenCalled();
+      }else{
+        fake.storage[c.storage].mockResolvedValue(value);
+        expect(await request(c)).toEqual({status:200,body:serialized(value as Session)});
+        expect(fake.storage[c.storage]).toHaveBeenCalledExactlyOnceWith(owner,ID);
+      }
       for (const [name, method] of Object.entries(fake.storage)) {
         if (name !== c.storage) expect(method).not.toHaveBeenCalled();
       }
@@ -114,19 +121,27 @@ describe("actual registered retention handlers with synthetic auth/storage only"
   });
   it.each(cases)("$name returns generic500 without synthetic secret details", async c => {
     const secret = "SYNTHETIC_RETENTION_SECRET_SENTINEL";
-    fake.storage[c.storage].mockRejectedValue(new Error(secret));
+    if(c.method==="GET")fake.historyReads.page.mockRejectedValue(new Error(secret));
+    else fake.storage[c.storage].mockRejectedValue(new Error(secret));
     const response = await request(c);
-    expect(response).toEqual({ status: 500, body: { message: c.error } });
+    expect(response).toEqual(c.method==="GET"?{status:503,body:{message:"History is unavailable. Your records have not been changed."}}:
+      { status: 500, body: { message: c.error } });
     expect(JSON.stringify(response)).not.toContain(secret);
   });
   it.each(cases)("$name rejects mocked unauthenticated requests before all storage", async c => {
     fake.owner = null;
     expect(await request(c)).toEqual({ status: 401, body: { message: "synthetic unauthenticated" } });
     for (const method of Object.values(fake.storage)) expect(method).not.toHaveBeenCalled();
+    expect(fake.historyReads.page).not.toHaveBeenCalled();
   });
   it.each(cases.filter(c => c.method === "GET"))("$name serializes an empty collection", async c => {
-    fake.storage[c.storage].mockResolvedValue([]);
-    expect(await request(c)).toEqual({ status: 200, body: [] });
+    const page={items:[],nextCursor:null,complete:true};fake.historyReads.page.mockResolvedValue(page);
+    expect(await request(c)).toEqual({status:200,body:page});
+  });
+  it.each(cases.filter(c=>c.method==="GET"))("$name rejects forged query authority before reads",async c=>{
+    const response=await fetch(`${base}${c.path}?userId=forged-query-owner`);
+    expect(response.status).toBe(400);expect(fake.historyReads.page).not.toHaveBeenCalled();
+    for(const method of Object.values(fake.storage))expect(method).not.toHaveBeenCalled();
   });
   it("has no registered public maintenance purge handler", () => {
     // Inspect the actual Express registrations, not source-string assertions.

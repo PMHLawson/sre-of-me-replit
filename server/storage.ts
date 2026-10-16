@@ -1,4 +1,11 @@
 import { db } from "./db";
+import type { Pool,PoolClient,QueryConfig } from "pg";
+import { performance } from "node:perf_hooks";
+import { ResourceLimitError,READ_TIMEOUT_MS } from "./lib/read-budget";
+import { LegacyHistoryReads } from "./lib/legacy-history";
+import { BoundaryError,type Transaction } from "./lib/org-context";
+import { withTransactionReadBudget,readComplete } from "./lib/transaction-read-budget";
+import { withOwnerWriteBudget } from "./lib/write-resource-budget";
 import {
   sessions,
   sessionEdits,
@@ -8,13 +15,11 @@ import {
   type InsertSession,
   type UpdateSession,
   type Deviation,
-  type InsertDeviation,
-  type UpdateDeviation,
   type UserSettings,
   type InsertUserSettings,
-  normalizeComplianceWindowDays,
+  normalizeComplianceWindowDays,activityTextWithinLimit,insertSessionSchema,updateSessionSchema,insertUserSettingsSchema,
 } from "@shared/schema";
-import { eq, desc, gte, and, isNull, lte, lt, or, asc, gt, isNotNull } from "drizzle-orm";
+import { sql,eq,desc,gte,and,isNull,lte,or,asc,gt,isNotNull } from "drizzle-orm";
 
 export interface IStorage {
   getSessions(userId: string): Promise<Session[]>;
@@ -25,22 +30,17 @@ export interface IStorage {
   restoreSession(userId: string, id: string): Promise<Session | undefined>;
   getDeletedSessions(userId: string): Promise<Session[]>;
   /**
-   * Hard-delete soft-deleted sessions strictly older than `olderThan`
-   * (`deletedAt < olderThan`). Active sessions (`deletedAt IS NULL`) are
-   * never matched. Idempotent — once expired rows are removed a re-run with
-   * the same cutoff is a no-op. Returns the number of rows removed.
+   * @deprecated Age-based deletion is retired. This compatibility entry point
+   * always rejects before accessing storage; no cutoff authorizes deletion.
+   * Explicit permanent deletion requires its own future owner-authorized path.
    */
   purgeExpiredDeletedSessions(olderThan: Date): Promise<number>;
 
   // Deviations
-  createDeviation(deviation: InsertDeviation & { userId: string }): Promise<Deviation>;
   getActiveDeviations(userId: string, now?: Date): Promise<Deviation[]>;
   getPlannedDeviations(userId: string, now?: Date): Promise<Deviation[]>;
   getAllDeviations(userId: string): Promise<Deviation[]>;
   getDeviation(userId: string, id: string): Promise<Deviation | undefined>;
-  updateDeviation(userId: string, id: string, patch: UpdateDeviation): Promise<Deviation | undefined>;
-  endDeviation(userId: string, id: string, endedAt?: Date): Promise<Deviation | undefined>;
-  softDeleteDeviation(userId: string, id: string): Promise<Deviation | undefined>;
 
   // User settings (C3.1)
   /** Returns the user's settings; creates a default row on first call so
@@ -51,9 +51,89 @@ export interface IStorage {
   upsertUserSettings(userId: string, patch: InsertUserSettings): Promise<UserSettings>;
 }
 
+type MutationScope={admitMutation:()=>Promise<void>};
+const sessionMutationColumns=`s.id,s.user_id AS "userId",s.domain,s.duration_minutes AS "durationMinutes",s.timestamp,
+ s.deleted_at AS "deletedAt",s.is_anomaly AS "isAnomaly",NULL::text AS notes,NULL::text AS "anomalyNote",
+ s.notes IS NOT NULL AS "hasNotes",s.anomaly_note IS NOT NULL AS "hasAnomalyNote",
+ COALESCE(octet_length(s.notes),0) AS "notesBytes",COALESCE(octet_length(s.anomaly_note),0) AS "anomalyNoteBytes",
+ CASE WHEN s.notes IS NULL THEN 'absent' ELSE 'not_loaded' END AS "notesAvailability",
+ CASE WHEN s.anomaly_note IS NULL THEN 'absent' ELSE 'not_loaded' END AS "anomalyNoteAvailability"`;
+const sessionMutationFields=["id","userId","domain","durationMinutes","timestamp","deletedAt","isAnomaly","notes","anomalyNote",
+ "hasNotes","hasAnomalyNote","notesBytes","anomalyNoteBytes","notesAvailability","anomalyNoteAvailability"];
+const settingsMutationColumns=`user_id AS "userId",day_start_hour AS "dayStartHour",timezone,window_days AS "windowDays",
+ notifications_enabled AS "notificationsEnabled",notification_tier AS "notificationTier",updated_at AS "updatedAt"`;
+const settingsMutationFields=["userId","dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier","updatedAt"];
+function requireActivityText(value:string|null|undefined){
+ if(typeof value==="string"&&!activityTextWithinLimit(value))throw new BoundaryError(400);
+}
+async function sessionMutation(tx:Transaction,userId:string,id:string,condition="TRUE",extra="",values:unknown[]=[]){
+ const rows=await readComplete(tx,`SELECT ${sessionMutationColumns}${extra} FROM public.sessions s
+  WHERE s.user_id=$1 AND s.id=$2 AND ${condition} LIMIT 2 FOR UPDATE`,
+  [userId,id,...values],[...sessionMutationFields,...(extra?["notesSame","anomalyNoteSame","anomalyNoteNonBlank","timestampSame","notesMayShorten","anomalyNoteMayShorten"]:[])],1);
+ return rows[0] as Session & Record<string,any>|undefined;
+}
+async function settingsMutation(tx:Transaction,userId:string){
+ return (await readComplete(tx,`SELECT ${settingsMutationColumns} FROM public.user_settings WHERE user_id=$1 FOR UPDATE`,
+  [userId],settingsMutationFields,1))[0] as UserSettings|undefined;
+}
+
 export class DatabaseStorage implements IStorage {
+  constructor(private readonly database:Pick<typeof db,"transaction"|"select"|"insert"|"update"|"delete">=db,
+    private readonly writePool?:Pick<Pool,"connect">){}
+  private async write<T>(userId:string,operation:(tx:Transaction,budget:MutationScope)=>Promise<T>):Promise<T>{
+    // One checked-out native connection carries admission, business data and
+    // audit atomically. A transport timeout cannot safely return it to the pool.
+    const pool=this.writePool??(await import("./db")).pool;
+    let client:PoolClient|undefined,began=false,committed=false,destroy=false,active=false,commitAttempted=false,failed=false;
+    const pending:Promise<unknown>[]=[],deadline=performance.now()+READ_TIMEOUT_MS*6;
+    const nativeQuery=async(text:string,values:unknown[]=[],cleanup=false)=>{
+      const remaining=cleanup?READ_TIMEOUT_MS:Math.floor(deadline-performance.now());
+      if(remaining<1)throw new ResourceLimitError();
+      const config:QueryConfig&{query_timeout:number}={text,values,query_timeout:Math.min(READ_TIMEOUT_MS,remaining)};
+      try{return await client!.query(config);}catch(error){
+        const code=String((error as {code?:unknown})?.code??"");
+        if((error as Error)?.message==="Query read timeout"){destroy=true;throw new ResourceLimitError();}
+        if(!/^([0-9A-Z]{5})$/.test(code)||code.startsWith("08")||code==="57P01"){destroy=true;throw new BoundaryError(503);}
+        if(["57014","55P03"].includes(code))throw new ResourceLimitError();
+        throw error;
+      }
+    };
+    const track=<V>(promise:Promise<V>)=>{pending.push(promise);void promise.catch(()=>{failed=true;});return promise;};
+    const refused=()=>{const p=Promise.reject(new BoundaryError(503));void p.catch(()=>{});return p;};
+    const native:Transaction=Object.freeze({query(text:string,values:unknown[]=[]){
+      if(!active)return refused();
+      if(typeof text!=="string"||!/^\s*(SELECT|INSERT|UPDATE|DELETE|LOCK)\b/i.test(text)||text.includes(";")){
+        failed=true;return track(refused());
+      }
+      return track(Promise.resolve().then(()=>nativeQuery(text,values)));
+    }});
+    try{
+      client=await pool.connect();
+      await nativeQuery("BEGIN");began=true;active=true;
+      const result=await withTransactionReadBudget(native,async tx=>{
+        const value=await withOwnerWriteBudget(tx,userId,async budget=>{
+          // Preserve ISO-compatible exact audit instants in every session zone.
+          await tx.query("SELECT set_config('TimeZone','UTC',true)");
+          return operation(tx,budget);
+        });
+        await Promise.allSettled(pending);if(failed)throw new BoundaryError(503);
+        return value;
+      },deadline);
+      active=false;await Promise.allSettled(pending);if(failed)throw new BoundaryError(503);
+      commitAttempted=true;const commit=await nativeQuery("COMMIT");if(commit.command!=="COMMIT")throw new BoundaryError(503);
+      committed=true;return result;
+    }catch(error){
+      active=false;await Promise.allSettled(pending);
+      if(client&&began&&!committed&&!destroy){try{await nativeQuery("ROLLBACK",[],true);}catch{destroy=true;}}
+      if(client&&(!began||(commitAttempted&&!committed)))destroy=true;
+      throw error instanceof ResourceLimitError?error:destroy?new BoundaryError(503):error instanceof BoundaryError?error:new BoundaryError(503);
+    }finally{
+      active=false;if(client){try{client.release(destroy);}catch{throw new BoundaryError(503);}}
+    }
+  }
+
   async getSessions(userId: string): Promise<Session[]> {
-    return db
+    return this.database
       .select()
       .from(sessions)
       .where(and(eq(sessions.userId, userId), isNull(sessions.deletedAt)))
@@ -61,7 +141,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSessionsSince(userId: string, since: Date): Promise<Session[]> {
-    return db
+    return this.database
       .select()
       .from(sessions)
       .where(
@@ -74,169 +154,97 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(sessions.timestamp));
   }
 
-  async createSession(insertSession: InsertSession & { userId: string }): Promise<Session> {
-    const [session] = await db
-      .insert(sessions)
-      .values({ ...insertSession, timestamp: new Date(insertSession.timestamp) })
-      .returning();
-    return session;
-  }
-
-  /**
-   * Apply a PATCH to a non-deleted session and write a single edit-history
-   * row capturing the prior values of the changed fields plus the reason.
-   * Returns the updated session, or undefined if no matching active row exists.
-   * The history row and the update happen in one transaction so an audit row
-   * is never written without the matching update (and vice versa).
-   */
-  async updateSession(
-    userId: string,
-    id: string,
-    patch: UpdateSession,
-  ): Promise<Session | undefined> {
-    return db.transaction(async (tx) => {
-      const [current] = await tx
-        .select()
-        .from(sessions)
-        .where(
-          and(
-            eq(sessions.userId, userId),
-            eq(sessions.id, id),
-            isNull(sessions.deletedAt),
-          ),
-        );
-      if (!current) return undefined;
-
-      const update: Partial<typeof sessions.$inferInsert> = {};
-      const prior: Record<string, unknown> = {};
-      if (patch.domain !== undefined && patch.domain !== current.domain) {
-        update.domain = patch.domain;
-        prior.domain = current.domain;
-      }
-      if (patch.durationMinutes !== undefined && patch.durationMinutes !== current.durationMinutes) {
-        update.durationMinutes = patch.durationMinutes;
-        prior.durationMinutes = current.durationMinutes;
-      }
-      if (patch.timestamp !== undefined) {
-        const next = new Date(patch.timestamp);
-        if (next.getTime() !== current.timestamp.getTime()) {
-          update.timestamp = next;
-          prior.timestamp = current.timestamp.toISOString();
-        }
-      }
-      if (patch.notes !== undefined && (patch.notes ?? null) !== (current.notes ?? null)) {
-        update.notes = patch.notes ?? null;
-        prior.notes = current.notes;
-      }
-      // C1.1 — Persist the re-evaluated anomaly flag when the edit path sends it.
-      // anomalyNote is cleared automatically when isAnomaly becomes false so the
-      // row stays consistent (mirrors the POST /api/sessions create guard).
-      if (patch.isAnomaly !== undefined && patch.isAnomaly !== current.isAnomaly) {
-        update.isAnomaly = patch.isAnomaly;
-        prior.isAnomaly = current.isAnomaly;
-      }
-      const resolvedAnomalyNote = (patch.isAnomaly ?? current.isAnomaly) ? (patch.anomalyNote ?? current.anomalyNote ?? null) : null;
-      if (resolvedAnomalyNote !== (current.anomalyNote ?? null)) {
-        update.anomalyNote = resolvedAnomalyNote;
-        prior.anomalyNote = current.anomalyNote;
-      }
-
-      // No-op edits still record an audit row so the reason note is preserved.
-      await tx.insert(sessionEdits).values({
-        sessionId: id,
-        userId,
-        reason: patch.reason,
-        changedFields: JSON.stringify(prior),
-      });
-
-      if (Object.keys(update).length === 0) {
-        return current;
-      }
-
-      const [updated] = await tx
-        .update(sessions)
-        .set(update)
-        .where(
-          and(
-            eq(sessions.userId, userId),
-            eq(sessions.id, id),
-            isNull(sessions.deletedAt),
-          ),
-        )
-        .returning();
-      return updated;
+  async createSession(input: InsertSession & {userId:string}):Promise<Session>{
+    const parsed=insertSessionSchema.safeParse(input);if(!parsed.success)throw new BoundaryError(400);
+    const p=parsed.data,anomaly=p.isAnomaly??false;
+    if(anomaly&&!p.anomalyNote?.trim())throw new BoundaryError(400);
+    return this.write(input.userId,async(tx,{admitMutation})=>{
+      await admitMutation();
+      const created=await tx.query(`INSERT INTO public.sessions(user_id,domain,duration_minutes,timestamp,notes,is_anomaly,anomaly_note)
+        VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+        [input.userId,p.domain,p.durationMinutes,p.timestamp,p.notes??null,anomaly,anomaly?p.anomalyNote??null:null]);
+      return (await sessionMutation(tx,input.userId,created.rows[0].id))!;
     });
   }
 
-  async softDeleteSession(userId: string, id: string): Promise<Session | undefined> {
-    const [row] = await db
-      .update(sessions)
-      .set({ deletedAt: new Date() })
-      .where(
-        and(
-          eq(sessions.userId, userId),
-          eq(sessions.id, id),
-          isNull(sessions.deletedAt),
-        ),
-      )
-      .returning();
-    return row;
+  async updateSession(userId:string,id:string,patch:UpdateSession):Promise<Session|undefined>{
+    const parsed=updateSessionSchema.safeParse(patch);if(!parsed.success)throw new BoundaryError(400);const p=parsed.data;
+    return this.write(userId,async(tx,{admitMutation})=>{
+      const current=await sessionMutation(tx,userId,id,"s.deleted_at IS NULL",
+        `,s.notes IS NOT DISTINCT FROM $3::text AS "notesSame",
+        s.anomaly_note IS NOT DISTINCT FROM $4::text AS "anomalyNoteSame",
+        COALESCE(length(btrim(s.anomaly_note,chr(9)||chr(10)||chr(11)||chr(12)||chr(13)||chr(32)||chr(160)||chr(5760)||chr(8192)||chr(8193)||chr(8194)||chr(8195)||chr(8196)||chr(8197)||chr(8198)||chr(8199)||chr(8200)||chr(8201)||chr(8202)||chr(8232)||chr(8233)||chr(8239)||chr(8287)||chr(12288)||chr(65279)))>0,false) AS "anomalyNoteNonBlank",
+        ($5::timestamptz IS NULL OR s.timestamp=$5::timestamptz) AS "timestampSame",
+        ($6::int <= char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) AND $7::int <= octet_length(s.notes) AND ($6::int < char_length(s.notes)+char_length(regexp_replace(s.notes,'[^𐀀-􏿿]','','g')) OR $7::int < octet_length(s.notes))) AS "notesMayShorten",
+        ($8::int <= char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) AND $9::int <= octet_length(s.anomaly_note) AND ($8::int < char_length(s.anomaly_note)+char_length(regexp_replace(s.anomaly_note,'[^𐀀-􏿿]','','g')) OR $9::int < octet_length(s.anomaly_note))) AS "anomalyNoteMayShorten"`,
+        [p.notes??null,p.anomalyNote??null,p.timestamp??null,
+         typeof p.notes==="string"?p.notes.length:null,typeof p.notes==="string"?new TextEncoder().encode(p.notes).byteLength:null,
+         typeof p.anomalyNote==="string"?p.anomalyNote.length:null,typeof p.anomalyNote==="string"?new TextEncoder().encode(p.anomalyNote).byteLength:null]);
+      if(!current)return undefined;
+      if(p.notes!==undefined&&!current.notesSame&&!current.notesMayShorten)requireActivityText(p.notes);
+      if(typeof p.anomalyNote==="string"&&!current.anomalyNoteSame&&!current.anomalyNoteMayShorten)requireActivityText(p.anomalyNote);
+      const changes:Record<string,unknown>={},priorColumns:Record<string,string>={};
+      const change=(column:string,value:unknown,field:string)=>{changes[column]=value;priorColumns[field]=column;};
+      if(p.domain!==undefined&&p.domain!==current.domain)change("domain",p.domain,"domain");
+      if(p.durationMinutes!==undefined&&p.durationMinutes!==current.durationMinutes)change("duration_minutes",p.durationMinutes,"durationMinutes");
+      if(p.timestamp!==undefined&&!current.timestampSame)change("timestamp",p.timestamp,"timestamp");
+      if(p.notes!==undefined&&!current.notesSame)change("notes",p.notes,"notes");
+      if(p.isAnomaly!==undefined&&p.isAnomaly!==current.isAnomaly)change("is_anomaly",p.isAnomaly,"isAnomaly");
+      const anomaly=p.isAnomaly??current.isAnomaly;
+      if(p.isAnomaly===true&&!(typeof p.anomalyNote==="string"?p.anomalyNote.trim():current.anomalyNoteNonBlank))throw new BoundaryError(400);
+      // Unsubmitted historical anomaly text is preserved, including old
+      // contradictory metadata. Explicit false still intentionally clears it.
+      if(p.isAnomaly!==undefined||p.anomalyNote!==undefined){
+        if(!anomaly&&current.hasAnomalyNote)change("anomaly_note",null,"anomalyNote");
+        else if(anomaly&&typeof p.anomalyNote==="string"&&!current.anomalyNoteSame)change("anomaly_note",p.anomalyNote,"anomalyNote");
+      }
+      await admitMutation();
+      const pairs=Object.entries(priorColumns).flatMap(([field,column])=>["'"+field+"'","s."+column]);
+      const prior=pairs.length?"jsonb_build_object("+pairs.join(",")+")::text":"'{}'::text";
+      await tx.query(`INSERT INTO public.session_edits(session_id,user_id,reason,changed_fields)
+        SELECT s.id,$1,$3,${prior} FROM public.sessions s WHERE s.user_id=$1 AND s.id=$2 AND s.deleted_at IS NULL`,
+        [userId,id,p.reason]);
+      const names=Object.keys(changes);
+      if(names.length)await tx.query(`UPDATE public.sessions SET ${names.map((name,index)=>name+"=$"+(index+3)).join(",")}
+        WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL`,[userId,id,...Object.values(changes)]);
+      return sessionMutation(tx,userId,id);
+    });
   }
 
-  async restoreSession(userId: string, id: string): Promise<Session | undefined> {
-    const [row] = await db
-      .update(sessions)
-      .set({ deletedAt: null })
-      .where(
-        and(
-          eq(sessions.userId, userId),
-          eq(sessions.id, id),
-          isNotNull(sessions.deletedAt),
-        ),
-      )
-      .returning();
-    return row;
+  async softDeleteSession(userId:string,id:string):Promise<Session|undefined>{
+    return this.write(userId,async(tx,{admitMutation})=>{
+      const current=await sessionMutation(tx,userId,id,"s.deleted_at IS NULL");if(!current)return undefined;
+      await admitMutation();await tx.query("UPDATE public.sessions SET deleted_at=clock_timestamp() WHERE user_id=$1 AND id=$2 AND deleted_at IS NULL",[userId,id]);
+      return sessionMutation(tx,userId,id);
+    });
+  }
+
+  async restoreSession(userId:string,id:string):Promise<Session|undefined>{
+    return this.write(userId,async(tx,{admitMutation})=>{
+      const current=await sessionMutation(tx,userId,id,"s.deleted_at IS NOT NULL");if(!current)return undefined;
+      await admitMutation();await tx.query("UPDATE public.sessions SET deleted_at=NULL WHERE user_id=$1 AND id=$2 AND deleted_at IS NOT NULL",[userId,id]);
+      return sessionMutation(tx,userId,id);
+    });
   }
 
   async getDeletedSessions(userId: string): Promise<Session[]> {
-    return db
+    return this.database
       .select()
       .from(sessions)
       .where(and(eq(sessions.userId, userId), isNotNull(sessions.deletedAt)))
       .orderBy(desc(sessions.deletedAt));
   }
 
-  async purgeExpiredDeletedSessions(olderThan: Date): Promise<number> {
-    // Strict comparator (deletedAt < olderThan) — matches the "older than"
-    // semantics of the IStorage contract. Predicate is gated to soft-deleted
-    // rows only, so active sessions (deletedAt IS NULL) are never matched
-    // and a re-run with the same cutoff is a no-op (idempotent).
-    const removed = await db
-      .delete(sessions)
-      .where(and(isNotNull(sessions.deletedAt), lt(sessions.deletedAt, olderThan)))
-      .returning({ id: sessions.id });
-    return removed.length;
+  async purgeExpiredDeletedSessions(_olderThan: Date): Promise<number> {
+    // SOMR-469: age and reporting windows never authorize permanent deletion.
+    // Keep the old seam explicitly refusing so stale callers cannot erase rows.
+    throw new Error("Automatic age-based deletion is disabled; historical data is retained.");
   }
 
   // ----- Deviations -----
 
-  async createDeviation(input: InsertDeviation & { userId: string }): Promise<Deviation> {
-    const [row] = await db
-      .insert(deviations)
-      .values({
-        userId: input.userId,
-        domain: input.domain,
-        reason: input.reason,
-        startAt: new Date(input.startAt),
-        endAt: input.endAt ? new Date(input.endAt) : null,
-        excludeFromComposite: input.excludeFromComposite ?? true,
-      })
-      .returning();
-    return row;
-  }
-
   async getActiveDeviations(userId: string, now: Date = new Date()): Promise<Deviation[]> {
-    return db
+    return this.database
       .select()
       .from(deviations)
       .where(
@@ -252,7 +260,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPlannedDeviations(userId: string, now: Date = new Date()): Promise<Deviation[]> {
-    return db
+    return this.database
       .select()
       .from(deviations)
       .where(
@@ -267,7 +275,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllDeviations(userId: string): Promise<Deviation[]> {
-    return db
+    return this.database
       .select()
       .from(deviations)
       .where(and(eq(deviations.userId, userId), isNull(deviations.deletedAt)))
@@ -275,7 +283,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getDeviation(userId: string, id: string): Promise<Deviation | undefined> {
-    const [row] = await db
+    const [row] = await this.database
       .select()
       .from(deviations)
       .where(
@@ -288,138 +296,42 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
-  async updateDeviation(
-    userId: string,
-    id: string,
-    patch: UpdateDeviation,
-  ): Promise<Deviation | undefined> {
-    const update: Partial<typeof deviations.$inferInsert> = {};
-    if (patch.reason !== undefined) update.reason = patch.reason;
-    if (patch.startAt !== undefined) update.startAt = new Date(patch.startAt);
-    if (patch.endAt !== undefined) update.endAt = patch.endAt ? new Date(patch.endAt) : null;
-    if (patch.excludeFromComposite !== undefined) update.excludeFromComposite = patch.excludeFromComposite;
-    if (Object.keys(update).length === 0) {
-      return this.getDeviation(userId, id);
-    }
-    const [row] = await db
-      .update(deviations)
-      .set(update)
-      .where(
-        and(
-          eq(deviations.userId, userId),
-          eq(deviations.id, id),
-          isNull(deviations.deletedAt),
-        ),
-      )
-      .returning();
-    return row;
+  async getUserSettings(userId:string):Promise<UserSettings>{
+    return this.write(userId,async(tx,{admitMutation})=>{
+      const current=await settingsMutation(tx,userId);
+      if(current){
+        const normalized=normalizeComplianceWindowDays(current.windowDays);if(normalized===current.windowDays)return current;
+        await admitMutation();await tx.query("UPDATE public.user_settings SET window_days=$2,updated_at=clock_timestamp() WHERE user_id=$1",[userId,normalized]);
+      }else{
+        await admitMutation();await tx.query("INSERT INTO public.user_settings(user_id) VALUES($1)",[userId]);
+      }
+      return (await settingsMutation(tx,userId))!;
+    });
   }
 
-  async endDeviation(userId: string, id: string, endedAt: Date = new Date()): Promise<Deviation | undefined> {
-    const [row] = await db
-      .update(deviations)
-      .set({ endedAt })
-      .where(
-        and(
-          eq(deviations.userId, userId),
-          eq(deviations.id, id),
-          isNull(deviations.deletedAt),
-          isNull(deviations.endedAt),
-        ),
-      )
-      .returning();
-    return row;
+  async upsertUserSettings(userId:string,patch:InsertUserSettings):Promise<UserSettings>{
+    const parsed=insertUserSettingsSchema.safeParse(patch);if(!parsed.success)throw new BoundaryError(400);const p=parsed.data;
+    return this.write(userId,async(tx,{admitMutation})=>{
+      const current=await settingsMutation(tx,userId),defaults={dayStartHour:4,timezone:"America/New_York",windowDays:7,
+        notificationsEnabled:false,notificationTier:"WARNING"};
+      const next={...(current??defaults),...(current?{windowDays:normalizeComplianceWindowDays(current.windowDays)}:{}),...p};
+      const fields=["dayStartHour","timezone","windowDays","notificationsEnabled","notificationTier"] as const;
+      if(current&&fields.every(field=>next[field]===current[field]))return current;
+      await admitMutation();await tx.query(`INSERT INTO public.user_settings(user_id,day_start_hour,timezone,window_days,notifications_enabled,notification_tier,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) ON CONFLICT(user_id) DO UPDATE SET
+        day_start_hour=EXCLUDED.day_start_hour,timezone=EXCLUDED.timezone,window_days=EXCLUDED.window_days,
+        notifications_enabled=EXCLUDED.notifications_enabled,notification_tier=EXCLUDED.notification_tier,updated_at=EXCLUDED.updated_at`,
+        [userId,next.dayStartHour,next.timezone,next.windowDays,next.notificationsEnabled,next.notificationTier]);
+      return (await settingsMutation(tx,userId))!;
+    });
   }
 
-  async softDeleteDeviation(userId: string, id: string): Promise<Deviation | undefined> {
-    const [row] = await db
-      .update(deviations)
-      .set({ deletedAt: new Date() })
-      .where(
-        and(
-          eq(deviations.userId, userId),
-          eq(deviations.id, id),
-          isNull(deviations.deletedAt),
-        ),
-      )
-      .returning();
-    return row;
-  }
-
-  // ----- User settings -----
-
-  async getUserSettings(userId: string): Promise<UserSettings> {
-    const [existing] = await db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.userId, userId));
-    if (existing) {
-      const normalizedWindowDays = normalizeComplianceWindowDays(existing.windowDays);
-      if (normalizedWindowDays === existing.windowDays) return existing;
-
-      // SOMR-328 — Persist the compatibility conversion on first read so
-      // legacy 21/30-day selections cannot remain active but invisible in UI.
-      const [migrated] = await db
-        .update(userSettings)
-        .set({ windowDays: normalizedWindowDays, updatedAt: new Date() })
-        .where(and(
-          eq(userSettings.userId, userId),
-          eq(userSettings.windowDays, existing.windowDays),
-        ))
-        .returning();
-      if (migrated) return migrated;
-
-      // A concurrent PATCH replaced the legacy value after our read. Return
-      // that newer row instead of overwriting the user's canonical selection.
-      const [current] = await db
-        .select()
-        .from(userSettings)
-        .where(eq(userSettings.userId, userId));
-      if (!current) throw new Error("User settings disappeared during migration");
-      return current;
-    }
-    // First read for this user — insert defaults so subsequent reads + the
-    // PATCH endpoint always have a row to update. onConflictDoNothing makes
-    // this safe under concurrent first reads.
-    const [created] = await db
-      .insert(userSettings)
-      .values({ userId })
-      .onConflictDoNothing({ target: userSettings.userId })
-      .returning();
-    if (created) return created;
-    // Race lost — re-read.
-    const [row] = await db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.userId, userId));
-    return row;
-  }
-
-  async upsertUserSettings(
-    userId: string,
-    patch: InsertUserSettings,
-  ): Promise<UserSettings> {
-    // Normalize any legacy stored window before applying a partial patch. This
-    // also auto-creates the default row for a first-time user.
-    await this.getUserSettings(userId);
-
-    const update: Partial<typeof userSettings.$inferInsert> = { updatedAt: new Date() };
-    if (patch.dayStartHour !== undefined) update.dayStartHour = patch.dayStartHour;
-    if (patch.timezone !== undefined) update.timezone = patch.timezone;
-    if (patch.windowDays !== undefined) update.windowDays = patch.windowDays;
-    if (patch.notificationsEnabled !== undefined) update.notificationsEnabled = patch.notificationsEnabled;
-    if (patch.notificationTier !== undefined) update.notificationTier = patch.notificationTier;
-
-    const [row] = await db
-      .insert(userSettings)
-      .values({ userId, ...update })
-      .onConflictDoUpdate({
-        target: userSettings.userId,
-        set: update,
-      })
-      .returning();
-    return row;
-  }
 }
 
 export const storage = new DatabaseStorage();
+
+// Resolve the existing application pool only when a bounded read is requested.
+// Importing unrelated storage methods must not acquire an eager pool dependency.
+export const historyReads = new LegacyHistoryReads({
+  connect: async () => (await import("./db")).pool.connect(),
+});

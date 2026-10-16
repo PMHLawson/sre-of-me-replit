@@ -1,10 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer } from "node:http";
+import { BoundaryError } from "./lib/org-context";
+import { ResourceLimitError } from "./lib/read-budget";
+import { WriteResourceLimitError } from "./lib/write-resource-budget";
 
 const fake = vi.hoisted(() => ({
   owner: "invented-explanation-owner-ALPHA" as string | null,
   storage: {
+    getUserSettings:vi.fn(),upsertUserSettings:vi.fn(),
     updateSession: vi.fn(), createDeviation: vi.fn(), updateDeviation: vi.fn(),
     endDeviation: vi.fn(), softDeleteDeviation: vi.fn(),
   },
@@ -46,7 +50,7 @@ const cases = [
   { name: "deviation-create", method: "POST", path: "/api/deviations",
     storage: "createDeviation", base: { domain: "music", startAt: at }, optional: false, status: 201 },
   { name: "deviation-update", method: "PATCH", path: `/api/deviations/${encodeURIComponent(id)}`,
-    storage: "updateDeviation", base: { excludeFromComposite: false }, optional: true, status: 200 },
+    storage: "updateDeviation", base: { excludeFromComposite: false, changeReason: "Invented edit explanation" }, optional: true, status: 200 },
 ] as const;
 const app = express();
 app.use(express.json());
@@ -60,7 +64,12 @@ app.use((req, _res, next) => {
 const listener = createServer(app);
 let origin: string;
 beforeAll(async () => {
-  await registerRoutes(listener, app); // No index/setupAuth/startup lifecycle.
+  await registerRoutes(listener, app, undefined, {
+    create: async (req, input) => fake.storage.createDeviation({ ...(input as object), userId: (req.user as any).claims.sub }),
+    edit: async (req, key, input) => fake.storage.updateDeviation((req.user as any).claims.sub, key, input),
+    end: async (req, key, input) => fake.storage.endDeviation((req.user as any).claims.sub, key, input),
+    softDelete: async (req, key, input) => fake.storage.softDeleteDeviation((req.user as any).claims.sub, key, input),
+  }); // No index/setupAuth/startup lifecycle.
   await new Promise<void>((resolve, reject) => {
     listener.once("error", reject);
     listener.listen(0, "127.0.0.1", () => { listener.removeListener("error", reject); resolve(); });
@@ -93,6 +102,8 @@ describe("real explanation request handlers with invented auth/storage boundarie
       const expectedPatch = { ...c.base, ...(input.present ? { reason: input.value } : {}) };
       const value = row(c.name, owner, input.value);
       fake.storage[c.storage].mockResolvedValue(value);
+      const deferredLength=c.name==="deviation-update"&&input.id==="501";
+      if(deferredLength)fake.storage.updateDeviation.mockRejectedValue(new BoundaryError(400));
       const response = await fetch(origin + c.path + "?userId=forged-query-owner", {
         method: c.method, headers: { "Content-Type": "application/json",
           ...(input.id === "undefined" ? { "x-invented-explicit-undefined": "yes" } : {}) },
@@ -102,7 +113,11 @@ describe("real explanation request handlers with invented auth/storage boundarie
         ? c.optional : ["meaningful", "padded", "500"].includes(input.id);
       const body = await response.json();
       expect(response.status).toBe(valid ? c.status : 400);
-      if (!valid) {
+      if(deferredLength){
+        expect(body.message).toBe("Invalid request");
+        expect(fake.storage.updateDeviation).toHaveBeenCalledExactlyOnceWith(owner,id,expectedPatch);
+        for(const [name,method] of Object.entries(fake.storage))if(name!=="updateDeviation")expect(method).not.toHaveBeenCalled();
+      } else if (!valid) {
         expect(body.errors.fieldErrors.reason.length).toBeGreaterThan(0);
         noStorage();
       } else {
@@ -122,16 +137,32 @@ describe("real explanation request handlers with invented auth/storage boundarie
     expect(response.status).toBe(401); noStorage();
   });
   for (const owner of owners) for (const action of ["end", "delete"] as const) {
-    it(`${owner}/${action} has no new action-reason requirement`, async () => {
+    it(`${owner}/${action} forwards the explicit change explanation separately`, async () => {
       fake.owner = owner;
       const method = action === "end" ? "endDeviation" : "softDeleteDeviation";
       const value = row("deviation-update", owner, "Invented retained reason");
       fake.storage[method].mockResolvedValue(value);
       const response = await fetch(origin + `/api/deviations/${encodeURIComponent(id)}` + (action === "end" ? "/end" : ""),
-        { method: action === "end" ? "POST" : "DELETE" });
+        { method: action === "end" ? "POST" : "DELETE", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ changeReason: "Invented lifecycle explanation" }) });
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual(JSON.parse(JSON.stringify(value)));
-      expect(fake.storage[method]).toHaveBeenCalledExactlyOnceWith(owner, id);
+      expect(fake.storage[method]).toHaveBeenCalledExactlyOnceWith(owner, id, { changeReason: "Invented lifecycle explanation" });
     });
   }
+});
+describe("settings resource errors remain explicit and owner scoped",()=>{
+ for(const method of ["GET","PATCH"] as const)for(const kind of ["rate","capacity","read"] as const){
+  it(method+" settings "+kind+" denial never reports generic500 or success",async()=>{
+   const failure=kind==="read"?new ResourceLimitError():new WriteResourceLimitError(kind,kind==="rate"?17:null);
+   const call=method==="GET"?fake.storage.getUserSettings:fake.storage.upsertUserSettings;call.mockRejectedValue(failure);
+   const response=await fetch(origin+"/api/settings?userId=forged",{method,
+    headers:{"Content-Type":"application/json"},...(method==="PATCH"?{body:JSON.stringify({windowDays:14,userId:"forged"})}:{})});
+   expect(response.status).toBe(kind==="read"?503:429);
+   const body=await response.json();expect(body).toMatchObject({message:failure.message,code:failure.code});
+   expect(response.headers.get("Retry-After")).toBe(kind==="rate"?"17":null);
+   if(method==="GET")expect(call).toHaveBeenCalledExactlyOnceWith(owners[0]);
+   else expect(call).toHaveBeenCalledExactlyOnceWith(owners[0],{windowDays:14});
+  });
+ }
 });

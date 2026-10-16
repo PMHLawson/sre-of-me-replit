@@ -5,14 +5,16 @@ import viteConfig from "../vite.config";
 import fs from "fs";
 import path from "path";
 import { nanoid } from "nanoid";
+import { projectOrigins } from "../shared/trusted-addresses";
 
 const viteLogger = createLogger();
 
 export async function setupVite(server: Server, app: Express) {
   const serverOptions = {
+    ...viteConfig.server,
     middlewareMode: true,
     hmr: { server, path: "/vite-hmr" },
-    allowedHosts: true as const,
+    allowedHosts: projectOrigins().map(origin => new URL(origin).hostname),
   };
 
   const vite = await createViteServer({
@@ -22,7 +24,11 @@ export async function setupVite(server: Server, app: Express) {
       ...viteLogger,
       error: (msg, options) => {
         viteLogger.error(msg, options);
-        process.exit(1);
+        // A normal rejected file request is not a server-startup failure.
+        if (!(msg.startsWith("The request id ") &&
+              msg.endsWith(" is outside of Vite serving allow list."))) {
+          process.exit(1);
+        }
       },
     },
     server: serverOptions,
@@ -55,4 +61,5 @@ export async function setupVite(server: Server, app: Express) {
       next(e);
     }
   });
+  return vite;
 }

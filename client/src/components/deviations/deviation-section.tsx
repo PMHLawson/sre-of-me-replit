@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { DeviationText } from '@/components/session-text';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, CalendarOff, CalendarClock, Pencil, X, Trash2 } from 'lucide-react';
 import {
   useAppStore,
@@ -8,6 +9,8 @@ import {
   type DeviationPatch,
 } from '@/store';
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -72,12 +75,12 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
               </span>
             )}
           </div>
-          <p
+          <div
             className="text-sm font-medium text-foreground mt-1 break-words"
             data-testid={`text-deviation-reason-${deviation.id}`}
           >
-            {deviation.reason}
-          </p>
+            <DeviationText deviation={deviation} />
+          </div>
           <p className="text-xs text-muted-foreground mt-1 font-mono">
             {formatRange(deviation.startAt, deviation.endAt)}
           </p>
@@ -116,8 +119,19 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
 }
 
 export function DeviationSection() {
+  const dataOwner = useAppStore(s => s.dataOwner);
   const deviations = useAppStore((s) => s.deviations);
   const deviationsLoaded = useAppStore((s) => s.deviationsLoaded);
+  const currentError = useAppStore(s => s.deviationsError);
+  const pages = useAppStore(s => s.deviationPages);
+  const loaded = useAppStore(s => s.deviationPagesLoaded);
+  const loading = useAppStore(s => s.deviationPagesLoading);
+  const error = useAppStore(s => s.deviationPagesError);
+  const complete = useAppStore(s => s.deviationPagesComplete);
+  const fetchPages = useAppStore(s => s.fetchDeviationPages);
+  const [browse, setBrowse] = useState(false);
+  useEffect(() => { if (browse && !loaded && !loading && !error) void fetchPages(); },
+    [browse, loaded, loading, error, fetchPages]);
   const createDeviation = useAppStore((s) => s.createDeviation);
   const updateDeviation = useAppStore((s) => s.updateDeviation);
   const endDeviation = useAppStore((s) => s.endDeviation);
@@ -127,6 +141,14 @@ export function DeviationSection() {
   const [editing, setEditing] = useState<Deviation | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Deviation | null>(null);
   const [confirmEnd, setConfirmEnd] = useState<Deviation | null>(null);
+  const [changeReason, setChangeReason] = useState('');
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSaving, setActionSaving] = useState(false);
+  useEffect(() => { setChangeReason(''); setActionError(null); }, [confirmEnd?.id, confirmDelete?.id]);
+  useEffect(() => {
+    setConfirmEnd(null); setConfirmDelete(null); setFormOpen(false); setEditing(null);
+    setChangeReason(''); setActionError(null);
+  }, [dataOwner]);
 
   const { active, planned } = useMemo(() => {
     const now = new Date();
@@ -179,6 +201,7 @@ export function DeviationSection() {
         </Button>
       </div>
 
+      {currentError && <p role="alert">Current deviations could not be verified.</p>}
       {!deviationsLoaded ? (
         <div
           className="bg-card border border-border/50 rounded-2xl p-4 text-sm text-muted-foreground"
@@ -242,6 +265,16 @@ export function DeviationSection() {
         </>
       )}
 
+      <button className="underline" onClick={() => setBrowse(v => !v)}>{browse ? 'Hide' : 'Browse'} saved deviation history</button>
+      {browse && <div className="space-y-3" data-testid="deviation-history">
+        <p>{pages.length} shown deviations{!complete ? ' · more may be available' : ''}</p>
+        {loading && <p role="status">Loading…</p>}
+        {error && <div role="alert"><p>{error}</p><button onClick={() => void fetchPages(loaded)}>Try again</button></div>}
+        {pages.map(d => <div key={d.id} className="border p-3 rounded"><p>{DOMAIN_LABEL[d.domain as Domain]} · {formatRange(d.startAt, d.endAt)}</p>
+          <DeviationText deviation={d} /></div>)}
+        {loaded && !complete && <button disabled={loading} onClick={() => void fetchPages(true)}>Load more deviations</button>}
+        {loaded && !error && !pages.length && <p>No saved deviations.</p>}
+      </div>}
       <DeviationForm
         open={formOpen}
         onOpenChange={setFormOpen}
@@ -249,7 +282,7 @@ export function DeviationSection() {
         onSubmit={handleSubmit}
       />
 
-      <AlertDialog open={!!confirmEnd} onOpenChange={(o) => !o && setConfirmEnd(null)}>
+      <AlertDialog open={!!confirmEnd} onOpenChange={(o) => !o && !actionSaving && setConfirmEnd(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>End deviation now?</AlertDialogTitle>
@@ -259,15 +292,30 @@ export function DeviationSection() {
               budget drawdown immediately.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="end-deviation-reason">Reason for this ending</Label>
+            <Textarea id="end-deviation-reason" value={changeReason} onChange={event => setChangeReason(event.target.value)}
+              maxLength={500} required disabled={actionSaving} data-testid="input-end-deviation-reason" />
+            <p className="text-sm text-muted-foreground">Saved in its history, separately from the original deviation reason.</p>
+            {actionError && <p role="alert">{actionError}</p>}
+          </div>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="button-end-deviation-cancel">
+            <AlertDialogCancel disabled={actionSaving} data-testid="button-end-deviation-cancel">
               Keep active
             </AlertDialogCancel>
             <AlertDialogAction
               data-testid="button-end-deviation-confirm"
-              onClick={async () => {
-                if (confirmEnd) await endDeviation(confirmEnd.id);
-                setConfirmEnd(null);
+              disabled={actionSaving || !changeReason.trim()}
+              onClick={async event => {
+                event.preventDefault();
+                if (!confirmEnd || !changeReason.trim() || actionSaving) return;
+                setActionSaving(true); setActionError(null);
+                try {
+                  const saved = await endDeviation(confirmEnd.id, changeReason.trim());
+                  if (useAppStore.getState().dataOwner !== dataOwner) return;
+                  if (saved) setConfirmEnd(null);
+                  else setActionError('The change was not confirmed. Your explanation is still here; check the saved record before retrying.');
+                } finally { setActionSaving(false); }
               }}
             >
               End now
@@ -276,7 +324,7 @@ export function DeviationSection() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={!!confirmDelete} onOpenChange={(o) => !o && setConfirmDelete(null)}>
+      <AlertDialog open={!!confirmDelete} onOpenChange={(o) => !o && !actionSaving && setConfirmDelete(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this deviation?</AlertDialogTitle>
@@ -285,15 +333,30 @@ export function DeviationSection() {
               recomputes as if the deviation never existed.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="delete-deviation-reason">Reason for this deletion</Label>
+            <Textarea id="delete-deviation-reason" value={changeReason} onChange={event => setChangeReason(event.target.value)}
+              maxLength={500} required disabled={actionSaving} data-testid="input-delete-deviation-reason" />
+            <p className="text-sm text-muted-foreground">Saved in its history, separately from the original deviation reason.</p>
+            {actionError && <p role="alert">{actionError}</p>}
+          </div>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="button-delete-deviation-cancel">
+            <AlertDialogCancel disabled={actionSaving} data-testid="button-delete-deviation-cancel">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               data-testid="button-delete-deviation-confirm"
-              onClick={async () => {
-                if (confirmDelete) await deleteDeviation(confirmDelete.id);
-                setConfirmDelete(null);
+              disabled={actionSaving || !changeReason.trim()}
+              onClick={async event => {
+                event.preventDefault();
+                if (!confirmDelete || !changeReason.trim() || actionSaving) return;
+                setActionSaving(true); setActionError(null);
+                try {
+                  const saved = await deleteDeviation(confirmDelete.id, changeReason.trim());
+                  if (useAppStore.getState().dataOwner !== dataOwner) return;
+                  if (saved) setConfirmDelete(null);
+                  else setActionError('The change was not confirmed. Your explanation is still here; check the saved record before retrying.');
+                } finally { setActionSaving(false); }
               }}
             >
               Delete

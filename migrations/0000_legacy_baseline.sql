@@ -1,0 +1,6 @@
+-- EXISTING-INSTALLATION BASELINE ACKNOWLEDGEMENT ONLY. No executable SQL.
+-- The unchanged generated snapshot describes six legacy tables.
+-- This is NOT fresh-database provisioning and does not assert live parity.
+-- SOMR-429 must verify the live catalog, existing migration ledger and backups
+-- against that snapshot before any application; stop on any mismatch.
+-- Raw generated legacy CREATE SQL is retained only in private review evidence.
