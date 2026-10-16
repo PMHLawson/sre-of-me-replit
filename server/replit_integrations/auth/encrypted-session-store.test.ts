@@ -202,8 +202,11 @@ describe("encrypted OAuth token session persistence on a disposable synthetic da
     expect(raw.cookie).not.toHaveProperty("_expires");
     expect(Date.parse(raw.cookie.expires) - Date.now()).toBeGreaterThan(45_000);
     expect(Date.parse(raw.cookie.expires) - Date.now()).toBeLessThanOrEqual(60_000);
-    const storedExpiry = (await pool!.query("SELECT expire FROM http_sessions WHERE sid=$1", [sid])).rows[0].expire;
-    expect(Math.abs(new Date(storedExpiry).getTime() - new Date(raw.cookie.expires).getTime())).toBeLessThan(2000);
+    // Compare in PostgreSQL UTC instead of letting pg parse a timezone-less timestamp in Node's local zone.
+    const storedExpiry = (await pool!.query(
+      "SELECT (EXTRACT(EPOCH FROM expire AT TIME ZONE 'UTC') * 1000)::double precision AS expire_ms FROM http_sessions WHERE sid=$1", [sid],
+    )).rows[0].expire_ms;
+    expect(Math.abs(Number(storedExpiry) - Date.parse(raw.cookie.expires))).toBeLessThan(2000);
     const user = raw.passport.user;
     expect(isEncryptedRefreshToken(user.refresh_token)).toBe(true);
     expect(user.refresh_token.keyId).toBe("active");

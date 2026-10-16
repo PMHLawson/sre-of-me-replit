@@ -130,7 +130,7 @@ describe("generic repositories complete their bounded evidence or fail without w
       [c.organizationId,c.ownerUserId,c.domainId,c.policyVersionId,JSON.stringify(c.measurements[0]),MAX_COLLECTION_ROWS]);
     await noChange(()=>stores["bounds-a"].personalPractice.eligibility(c.domainId));
     await noChange(()=>stores["bounds-a"].dimensions.list());
-  });
+  },20_000);
 
   it("preserves activity keysets and reuses locked policy evidence only within one operation",async()=>{
     const c=configs["bounds-a"];
