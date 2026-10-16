@@ -175,6 +175,12 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     await f.client.query(`INSERT INTO policy_versions(policy_version_id,org_id,owner_user_id,domain_id,revision,
       effective_from,previous_version_id,configuration) VALUES($1,$2,$3,$4,2,$5,$6,$7)`,
       [next.policyVersionId,context.orgId,context.actorUserId,config.domainId,next.effectiveFrom,config.policyVersionId,next]);
+    // Complete the persisted measurement representation so this fixture isolates
+    // its intended boundary/precision failure rather than a missing definition.
+    for(const measurement of next.measurements)await f.client.query(`INSERT INTO dimension_definitions
+      (org_id,owner_user_id,domain_id,policy_version_id,measurement_id,definition)
+      VALUES($1,$2,$3,$4,$5,$6)`,[context.orgId,context.actorUserId,config.domainId,
+        next.policyVersionId,measurement.measurementId,measurement]);
     const old={...episode,effectiveEnd:next.effectiveFrom},second:CadenceEpisode={...episode,
       episodeId:"second",policy:next,origin:{...episode.origin,at:next.effectiveFrom}};
     const result=await loader(verifier([old,second]),[old,second]).load(now);
@@ -230,6 +236,12 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     await f.client.query(`INSERT INTO policy_versions(policy_version_id,org_id,owner_user_id,domain_id,revision,
       effective_from,previous_version_id,configuration) VALUES($1,$2,$3,$4,2,$5,$6,$7)`,
       [next.policyVersionId,context.orgId,context.actorUserId,config.domainId,next.effectiveFrom,config.policyVersionId,next]);
+    // Complete the persisted measurement representation so this fixture isolates
+    // its intended boundary/precision failure rather than a missing definition.
+    for(const measurement of next.measurements)await f.client.query(`INSERT INTO dimension_definitions
+      (org_id,owner_user_id,domain_id,policy_version_id,measurement_id,definition)
+      VALUES($1,$2,$3,$4,$5,$6)`,[context.orgId,context.actorUserId,config.domainId,
+        next.policyVersionId,measurement.measurementId,measurement]);
     const old={...episode,effectiveEnd:next.effectiveFrom},second:CadenceEpisode={...episode,
       episodeId:"micro-second",policy:next,origin:{...episode.origin,at:next.effectiveFrom}};
     const result=await loader(verifier([old,second]),[old,second]).load(now);
