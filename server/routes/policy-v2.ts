@@ -8,14 +8,14 @@ type Service = ReturnType<typeof createDomainServiceV2>;
 /** Management only: no migration, rollout control, scoring or authority supplied by callers. */
 export function createPolicyV2Router(options: { service: Service; authenticate: RequestHandler }) {
   if (!options || typeof options.authenticate !== "function" || !options.service ||
-    ["list", "read", "create", "configure"].some(key => typeof options.service[key as keyof Service] !== "function"))
+    ["list", "read", "create", "configure","listSavedEvaluations"].some(key => typeof options.service[key as keyof Service] !== "function"))
     throw new BoundaryError(503);
   const router = Router();
   router.use(options.authenticate);
   router.use(json({ limit: "100kb", strict: true }));
-  const handle = (status: number, operation: (request: any) => Promise<unknown>): RequestHandler => (request, response) => {
+  const handle = (status: number, operation: (request: any) => Promise<unknown>,allowQuery=false): RequestHandler => (request, response) => {
     void Promise.resolve().then(() => {
-      if (Object.keys(request.query ?? {}).length > 0)
+      if (!allowQuery&&Object.keys(request.query ?? {}).length > 0)
         throw new DomainInputError([{ path: "query", code: "unsupported_query", message: "This endpoint does not accept query parameters." }]);
       if (request.method === "GET" && request.body !== undefined)
         throw new DomainInputError([{ path: "body", code: "unexpected_body", message: "This read endpoint does not accept a request body." }]);
@@ -31,6 +31,8 @@ export function createPolicyV2Router(options: { service: Service; authenticate: 
   };
   router.get("/", handle(200, request => options.service.list(request)));
   router.get("/:domainId", handle(200, request => options.service.read(request, request.params.domainId)));
+  router.get("/:domainId/evaluations",handle(200,request=>
+    options.service.listSavedEvaluations(request,request.params.domainId,request.query),true));
   router.post("/", handle(201, request => options.service.create(request, request.body)));
   router.post("/:domainId/policies", handle(201, request => options.service.configure(request, request.params.domainId, request.body)));
   router.use((error: any, _request: any, response: any, _next: any) => {

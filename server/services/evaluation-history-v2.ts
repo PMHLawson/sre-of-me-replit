@@ -60,6 +60,7 @@ export type EvaluationHistoryAssembly = {
   aggregate:{status:"unavailable";reason:"cross-version-aggregate-not-approved"|"scoring-recipe-not-supplied"};
   completeness:{kind:"verified-by-injected-server-source"|"unverified";databaseIntegration:"scoped-read-loader"};
 };
+const verifiedHistoryLoaders=new WeakMap<object,{db:OwnershipDatabase;context:OrgContext;domainId:string}>();
 const validId=(v:unknown):v is string=>typeof v==="string"&&v.length>0&&v.length<=200&&v.trim()===v&&
   !/[\u0000-\u001f\u007f]/.test(v)&&v!=="__proto__";
 const validScope=(v:unknown):v is HistoryScope=>!!v&&typeof v==="object"&&
@@ -306,7 +307,7 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
   const scope={organizationId:context.orgId,ownerUserId:context.actorUserId,domainId};
   const registered=structuredClone(episodes);
   const verifyCoverage=verification.verifyCoverage,resolveBreaks=verification.resolveBreaks;
-  return Object.freeze({load:(now:string)=>bounded(()=>db.transaction(raw=>withTransactionReadBudget(raw,async tx=>{
+  const loader=Object.freeze({load:(now:string)=>bounded(()=>db.transaction(raw=>withTransactionReadBudget(raw,async tx=>{
     await revalidate(tx,db,context);
     const rows=await readComplete(tx,`SELECT jsonb_build_object(
       'capturedAt',date_trunc('milliseconds',clock_timestamp()),
@@ -450,4 +451,13 @@ export function createEvaluationHistoryLoader(db:OwnershipDatabase, context:OrgC
     if(errors.length){result.status="unavailable";result.reason=errors.includes("unsupported_timestamp_precision")?"unsupported_timestamp_precision":"persisted_history_mismatch";}
     return result;
   })))});
+  verifiedHistoryLoaders.set(loader,{db,context,domainId});
+  return loader;
 }
+/** Runtime brand prevents dormant persistence from accepting caller-built history. */
+export function isVerifiedEvaluationHistoryLoader(value:unknown,db?:OwnershipDatabase,context?:OrgContext,domainId?:string)
+  :value is ReturnType<typeof createEvaluationHistoryLoader>{
+  const binding=value&&typeof value==="object"?verifiedHistoryLoaders.get(value):undefined;
+  return !!binding&&(!db||binding.db===db)&&(!context||binding.context===context)&&(!domainId||binding.domainId===domainId);
+}
+export type EvaluationHistoryLoader=ReturnType<typeof createEvaluationHistoryLoader>;

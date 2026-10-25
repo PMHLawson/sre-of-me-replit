@@ -20,7 +20,8 @@ export type EvaluationInput = {
   now: string; windowDays: number;
   policy: DomainConfiguration;
   observations: import("./domain-config").Observation[];
-  coverage: { onboardingAt: string; policyStart: string; policyEnd: string };
+  /** A null end is an explicitly open current policy, not a fabricated expiry. */
+  coverage: { onboardingAt: string; policyStart: string; policyEnd: string | null };
   breaks: import("./evaluator-window").Interval[];
   recipe: EvaluationRecipe;
 };

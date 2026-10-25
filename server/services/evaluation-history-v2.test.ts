@@ -7,10 +7,14 @@ import type { DomainConfiguration,MeasurementDefinition } from "../../shared/dom
 import type { CadenceEpisode } from "../../shared/cadence-derived";
 import { createEvaluationHistoryLoader,evaluationHistoryFingerprint,historyBreakFingerprint,
   type HistorySnapshot,type HistoryCoverageReceipt,type HistoryVerification } from "./evaluation-history-v2";
+import { createEvaluationPersistence } from "./evaluation-persistence-v2";
+import type { EvaluationRecipe } from "../../shared/evaluator-recipe";
+import { ADAPTED, ADAPTED_FUTURE_EXPECTATION } from "../../shared/fixtures/domain-config-cases";
 
 describe("authenticated complete history and exact policy segmentation",()=>{
   let f:Awaited<ReturnType<typeof startFixture>>;
   let context:OrgContext,other:OrgContext,config:DomainConfiguration,episode:CadenceEpisode;
+  let scoringConfig:DomainConfiguration,scoringEpisode:CadenceEpisode;
   const now="2026-01-15T12:00:00Z";
   const frequency:MeasurementDefinition={measurementId:"frequency",displayName:"Qualifying days",meaning:"Days with qualifying practice",
     role:"practice",comparisonDirection:"higher_is_better",kind:"frequency",valueType:"integer",
@@ -31,6 +35,8 @@ describe("authenticated complete history and exact policy segmentation",()=>{
   });
   const loader=(verification:HistoryVerification=verifier(),episodes:CadenceEpisode[]=[episode])=>
     createEvaluationHistoryLoader(f.db,context,config.domainId,episodes,verification);
+  const scoringLoader=(verification:HistoryVerification=verifier([scoringEpisode]))=>
+    createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[scoringEpisode],verification);
   beforeAll(async()=>{
     f=await startFixture("evaluation-history");
     await f.client.query(`INSERT INTO users(id) VALUES ('history-owner'),('history-other'),('history-peer');
@@ -41,7 +47,7 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     other=await createOrgContextResolver(f.db)({isAuthenticated:()=>true,user:{claims:{sub:"history-other"}}});
   },60000);
   beforeEach(async()=>{
-    await f.client.query(`DELETE FROM public.audit_events;DELETE FROM public.source_bindings;
+    await f.client.query(`DELETE FROM public.audit_events;DELETE FROM public.evaluation_results;DELETE FROM public.source_bindings;
       DELETE FROM public.deviation_domains;DELETE FROM public.deviations_v2;DELETE FROM public.deviations;
       DELETE FROM public.observations;DELETE FROM public.dimension_definitions;DELETE FROM public.policy_versions;
       DELETE FROM public.domains;DELETE FROM public.owner_write_resource_budgets;`);
@@ -57,15 +63,53 @@ describe("authenticated complete history and exact policy segmentation",()=>{
         kind:"verified-effective-policy-origin"},effectiveEnd:null};
     const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
     await store.domains.createWithPolicy({domainId:config.domainId,slug:"history",displayName:config.displayName},config,"Synthetic setup");
+    scoringConfig=configurationFor("history-scoring",structuredClone(MEASUREMENTS[0]),50);
+    Object.assign(scoringConfig,{organizationId:context.orgId,ownerUserId:context.actorUserId,
+      domainId:"history-scoring-domain",policyVersionId:"history-scoring-policy",effectiveFrom:"2026-01-01T00:00:00Z",
+      boundary:{timezone:"UTC",dayStartHour:0}});
+    const durationTarget=scoringConfig.targets.normal.conditions[0];
+    durationTarget.basis={kind:"period",windowDays:7};
+    durationTarget.periodAggregation={sourceBasis:"per_event",method:"sum"};
+    scoringConfig.measurements.push(frequency);
+    scoringConfig.targets.normal.conditions.push(conditionFor(frequency,5));
+    scoringConfig.qualification={kind:"condition",condition:conditionFor(MEASUREMENTS[0],10)};
+    scoringEpisode={episodeId:"history-scoring-episode",policy:structuredClone(scoringConfig),windowDays:14,
+      targetId:scoringConfig.targets.normal.targetId,frequencyMeasurementId:frequency.measurementId,
+      origin:{at:scoringConfig.effectiveFrom,sourceId:"fixture-scoring-source",kind:"verified-effective-policy-origin"},
+      effectiveEnd:null};
+    await store.domains.createWithPolicy({domainId:scoringConfig.domainId,slug:"history-scoring",
+      displayName:scoringConfig.displayName},scoringConfig,"Synthetic scoring setup");
   });
   afterAll(async()=>{if(f)await f.cleanup();},60000);
   async function add(id:string,at:string,amount=10,c=config){
     const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
     await store.observations.create({observation:{...observationFor(c,id,amount),observedAt:at},idempotencyKey:id},"Synthetic event");
   }
+  async function addScoring(id:string,at:string,amount=10){
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.observations.create({observation:{...observationFor(scoringConfig,id,amount),observedAt:at},
+      idempotencyKey:id},"Synthetic scoring event");
+  }
+  function scoringRecipe():EvaluationRecipe{
+    return {recipeId:"synthetic-reviewed-history-recipe",version:"1",organizationId:context.orgId,
+      ownerUserId:context.actorUserId,domainId:scoringConfig.domainId,policyVersionId:scoringConfig.policyVersionId,
+      targetId:scoringConfig.targets.normal.targetId,targetSelection:"normal",qualification:scoringConfig.qualification??null,
+      components:scoringConfig.targets.normal.conditions.map(target=>{
+        const measurement=scoringConfig.measurements.find(m=>m.measurementId===target.measurementId)!;
+        return {measurement:structuredClone(measurement),targetCondition:structuredClone(target),weight:0.5,mandatory:true,
+          percentage:"positive-linear-ratio-v1" as const,
+          actual:measurement.kind==="frequency"?"distinct-qualifying-days" as const:"sum-events" as const};
+      })};
+  }
+  function persistenceWriter(recipe=scoringRecipe(),history=scoringLoader()){
+    return createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
+      recipes:[recipe],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+  }
   async function state(){
     return (await f.client.query(`SELECT jsonb_build_object('observations',(SELECT jsonb_agg(to_jsonb(o)) FROM observations o),
-      'audit',(SELECT jsonb_agg(to_jsonb(a)) FROM audit_events a),'policy',(SELECT jsonb_agg(to_jsonb(p)) FROM policy_versions p)) AS data`)).rows[0].data;
+      'audit',(SELECT jsonb_agg(to_jsonb(a)) FROM audit_events a),'policy',(SELECT jsonb_agg(to_jsonb(p)) FROM policy_versions p),
+      'evaluations',(SELECT jsonb_agg(to_jsonb(e)) FROM evaluation_results e),
+      'budgets',(SELECT jsonb_agg(to_jsonb(b)) FROM owner_write_resource_budgets b)) AS data`)).rows[0].data;
   }
   it("requires the authentic capability, never a copied owner identity",()=>{
     expect(()=>createEvaluationHistoryLoader(f.db,{...context},config.domainId,[episode],verifier())).toThrow();
@@ -350,5 +394,79 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     expect(result).toMatchObject({status:"unavailable",reason:"exception_adapter_unavailable"});
     expect(result.evidence.snapshot?.databaseEvidence?.legacyDeviations).toHaveLength(1);
     expect(result.segments).toEqual([]);
+  });
+  it("saves a reproducible trusted result once, preserves same-day qualification and audits changed evidence",async()=>{
+    for(const [id,at] of [["score-a","2026-01-10T09:00:00Z"],["score-b","2026-01-10T13:00:00Z"],
+      ["score-c","2026-01-10T18:00:00Z"]] as const)await addScoring(id,at,10);
+    const writer=persistenceWriter(),first=await writer.calculateAndSave();
+    expect(first).toMatchObject({status:"saved",action:"created"});
+    if(first.status!=="saved")throw Error("trusted source did not produce a saved synthetic result");
+    const row=first.result as any,trusted=row.result;
+    expect(row).toMatchObject({budget_enabled_snapshot:false,budget_snapshot:null,
+      calculation_version:"somr433-persist-v1",input_fingerprint:first.inputFingerprint});
+    expect(trusted).toMatchObject({kind:"trusted-evaluation-v1",schemaVersion:1,status:"available",
+      current:{status:"available"},cadence:{status:"available"},persistence:{status:"unavailable"},
+      attention:{status:"unavailable"},trend:{status:"unavailable"}});
+    expect(trusted.evaluation.evidence.components.find((c:any)=>c.measurementId==="frequency").qualifyingDays)
+      .toEqual(["2026-01-10"]);
+    expect(trusted.provenance.input.observations).toHaveLength(3);
+    expect(trusted.provenance.input.recipe.recipeId).toBe("synthetic-reviewed-history-recipe");
+    expect(trusted.provenance.input.policy.targets.normal.conditions).toHaveLength(2);
+    const afterInsert=await state();
+    const retry=await writer.calculateAndSave();
+    const concurrent=await Promise.all([writer.calculateAndSave(),writer.calculateAndSave()]);
+    expect(retry).toMatchObject({status:"saved",action:"unchanged",resultId:first.resultId,inputFingerprint:first.inputFingerprint});
+    expect(concurrent.every(result=>result.status==="saved"&&result.action==="unchanged")).toBe(true);
+    expect(await state()).toEqual(afterInsert);
+    await addScoring("score-d","2026-01-11T10:00:00Z",10);
+    const revised=await writer.calculateAndSave();
+    expect(revised).toMatchObject({status:"saved",action:"updated",resultId:first.resultId});
+    if(revised.status!=="saved")throw Error("changed synthetic evidence was not saved");
+    expect(revised.inputFingerprint).not.toBe(first.inputFingerprint);
+    expect((revised.result as any).result.provenance.sourceSnapshot.observations).toHaveLength(4);
+    const audit=(await f.client.query(`SELECT action,"before","after" FROM audit_events
+      WHERE entity_type='evaluation_results' AND entity_id=$1 ORDER BY occurred_at,audit_event_id`,
+      [JSON.stringify([first.resultId])])).rows;
+    expect(audit.map((entry:any)=>entry.action)).toEqual(["create","update"]);
+    expect(audit[1].before.input_fingerprint).toBe(first.inputFingerprint);
+    expect(audit[1].after.input_fingerprint).toBe(revised.inputFingerprint);
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(1);
+  });
+  it("keeps unapproved recipes, missing coverage proof and reference comparisons unavailable",async()=>{
+    await addScoring("score-unavailable","2026-01-10T12:00:00Z",10);
+    const noRecipe=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(),recipes:[],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+    expect(await noRecipe.calculateAndSave()).toEqual({status:"unavailable",reason:"recipe_not_approved"});
+    const missingProof=verifier([scoringEpisode]);missingProof.verifyCoverage=async()=>null;
+    const noCoverage=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(missingProof),recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",
+      clock:()=>new Date(now)});
+    const result=await noCoverage.calculateAndSave();
+    expect(result).toMatchObject({status:"unavailable"});
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(0);
+    const adaptedTarget=ADAPTED.targets.adapted!.target.conditions[0].constraint.value;
+    const reference=ADAPTED.references!.find(r=>r.referenceId==="reference-E-develop")!.conditions![0].constraint.value;
+    const actual=8;
+    expect(ADAPTED_FUTURE_EXPECTATION).toMatchObject({status:"future-evaluator-only",personalPercent:100,referencePercent:40});
+    expect(100*actual/adaptedTarget).toBe(100);
+    expect(100*actual/reference).toBe(40);
+  });
+  it("does not persist an unapproved mixed-policy window",async()=>{
+    await addScoring("score-before-policy-change","2026-01-10T12:00:00Z",10);
+    const next=structuredClone(scoringConfig);
+    Object.assign(next,{policyVersionId:"history-scoring-policy-v2",revision:2,
+      previousVersionId:scoringConfig.policyVersionId,effectiveFrom:"2026-01-12T00:00:00Z"});
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.policies.append(next,"Synthetic policy transition");
+    const observation={...observationFor(next,"score-after-policy-change",10),observedAt:"2026-01-12T12:00:00Z"};
+    await store.observations.create({observation,idempotencyKey:"score-after-policy-change"},"Synthetic scoring event");
+    const before={...scoringEpisode,effectiveEnd:next.effectiveFrom};
+    const after:CadenceEpisode={...scoringEpisode,episodeId:"history-scoring-episode-v2",policy:next,
+      origin:{...scoringEpisode.origin,at:next.effectiveFrom}};
+    const history=createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[before,after],verifier([before,after]));
+    const writer=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
+      recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+    expect(await writer.calculateAndSave()).toEqual({status:"unavailable",reason:"cross_version_aggregate_not_approved"});
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(0);
   });
 });

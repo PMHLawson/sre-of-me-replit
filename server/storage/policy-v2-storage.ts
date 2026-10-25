@@ -42,6 +42,40 @@ const evaluationInput = z.object({ resultId:id,domainId:id,policyVersionId:id,wi
   // This boundary stores a declared summary, not a scoring implementation.
   result:z.object({ summary:text }).strict(),components:z.array(z.object({ measurementId:id,value:z.number().finite() }).strict()).max(1000),
   explanation:z.object({ summary:text }).strict() }).strict().refine(v => Date.parse(v.windowEnd)>Date.parse(v.windowStart));
+const evaluationPageInput=z.object({
+  limit:z.preprocess(value=>typeof value==="string"&&/^[1-9]\d{0,1}$/.test(value)?Number(value):value,
+    z.number().int().min(1).max(20)).optional(),
+  cursor:z.string().min(1).max(2048).optional(),
+}).strict();
+const evaluationCursor=z.object({version:z.literal(1),scope:z.string().regex(/^[a-f0-9]{64}$/),windowEnd:at,
+  policyVersionId:id,calculationVersion:id,resultId:id}).strict();
+const trustedEvaluationInput=z.object({domainId:id,policyVersionId:id,windowStart:at,windowEnd:at,timezone:text,
+  dayStartHour:z.number().int().min(0).max(23),calculationVersion:id,inputFingerprint:z.string().regex(/^[a-f0-9]{64}$/),
+  eligibleDays:z.number().finite().nonnegative(),
+  result:z.object({schemaVersion:z.literal(1),kind:z.literal("trusted-evaluation-v1"),
+    status:z.enum(["available","unavailable"]),evaluation:z.unknown(),current:z.unknown(),cadence:z.unknown(),
+    persistence:z.unknown(),attention:z.unknown(),trend:z.unknown(),provenance:z.unknown()}).strict(),
+  components:z.array(z.unknown()).max(1000),
+  explanation:z.object({schemaVersion:z.literal(1),status:z.enum(["available","unavailable"]),
+    summary:z.string().min(1).max(1000),reason:z.string().max(200).nullable(),details:z.unknown()}).strict(),
+}).strict().refine(v=>Date.parse(v.windowEnd)>Date.parse(v.windowStart));
+const MAX_PERSISTED_EVALUATION_BYTES=256*1024;
+function validJson(value:unknown,seen=new Set<object>()):boolean{
+  if(value===null||typeof value==="string"||typeof value==="boolean")return true;
+  if(typeof value==="number")return Number.isFinite(value);
+  if(typeof value!=="object"||seen.has(value))return false;
+  seen.add(value);
+  const valid=Array.isArray(value)?
+    Object.keys(value).length===value.length&&value.every(item=>validJson(item,seen)):
+    Object.getPrototypeOf(value)===Object.prototype&&Object.values(value).every(item=>validJson(item,seen));
+  seen.delete(value);return valid;
+}
+function hasPageState(value:unknown):boolean{
+  if(Array.isArray(value))return value.some(hasPageState);
+  if(!value||typeof value!=="object")return false;
+  return Object.entries(value as Record<string,unknown>).some(([key,item])=>
+    (key==="state"||key==="persistenceState"||key==="condition")&&item==="PAGE"||hasPageState(item));
+}
 
 const tables = {
   domain:{table:"domains",keys:["domain_id"]},
@@ -653,6 +687,87 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       delete:(keys:unknown,reason:unknown)=>run(tx=>update(tx,"observation",identity("observation",keys),{deleted_at:new Date()},parse(reasonSchema,reason))),
     }),
     evaluations:Object.freeze({...reads("evaluation"),
+      page:(domainId:unknown,input:unknown)=>run(async tx=>{
+        const domain=parse(id,domainId),p=parse(evaluationPageInput,input),limit=p.limit??20;
+        await get(tx,"domain",[domain]);
+        const scopeHash=createHash("sha256").update(JSON.stringify([...scope,domain])).digest("hex");
+        let cursor:z.infer<typeof evaluationCursor>|undefined;
+        if(p.cursor){
+          try{
+            if(!/^[A-Za-z0-9_-]+$/.test(p.cursor))throw 0;
+            const decoded=Buffer.from(p.cursor,"base64url").toString("utf8");
+            if(Buffer.from(decoded,"utf8").toString("base64url")!==p.cursor)throw 0;
+            cursor=parse(evaluationCursor,JSON.parse(decoded));
+            if(cursor.scope!==scopeHash)throw 0;
+          }catch{throw new BoundaryError(400);}
+        }
+        const rows=await readComplete(tx,`SELECT * FROM public.evaluation_results WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3
+          AND ($4::timestamptz IS NULL OR (window_end,policy_version_id,calculation_version,result_id)<
+            ($4::timestamptz,$5::text,$6::text,$7::text))
+          ORDER BY window_end DESC,policy_version_id DESC,calculation_version DESC,result_id DESC LIMIT $8`,
+          [...scope,domain,cursor?.windowEnd??null,cursor?.policyVersionId??null,cursor?.calculationVersion??null,
+            cursor?.resultId??null,limit+1],readColumns.evaluation,limit+1);
+        const selected=rows.slice(0,limit);
+        const results=selected.map(row=>({...row,recordKind:
+          row.result?.kind==="trusted-evaluation-v1"?"reproducible":"summary-only"}));
+        if(Buffer.byteLength(JSON.stringify(results),"utf8")>5*1024*1024)throw new ResourceLimitError();
+        const last=selected.at(-1),nextCursor=rows.length>limit&&last?Buffer.from(JSON.stringify({version:1,scope:scopeHash,
+          windowEnd:last.window_end instanceof Date?last.window_end.toISOString():new Date(last.window_end).toISOString(),
+          policyVersionId:last.policy_version_id,calculationVersion:last.calculation_version,resultId:last.result_id})).toString("base64url"):null;
+        return {results,nextCursor};
+      }),
+      previous:(domainId:unknown,windowStart:unknown,policyVersionId:unknown,calculationVersion:unknown)=>run(async tx=>{
+        const domain=parse(id,domainId),start=parse(at,windowStart),policy=parse(id,policyVersionId),version=parse(id,calculationVersion);
+        await get(tx,"domain",[domain]);
+        const rows=await readComplete(tx,`SELECT * FROM public.evaluation_results WHERE org_id=$1 AND owner_user_id=$2 AND domain_id=$3
+          AND window_end=$4 AND policy_version_id=$5 AND calculation_version=$6 ORDER BY result_id LIMIT 2`,
+          [...scope,domain,start,policy,version],readColumns.evaluation,1);
+        if(rows.length>1)throw new BoundaryError(503);
+        return rows[0]??null;
+      }),
+      persistTrusted:(input:unknown)=>run(async tx=>{
+        const p=parse(trustedEvaluationInput,input);
+        if(!validJson(p)||Buffer.byteLength(JSON.stringify(p),"utf8")>MAX_PERSISTED_EVALUATION_BYTES||hasPageState(p.result))
+          throw new ResourceLimitError();
+        const result=p.result as Record<string,any>,evaluation=result.evaluation as Record<string,any>;
+        const provenance=evaluation?.evidence?.provenance,window=evaluation?.evidence?.window,recipe=provenance?.recipe;
+        if(result.status!==evaluation?.status||!window||window.start!==p.windowStart||window.end!==p.windowEnd||
+          window.eligibleDays!==p.eligibleDays||!Array.isArray(evaluation?.evidence?.components)||
+          !semanticEqual(p.components,evaluation.evidence.components)||
+          result.provenance?.inputFingerprint!==p.inputFingerprint||
+          recipe?.organizationId!==scope[0]||recipe?.ownerUserId!==scope[1]||recipe?.domainId!==p.domainId||
+          recipe?.policyVersionId!==p.policyVersionId)throw new BoundaryError(400);
+        if(evaluation.status==="available"&&(!Number.isFinite(evaluation.score)||evaluation.score<0||evaluation.score>100||
+          !["Healthy","Needs Attention","Warning","Critical"].includes(evaluation.condition)))throw new BoundaryError(400);
+        const domain=await get(tx,"domain",[p.domainId],true),policy=await get(tx,"policy",[p.policyVersionId],true);
+        if(policy.domain_id!==p.domainId)throw new BoundaryError(404);
+        const config=parse(DomainConfigurationSchema,policy.configuration);
+        if(domain.org_id!==scope[0]||domain.owner_user_id!==scope[1]||recipe.targetId!==provenance.recipe.targetId||
+          config.boundary.timezone!==p.timezone||config.boundary.dayStartHour!==p.dayStartHour||
+          config.policyVersionId!==p.policyVersionId)throw new BoundaryError(400);
+        const found=await readComplete(tx,`SELECT * FROM public.evaluation_results WHERE org_id=$1 AND owner_user_id=$2
+          AND domain_id=$3 AND window_start=$4 AND window_end=$5 AND policy_version_id=$6 AND calculation_version=$7
+          ORDER BY result_id LIMIT 2 FOR UPDATE`,[...scope,p.domainId,p.windowStart,p.windowEnd,p.policyVersionId,p.calculationVersion],
+          readColumns.evaluation,1);
+        if(found.length>1)throw new BoundaryError(503);
+        const values={domain_id:p.domainId,policy_version_id:p.policyVersionId,window_start:p.windowStart,window_end:p.windowEnd,
+          timezone:p.timezone,day_start_hour:p.dayStartHour,calculated_at:clock(),calculation_version:p.calculationVersion,
+          input_fingerprint:p.inputFingerprint,eligible_days:String(p.eligibleDays),result:p.result,
+          components:JSON.stringify(p.components),explanation:p.explanation,budget_snapshot:null,budget_enabled_snapshot:false};
+        if(!found.length){
+          const resultId="trusted-eval-v1-"+createHash("sha256").update(JSON.stringify([...scope,p.domainId,p.windowStart,
+            p.windowEnd,p.policyVersionId,p.calculationVersion])).digest("hex");
+          const row=await insert(tx,"evaluation",{result_id:resultId,...values},"Trusted calculation saved");
+          return {action:"created" as const,row};
+        }
+        const existing=found[0];
+        if(existing.result?.kind!=="trusted-evaluation-v1")
+          return {action:"legacy-summary-preserved" as const,row:existing};
+        if(existing.input_fingerprint===p.inputFingerprint)
+          return {action:"unchanged" as const,row:existing};
+        const row=await update(tx,"evaluation",[existing.result_id],values,"Explicit recalculation: trusted evidence changed");
+        return {action:"updated" as const,row};
+      }),
       create:(input:unknown,reason:unknown)=>run(async tx=>{
         const p=parse(evaluationInput,input),r=parse(reasonSchema,reason);
         await get(tx,"domain",[p.domainId]);const policy=await get(tx,"policy",[p.policyVersionId]);

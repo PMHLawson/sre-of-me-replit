@@ -58,6 +58,7 @@ beforeAll(async () => {
   const forwarded = (request: any) => { expect(authenticatedRequests.has(request)).toBe(true); forwardedRequests.push(request); };
   const service: typeof real = {
     list: request => { forwarded(request); return real.list(request); },
+    listSavedEvaluations:(request,key,query)=>{forwarded(request);return real.listSavedEvaluations(request,key,query);},
     read: (request, key) => { forwarded(request); return real.read(request, key); },
     create: (request, input) => { forwarded(request); return real.create(request, input); },
     configure: (request, key, input) => { forwarded(request); return real.configure(request, key, input); },
@@ -86,7 +87,7 @@ afterAll(async () => {
 it("real HTTP authentication rejects unauthenticated/malformed requests before all database access", async () => {
   const before = connects, state = await snapshot();
   for (const [path, method, body] of [["/", "GET", undefined], ["/", "POST", payload("unauthorized")],
-    ["/missing", "GET", undefined], ["/missing/policies", "POST", {}]] as const) {
+    ["/missing", "GET", undefined], ["/missing/policies", "POST", {}],["/missing/evaluations","GET",undefined]] as const) {
     expect((await call(path, undefined, method, body)).status).toBe(401);
     expect((await call(path, "__proto__", method, body)).status).toBe(401);
   }
@@ -103,6 +104,38 @@ it("real router creates and reads count-only domains with server identities, for
   }
   expect(forwardedRequests.length).toBeGreaterThan(0);
   expect(forwardedRequests.every(request => authenticatedRequests.has(request))).toBe(true);
+});
+it("saved-result GET is owner-scoped, cursor-bounded, summary-aware and read-only",async()=>{
+  const domainId=created["router-a"].domainId,policyVersionId=created["router-a"].policyVersions[0].configuration.policyVersionId;
+  for(let n=0;n<3;n++){
+    const start=new Date(Date.UTC(2026,0,1+n)).toISOString(),end=new Date(Date.UTC(2026,0,2+n)).toISOString();
+    await f.client.query(`INSERT INTO evaluation_results(result_id,org_id,owner_user_id,domain_id,policy_version_id,
+      window_start,window_end,timezone,day_start_hour,calculated_at,calculation_version,input_fingerprint,eligible_days,
+      result,components,explanation,budget_snapshot,budget_enabled_snapshot)
+      VALUES($1,'router-one','router-a',$2,$3,$4,$5,'UTC',0,'2026-01-10T00:00:00Z','summary-v1',$6,1,
+        $7::jsonb,'[]'::jsonb,$8::jsonb,NULL,false)`,
+      [`summary-router-${n}`,domainId,policyVersionId,start,end,`fingerprint-${n}`,
+        JSON.stringify({summary:`legacy summary ${n}`}),JSON.stringify({summary:"Legacy result; no replay proof"})]);
+  }
+  const before=await snapshot();
+  const first=await call(`/${domainId}/evaluations?limit=1`,"router-a");
+  expect(first.status).toBe(200);expect(first.body.results).toHaveLength(1);
+  expect(first.body.results[0].recordKind).toBe("summary-only");
+  expect(first.body.nextCursor).toEqual(expect.any(String));
+  const second=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`,"router-a");
+  expect(second.status).toBe(200);expect(second.body.results).toHaveLength(1);
+  expect(second.body.results[0].resultId).not.toBe(first.body.results[0].resultId);
+  const third=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(second.body.nextCursor)}`,"router-a");
+  expect(third.status).toBe(200);expect(third.body.results).toHaveLength(1);expect(third.body.nextCursor).toBeNull();
+  expect((await call(`/${domainId}/evaluations?limit=1&ownerUserId=router-b`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1&score=100`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1&cursor=foreign`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1`,"router-c")).status).toBe(404);
+  expect((await call(`/${created["router-c"].domainId}/evaluations?limit=1`,"router-a")).status).toBe(404);
+  expect(await snapshot()).toBe(before);
+  await f.client.query("DELETE FROM organization_members WHERE org_id='router-one' AND user_id='router-a'");
+  try{expect((await call(`/${domainId}/evaluations?limit=1`,"router-a")).status).toBe(403);}
+  finally{await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES('router-one','router-a','owner')");}
 });
 it("list/read/configure stay isolated across organizations and independent owners in the same organization", async () => {
   const before = await snapshot();
