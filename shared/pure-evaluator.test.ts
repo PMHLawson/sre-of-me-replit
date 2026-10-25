@@ -485,12 +485,40 @@ describe("unavailable policy edges, provenance and isolation",()=>{
     a.evidence.provenance.policy.displayName="changed output";
     expect(i).toEqual(before);expect(e(i)).toEqual(b);
   });
-  it("runtime source does not import the isolated evaluator",()=>{
+  it("keeps history modules dormant and runtime disconnected from the scoring engine",()=>{
+    const sources:{path:string;source:string}[]=[];
     function walk(dir:string){for(const e of fs.readdirSync(dir,{withFileTypes:true})){
       const p=`${dir}/${e.name}`;if(e.isDirectory())walk(p);
       else if(/\.[cm]?[jt]sx?$/.test(p)&&!p.includes(".test."))
-        expect(fs.readFileSync(p,"utf8"),p).not.toMatch(/(?:from\s*|import\s*\()["'][^"']*(?:pure-evaluator|evaluator-recipe|evaluator-window)/);
+        sources.push({path:p.replace(/\\/g,"/"),source:fs.readFileSync(p,"utf8")});
     }}
-    ["server","client","script"].forEach(walk);
+    ["server","client","script","shared"].forEach(walk);
+    const imports=(source:string)=>Array.from(source.matchAll(/(?:from\s*|import\s*\()["']([^"']+)["']/g),m=>m[1]);
+    const targets=(specifier:string,name:string)=>{
+      const normalized=specifier.replace(/\.(?:[cm]?[jt]sx?)$/,"").replace(/\\/g,"/");
+      return normalized===name||normalized.endsWith(`/${name}`);
+    };
+    const loaderPath="server/services/evaluation-history-v2.ts";
+    const scoringModules=["pure-evaluator","pure-derived","derived-exact","derived-profile"];
+    for(const file of sources){
+      const refs=imports(file.source),isLoader=file.path===loaderPath;
+      // Only the dormant history loader may reach the cadence module; no
+      // application or shared source may activate either dormant module.
+      if(!isLoader)
+        expect(refs.some(s=>targets(s,"evaluation-history-v2")||targets(s,"cadence-derived")),file.path).toBe(false);
+      if(isLoader){
+        expect(refs.some(s=>targets(s,"evaluator-window"))).toBe(true);
+        expect(refs.some(s=>targets(s,"evaluator-recipe"))).toBe(true);
+        expect(refs.some(s=>targets(s,"cadence-derived"))).toBe(true);
+      }
+      if(/^(server|client|script)\//.test(file.path)){
+        expect(refs.some(s=>scoringModules.some(name=>targets(s,name))),file.path).toBe(false);
+        if(!isLoader)
+          expect(refs.some(s=>targets(s,"evaluator-recipe")||targets(s,"evaluator-window")),file.path).toBe(false);
+      }
+    }
+    const loader=sources.find(f=>f.path===loaderPath);
+    expect(loader).toBeDefined();
+    expect(imports(loader!.source).some(s=>targets(s,"pure-evaluator"))).toBe(false);
   });
 });

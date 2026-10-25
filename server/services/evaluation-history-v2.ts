@@ -163,8 +163,9 @@ function createHistoryAssembler(source:EvaluationHistorySource,
       if(instant(group[0].origin.at)!==instant(interval.start))invalid=true;
       for(let i=0;i<group.length;i++){
         const end=group[i+1]?.origin.at??interval.end;
-        if((end===null)!==(group[i].effectiveEnd===null)||
-          (end!==null&&group[i].effectiveEnd!==null&&instant(end)!==instant(group[i].effectiveEnd)))invalid=true;
+        const episodeEnd=group[i].effectiveEnd;
+        if((end===null)!==(episodeEnd===null)||
+          (end!==null&&episodeEnd!==null&&instant(end)!==instant(episodeEnd)))invalid=true;
       }
     }
     // Break interpretation belongs to the source's separately verified adapter.

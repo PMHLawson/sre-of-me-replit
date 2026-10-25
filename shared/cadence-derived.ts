@@ -173,12 +173,12 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
       const key=JSON.stringify([e.policy.organizationId,e.policy.ownerUserId,e.policy.domainId]);
       const group=grouped.get(key)??[];group.push(e);grouped.set(key,group);
     }
-    for (const group of grouped.values()) {
-      group.sort((a,b)=>instant(a.origin.at)-instant(b.origin.at));
+    grouped.forEach((group:CadenceEpisode[]) => {
+      group.sort((a:CadenceEpisode,b:CadenceEpisode)=>instant(a.origin.at)-instant(b.origin.at));
       for(let i=1;i<group.length;i++)
         if(group[i-1].effectiveEnd===null || instant(group[i-1].effectiveEnd!)>instant(group[i].origin.at))
           throw Error("episode_registry_overlap");
-    }
+    });
   } catch (error) { registryError = reason(error); }
   function evaluate(input: CadenceInput): CadenceResult {
     const evidence: CadenceEvidence = { calculationVersion: CADENCE_VERSION, episodeId: input?.episodeId ?? "",
@@ -241,7 +241,7 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
       const tail:{exposure:Fraction;credit:0|1}[]=[];
       let totalExposure=zero(), totalCredit=0, tailHead=0;
       const maximum=decimal(e.windowDays);
-      function inspect(exposure:Fraction,credit:0|1) {
+      const inspect=(exposure:Fraction,credit:0|1) => {
         tail.push({exposure,credit});totalExposure=add(totalExposure,exposure);totalCredit+=credit;
         let excess=sub(totalExposure,maximum);
         while (positive(excess) && tailHead<tail.length) {
@@ -255,9 +255,9 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
         }
         return {eligible:numericEvidence(totalExposure),qualifyingDays:totalCredit,
           deficit:numericEvidence(nonnegative(sub(totalExposure,mul(decimal(totalCredit),interval))))};
-      }
+      };
       let inspection=inspect(zero(),0);
-      function step(day:string,start:string,end:string,kind:CadenceDay["kind"],exposure:Fraction,ids:string[]) {
+      const step=(day:string,start:string,end:string,kind:CadenceDay["kind"],exposure:Fraction,ids:string[]) => {
         const credit=ids.length?1:0;
         gap=add(gap,exposure);
         if(open) late=add(late,exposure);
@@ -275,7 +275,7 @@ export function createCadenceDeriver(trustedEpisodes: readonly CadenceEpisode[])
         evidence.ledger.push({day,start,end,kind,exposure:numericEvidence(exposure),
           qualifyingObservationIds:[...ids].sort(),dayCredit:credit,gap:numericEvidence(gap),
           lateness:numericEvidence(late),inspection:structuredClone(inspection),state});
-      }
+      };
       for(const d of days)step(d.day,d.coveredInterval!.start,d.coveredInterval!.end,
         d.coveredMs===d.exemptMs?"fully-exempt":"completed",
         rational(BigInt(d.coveredMs-d.exemptMs),BigInt(d.durationMs)),byDay.get(d.day)??[]);
