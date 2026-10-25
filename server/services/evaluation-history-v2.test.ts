@@ -1,5 +1,7 @@
 import { beforeAll,afterAll,beforeEach,describe,it,expect } from "vitest";
-import { startFixture } from "../lib/ownership-fixture";
+import { startFixture,verifyFixture } from "../lib/ownership-fixture";
+import { Pool,type PoolClient } from "pg";
+import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createOrgContextResolver,type OrgContext } from "../lib/org-context";
 import { createPolicyV2Storage } from "../storage/policy-v2-storage";
 import { configurationFor,observationFor,MEASUREMENTS,conditionFor } from "../../shared/fixtures/domain-config-cases";
@@ -106,6 +108,48 @@ describe("authenticated complete history and exact policy segmentation",()=>{
   function persistenceWriter(recipe=scoringRecipe(),history=scoringLoader()){
     return createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
       recipes:[recipe],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+  }
+
+  async function concurrentPersistenceSaves(){
+    verifyFixture(f.root); // before constructing this synthetic Unix-socket-only pool
+    const pool=new Pool({host:f.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false,
+      max:2,connectionTimeoutMillis:5000,options:"-c statement_timeout=10000 -c lock_timeout=2000"});
+    const clients:PoolClient[]=[],handedOff=new Set<PoolClient>();
+    try{
+      // Hold both leases before either operation starts: a shared fixture client
+      // cannot interleave BEGIN/COMMIT, and the pool cannot reuse one backend.
+      clients.push(await pool.connect());clients.push(await pool.connect());
+      const pids=await Promise.all(clients.map(async client=>
+        (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number));
+      expect(new Set(pids).size).toBe(2);
+      const request={isAuthenticated:()=>true,user:{claims:{sub:context.actorUserId}}};
+      const attempts=await Promise.allSettled(clients.map(async(client,index)=>{
+        const unit=createPinnedOwnershipUnit({connect:async()=>{handedOff.add(client);return client;}});
+        return unit.run(request,async current=>{
+          expect((await current.tx.query("SELECT pg_backend_pid() AS pid")).rows[0].pid).toBe(pids[index]);
+          // Every run resolves its own authenticated capability and binds a fresh
+          // history loader and writer to that operation's database/transaction.
+          const history=createEvaluationHistoryLoader(current.db,current.context,scoringConfig.domainId,
+            [scoringEpisode],verifier([scoringEpisode]));
+          const writer=createEvaluationPersistence({db:current.db,context:current.context,
+            domainId:scoringConfig.domainId,history,recipes:[scoringRecipe()],
+            calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+          return writer.calculateAndSave();
+        });
+      }));
+      expect(attempts.filter(result=>result.status==="fulfilled")).toHaveLength(2);
+      return attempts.map(result=>{
+        if(result.status!=="fulfilled")throw result.reason;
+        return result.value;
+      });
+    }finally{
+      // Pinned units release handed-off leases on success and failure. If setup
+      // failed before handoff, release its leases here, then close this pool
+      // before the fixture's existing owned-Postgres cleanup runs.
+      for(const client of clients)if(!handedOff.has(client))client.release();
+      await pool.end();
+      expect(pool.totalCount).toBe(0);
+    }
   }
   async function state(){
     return (await f.client.query(`SELECT jsonb_build_object('observations',(SELECT jsonb_agg(to_jsonb(o)) FROM observations o),
@@ -418,7 +462,7 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     expect(trusted.provenance.input.policy.targets.normal.conditions).toHaveLength(2);
     const afterInsert=await state();
     const retry=await writer.calculateAndSave();
-    const concurrent=await Promise.all([writer.calculateAndSave(),writer.calculateAndSave()]);
+    const concurrent=await concurrentPersistenceSaves();
     expect(retry).toMatchObject({status:"saved",action:"unchanged",resultId:first.resultId,inputFingerprint:first.inputFingerprint});
     expect(concurrent.every(result=>result.status==="saved"&&result.action==="unchanged")).toBe(true);
     expect(await state()).toEqual(afterInsert);
@@ -498,13 +542,12 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     expect(changed.inputFingerprint).not.toBe(first.inputFingerprint);
     expect((changed.result as any).result.provenance.coverageReceipt.origins[0].evidenceId).toBe(proof);
   });
-  it("admits one concurrent first save with one result and create audit",async()=>{
+  it("admits one concurrent first save on independent pinned clients with one result and create audit",async()=>{
     await addScoring("concurrent-first-event","2026-01-10T12:00:00Z",10);
     const admitted=async()=>Number((await f.client.query(
       "SELECT coalesce(sum(day_count),0)::int AS count FROM owner_write_resource_budgets WHERE owner_user_id=$1",
       [context.actorUserId])).rows[0].count);
-    const before=await admitted(),writer=persistenceWriter();
-    const results=await Promise.all([writer.calculateAndSave(),writer.calculateAndSave()]);
+    const before=await admitted(),results=await concurrentPersistenceSaves();
     expect(results.map(r=>r.status==="saved"?r.action:r.status).sort()).toEqual(["created","unchanged"]);
     const ids=results.map(r=>r.status==="saved"?r.resultId:null);
     expect(ids[0]).toBeTruthy();expect(ids[1]).toBe(ids[0]);
@@ -531,7 +574,7 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     if(saved.status!=="saved")throw Error("bound operation did not save");
     expect(saved.result).toMatchObject({domain_id:scoringConfig.domainId,org_id:context.orgId,
       owner_user_id:context.actorUserId,calculation_version:"somr433-persist-v1"});
-    expect((saved.result as any).result.provenance.input.now).toBe(now);
+    expect((saved.result as any).result.provenance.input.now).toBe(new Date(now).toISOString());
   });
   it("keeps a future policy and its raw records pending while saving the current policy",async()=>{
     await addScoring("persist-current-event","2026-01-10T12:00:00Z",10);
