@@ -137,11 +137,12 @@ describe("authenticated complete history and exact policy segmentation",()=>{
           return writer.calculateAndSave();
         });
       }));
-      expect(attempts.filter(result=>result.status==="fulfilled")).toHaveLength(2);
-      return attempts.map(result=>{
+      const values=attempts.map(result=>{
         if(result.status!=="fulfilled")throw result.reason;
         return result.value;
       });
+      expect(attempts.filter(result=>result.status==="fulfilled")).toHaveLength(2);
+      return values;
     }finally{
       // Pinned units release handed-off leases on success and failure. If setup
       // failed before handoff, release its leases here, then close this pool
