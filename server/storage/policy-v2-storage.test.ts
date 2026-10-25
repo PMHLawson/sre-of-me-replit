@@ -2,7 +2,7 @@ import { beforeEach,beforeAll,afterAll,describe,it,expect } from "vitest";
 import { startFixture } from "../lib/ownership-fixture";
 import { createOrgContextResolver,type OrgContext } from "../lib/org-context";
 import { createPolicyV2Storage } from "./policy-v2-storage";
-import { configurationFor,observationFor,MEASUREMENTS } from "../../shared/fixtures/domain-config-cases";
+import { configurationFor,observationFor,conditionFor,MEASUREMENTS } from "../../shared/fixtures/domain-config-cases";
 import type { DomainConfiguration } from "../../shared/domain-config";
 import { createEvaluator } from "../../shared/pure-evaluator";
 import type { EvaluationInput, EvaluationRecipe } from "../../shared/evaluator-recipe";
@@ -321,14 +321,19 @@ beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_r
       domainId:"trusted-binding-domain",policyVersionId:"trusted-binding-policy",boundary:{timezone:"UTC",dayStartHour:0}};
     const condition={...config.targets.normal.conditions[0],basis:{kind:"period" as const,windowDays:7},
       periodAggregation:{sourceBasis:"per_event" as const,method:"sum" as const}};
-    config.targets.normal.conditions=[condition];
+    config.measurements.push(structuredClone(MEASUREMENTS[0]));
+    const durationCondition={...conditionFor(config.measurements[1],70),basis:{kind:"period" as const,windowDays:7},
+      periodAggregation:{sourceBasis:"per_event" as const,method:"sum" as const}};
+    config.targets.normal.conditions=[condition,durationCondition];
     await stores.a.domains.create({domainId:config.domainId,slug:"trusted-binding",displayName:"Synthetic binding"},reason);
     await stores.a.policies.append(config,reason);
     const recipe:EvaluationRecipe={recipeId:"trusted-binding-recipe",version:"synthetic-v1",
       organizationId:config.organizationId,ownerUserId:config.ownerUserId,domainId:config.domainId,
       policyVersionId:config.policyVersionId,targetId:config.targets.normal.targetId,targetSelection:"normal",
       qualification:null,components:[{measurement:structuredClone(config.measurements[0]),targetCondition:structuredClone(condition),
-        weight:1,mandatory:true,percentage:"positive-linear-ratio-v1",actual:"sum-events"}]};
+        weight:1,mandatory:true,percentage:"positive-linear-ratio-v1",actual:"sum-events"},
+        {measurement:structuredClone(config.measurements[1]),targetCondition:structuredClone(durationCondition),
+          weight:1,mandatory:true,percentage:"positive-linear-ratio-v1",actual:"sum-events"}]};
     const input:EvaluationInput={now:"2026-01-15T00:00:00Z",windowDays:7,policy:structuredClone(config),observations:[],
       coverage:{onboardingAt:config.effectiveFrom,policyStart:config.effectiveFrom,policyEnd:null},breaks:[],recipe};
     const evaluation=createEvaluator([recipe])(input);
@@ -345,10 +350,14 @@ beforeEach(async()=>{if(f)await f.client.query("DELETE FROM public.owner_write_r
       explanation:{schemaVersion:1,status:"available",summary:"Synthetic historical binding",reason:null,details:{}}};
     const budget=async()=>JSON.stringify((await f.client.query(
       "SELECT to_jsonb(t) value FROM owner_write_resource_budgets t ORDER BY owner_user_id")).rows);
-    for(const change of ["unknown-target","changed-target-condition","changed-measurement","changed-policy","divergent-input"]){
+    for(const change of ["unknown-target","changed-target-condition","swapped-target-conditions","changed-measurement","changed-policy","divergent-input"]){
       const forged:any=structuredClone(payload),saved=forged.result.evaluation.evidence.provenance;
       if(change==="unknown-target")saved.recipe.targetId="invented-target";
       if(change==="changed-target-condition")saved.recipe.components[0].targetCondition.constraint.value=1;
+      if(change==="swapped-target-conditions"){
+        const first=saved.recipe.components[0],second=saved.recipe.components[1];
+        [first.targetCondition,second.targetCondition]=[second.targetCondition,first.targetCondition];
+      }
       if(change==="changed-measurement")saved.recipe.components[0].measurement.displayName="Invented measurement";
       if(change==="changed-policy")saved.policy.displayName="Not the persisted policy";
       forged.result.provenance.input=structuredClone(saved);

@@ -756,7 +756,8 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
           new Set(recipeComponents.map((component:any)=>component?.measurement?.measurementId)).size!==recipeComponents.length||
           recipeComponents.some((component:any)=>{
             const measurement=config.measurements.find(m=>m.measurementId===component?.measurement?.measurementId);
-            return !measurement||!semanticEqual(component.measurement,measurement)||
+            return !measurement||component?.targetCondition?.measurementId!==measurement.measurementId||
+              !semanticEqual(component.measurement,measurement)||
               !selectedTarget.conditions.some(condition=>semanticEqual(component.targetCondition,condition));
           })||
           config.boundary.timezone!==p.timezone||config.boundary.dayStartHour!==p.dayStartHour||
