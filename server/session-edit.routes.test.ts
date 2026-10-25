@@ -13,8 +13,17 @@ vi.mock("./replit_integrations/auth", () => ({
   },
 }));
 import { registerRoutes } from "./routes";
+import { createLegacySessionAdapter } from "./services/legacy-session-adapter";
 import { detectAnomaly } from "./lib/anomaly";
 import { BoundaryError } from "./lib/org-context";
+
+// These suites exercise legacy fallback handlers, independently of deployment
+// adoption flags. The real disabled adapter must never request a database pool.
+const forbiddenLegacyPool = vi.fn(async () => { throw new Error("FORBIDDEN: legacy fallback fixture database connection"); });
+const fallbackSessionMutations = createLegacySessionAdapter({
+  config: { enabled: false, owners: [] }, getPool: forbiddenLegacyPool,
+});
+afterEach(() => expect(forbiddenLegacyPool).not.toHaveBeenCalled());
 
 const existing = {
   id: "fixture-session", userId: "fixture-authenticated-user", domain: "music",
@@ -26,7 +35,7 @@ app.use(express.json());
 const server = createServer(app);
 let base: string;
 beforeAll(async () => {
-  await registerRoutes(server, app);
+  await registerRoutes(server, app, fallbackSessionMutations);
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing test listener");
