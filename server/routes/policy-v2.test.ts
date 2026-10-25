@@ -124,9 +124,11 @@ it("saved-result GET is owner-scoped, cursor-bounded, summary-aware and read-onl
   expect(first.body.nextCursor).toEqual(expect.any(String));
   const second=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`,"router-a");
   expect(second.status).toBe(200);expect(second.body.results).toHaveLength(1);
-  expect(second.body.results[0].resultId).not.toBe(first.body.results[0].resultId);
   const third=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(second.body.nextCursor)}`,"router-a");
   expect(third.status).toBe(200);expect(third.body.results).toHaveLength(1);expect(third.body.nextCursor).toBeNull();
+  const savedIds=[first,second,third].map(page=>page.body.results[0].result_id);
+  expect(savedIds.every(value=>typeof value==="string"&&value.length>0)).toBe(true);
+  expect(savedIds).toEqual(["summary-router-2","summary-router-1","summary-router-0"]);
   expect((await call(`/${domainId}/evaluations?limit=1&ownerUserId=router-b`,"router-a")).status).toBe(400);
   expect((await call(`/${domainId}/evaluations?limit=1&score=100`,"router-a")).status).toBe(400);
   expect((await call(`/${domainId}/evaluations?limit=1&cursor=foreign`,"router-a")).status).toBe(400);

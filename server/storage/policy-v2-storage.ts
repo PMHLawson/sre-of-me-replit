@@ -742,7 +742,23 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         const domain=await get(tx,"domain",[p.domainId],true),policy=await get(tx,"policy",[p.policyVersionId],true);
         if(policy.domain_id!==p.domainId)throw new BoundaryError(404);
         const config=parse(DomainConfigurationSchema,policy.configuration);
-        if(domain.org_id!==scope[0]||domain.owner_user_id!==scope[1]||recipe.targetId!==provenance.recipe.targetId||
+        // Bind both retained input copies and the recipe to the real historical
+        // policy. Comparing two aliases of provenance.recipe cannot prove this.
+        const inputSnapshot=result.provenance?.input;
+        const selectedTarget=recipe.targetSelection==="normal"?config.targets.normal:
+          recipe.targetSelection==="adapted"?config.targets.adapted?.target:undefined;
+        const recipeComponents=recipe.components;
+        if(domain.org_id!==scope[0]||domain.owner_user_id!==scope[1]||
+          !semanticEqual(inputSnapshot,provenance)||!semanticEqual(provenance.policy,config)||
+          !selectedTarget||recipe.targetId!==selectedTarget.targetId||
+          !semanticEqual(recipe.qualification,config.qualification??null)||
+          !Array.isArray(recipeComponents)||recipeComponents.length!==selectedTarget.conditions.length||
+          new Set(recipeComponents.map((component:any)=>component?.measurement?.measurementId)).size!==recipeComponents.length||
+          recipeComponents.some((component:any)=>{
+            const measurement=config.measurements.find(m=>m.measurementId===component?.measurement?.measurementId);
+            return !measurement||!semanticEqual(component.measurement,measurement)||
+              !selectedTarget.conditions.some(condition=>semanticEqual(component.targetCondition,condition));
+          })||
           config.boundary.timezone!==p.timezone||config.boundary.dayStartHour!==p.dayStartHour||
           config.policyVersionId!==p.policyVersionId)throw new BoundaryError(400);
         const found=await readComplete(tx,`SELECT * FROM public.evaluation_results WHERE org_id=$1 AND owner_user_id=$2
