@@ -437,6 +437,8 @@ export async function verifyLegacyComparisonProvenance(
       new Set(legacyBindings.map(b=>b.domain_id)).size===legacyBindings.length&&
       new Set(legacyBindings.map(b=>b.external_id)).size===legacyBindings.length&&
       legacyBindings.every(b=>slugs.includes(b.external_id)));
+    const seedDomainAudits=audits.filter(a=>a.entity_type==="domains"&&a.action==="create"&&a.reason===seedReason);
+    requireValid(seedDomainAudits.every(a=>legacyBindings.some(b=>a.entity_id===JSON.stringify([b.domain_id]))));
     const domainIds=new Set(legacyBindings.map(b=>b.domain_id));
     const legacyDomains=domains.filter(d=>domainIds.has(d.domain_id));
     requireValid(legacyDomains.length===legacyBindings.length);
