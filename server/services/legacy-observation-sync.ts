@@ -469,16 +469,19 @@ function verifyComparisonDomainLineage(state:State,row:Row,audits:Row[]) {
   let current=first.after as Row;
   requireValid(current.domain_id===row.domain_id&&current.org_id===state.org&&current.owner_user_id===state.actor&&
     current.slug===row.slug&&current.deactivated_at===null&&current.tombstoned_at===null);
-  const remaining=audits.filter(a=>a!==first);
-  while(remaining.length){
-    const next=remaining.filter(a=>equal(a.before,current));
-    requireValid(next.length===1);
-    const event=next[0],after=event.after;
-    requireValid(event.action==="update"&&event.actor_kind==="user"&&event.actor_user_id===state.actor&&
+  // Exact database microseconds order real audit events. Tied instants remain
+  // ambiguous; random audit IDs must never invent their chronological order.
+  const ordered=audits.map(event=>({event,at:ticks(event.occurred_at)}))
+    .sort((left,right)=>left.at<right.at?-1:left.at>right.at?1:0);
+  requireValid(ordered[0].event===first);
+  for(let index=1;index<ordered.length;index++){
+    requireValid(ordered[index-1].at<ordered[index].at);
+    const event=ordered[index].event,after=event.after;
+    requireValid(equal(event.before,current)&&event.action==="update"&&event.actor_kind==="user"&&event.actor_user_id===state.actor&&
       typeof event.reason==="string"&&!!event.reason.trim()&&after&&typeof after==="object"&&
       typeof after.display_name==="string"&&!!after.display_name.trim()&&after.display_name.length<=500&&
       !equal(after,current)&&equal(after,{...current,display_name:after.display_name}));
-    current=after;remaining.splice(remaining.indexOf(event),1);
+    current=after;
   }
   requireValid(equal(current,row.raw)&&row.deactivated_at===null&&row.tombstoned_at===null);
 }

@@ -462,7 +462,7 @@ export function createLegacyComparisonUnit(
               collection=await comparisonCollection(owned,evidence);
               legacy=await comparisonLegacyOptions(owned,asOf);
             }catch(error){
-              if(error instanceof BoundaryError&&error.status===400)throw new ComparisonReconciliationFailure();
+              if(error instanceof BoundaryError&&(error.status===400||error.status===404))throw new ComparisonReconciliationFailure();
               throw error;
             }
             const all=evidence.all;
