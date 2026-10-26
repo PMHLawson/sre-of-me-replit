@@ -90,7 +90,7 @@ async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext)
 }
 type Planned = { source: Row; binding: Row; policy: Row; row: Row; edits: Row[] };
 function plan(s: State, comparison = false): Planned[] {
-  requireValid(comparison ? s.bindings.length > 0 && s.bindings.length <= 4 && s.domains.length === s.bindings.length :
+  requireValid(comparison ? s.bindings.length <= 4 && s.domains.length === s.bindings.length :
     s.domains.length === 4 && s.bindings.length === 4);
   const configurations = s.policies.map(p => {
     const parsed = DomainConfigurationSchema.safeParse(p.configuration); requireValid(parsed.success);
@@ -433,7 +433,7 @@ export async function verifyLegacyComparisonProvenance(
       b.metadata?.description==="existing-owner-seed-v1"||
       seedBindingAudits.some(a=>a.entity_id===JSON.stringify([b.binding_id])));
     requireValid(legacyBindings.every(b=>b.source_kind==="manual-legacy"&&equal(b.metadata,{description:"existing-owner-seed-v1"}))&&
-      legacyBindings.length>0&&legacyBindings.length<=4&&
+      legacyBindings.length<=4&&
       new Set(legacyBindings.map(b=>b.domain_id)).size===legacyBindings.length&&
       new Set(legacyBindings.map(b=>b.external_id)).size===legacyBindings.length&&
       legacyBindings.every(b=>slugs.includes(b.external_id)));
