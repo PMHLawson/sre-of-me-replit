@@ -279,6 +279,45 @@ it.each([false, true])("refuses a missing genuine legacy binding with semantic s
   expect(await snapshot()).toBe(before);
 });
 
+it.each([false, true])("refuses mixed-owner binding snapshots before transferring audit JSON (current binding deleted %s)", async deleted => {
+  const actor = await owner("comparison-transfer-" + deleted), foreign = actor + "-member";
+  const context = await createOrgContextResolver(f.db)(request(actor));
+  await f.client.query("INSERT INTO users(id,created_at) VALUES($1,'2025-12-01T00:00:00Z')", [foreign]);
+  await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [context.orgId, foreign]);
+  const binding = (await f.client.query("SELECT to_jsonb(b) row FROM source_bindings b " +
+    "WHERE owner_user_id=$1 AND source_kind='manual-legacy' AND external_id='music'", [actor])).rows[0].row;
+  const after = { ...binding, owner_user_id: foreign };
+  const sentinel = "SYNTHETIC_MIXED_OWNER_BINDING_PRIVATE_SENTINEL";
+  await f.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") " +
+    "VALUES($1,$2,$3,$4,'source_bindings',$5,'update',clock_timestamp(),$6,$7::jsonb,$8::jsonb)",
+  [actor + "-mixed-audit", context.orgId, deleted ? "system" : "user", deleted ? null : actor,
+    JSON.stringify([binding.binding_id]), sentinel, JSON.stringify(binding), JSON.stringify(after)]);
+  if (deleted)
+    expect((await f.client.query("DELETE FROM source_bindings WHERE owner_user_id=$1 AND binding_id=$2", [actor, binding.binding_id])).rowCount).toBe(1);
+  const trace: Array<{ sql: string; rows: string }> = [];
+  const unit = createLegacyComparisonUnit(createPinnedOwnershipUnit({
+    connect: async () => {
+      const client = await pool.connect();
+      return { query: async (input:any, values?:unknown[]) => {
+        const sql = typeof input === "string" ? input : input.text;
+        const result = await client.query(input, values);
+        trace.push({ sql, rows: JSON.stringify(result.rows) });
+        return result;
+      }, release: (destroy?:boolean) => client.release(destroy) } as any;
+    },
+  } as any), { clock });
+  const before = await snapshot(), operation = vi.fn(async () => true);
+  expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
+  expect(operation).not.toHaveBeenCalled(); expect(await snapshot()).toBe(before);
+  // Both the current-key and historical-key paths must refuse contradictory
+  // scope through metadata only. A later JavaScript filter would be too late.
+  expect(trace.every(row => !row.rows.includes(sentinel))).toBe(true);
+  const auditQueries = trace.filter(row => row.sql.includes("public.audit_events"));
+  expect(auditQueries.length).toBeGreaterThan(0);
+  expect(auditQueries.every(row => row.sql.includes("SELECT count(*)::int AS count FROM public.audit_events"))).toBe(true);
+  expect(trace.some(row => row.sql === "ROLLBACK")).toBe(true);
+});
+
 it("accepts an audited display-name cycle in chronological order without treating a repeated caption as drift", async () => {
   const actor = await owner("comparison-caption-cycle"), unit = comparison();
   const context = await createOrgContextResolver(f.db)(request(actor));
