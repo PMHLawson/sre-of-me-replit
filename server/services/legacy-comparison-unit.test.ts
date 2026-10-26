@@ -165,6 +165,37 @@ it("retains native/custom evidence honestly and never relabels malformed legacy 
   expect(operation).not.toHaveBeenCalled(); expect(await snapshot()).toBe(corrupted);
 });
 
+it("does not treat a free-form preservation reason on an ordinary native domain or binding as legacy proof", async () => {
+  const actor = await owner("comparison-reason-is-not-proof"), unit = comparison();
+  const initial = await unit.run(request(actor), async batch => ({ domainIds: batch.sources.map(source => source.domainId).sort(),
+    fingerprint: batch.snapshotFingerprint }));
+  if (initial.status !== "completed") throw Error("Synthetic initial comparison unavailable");
+  const context = await createOrgContextResolver(f.db)(request(actor));
+  const store = createPolicyV2Storage(f.db, context, { clock: () => new Date("2025-12-31T00:00:00Z") });
+  const configuration = { ...configurationFor("comparison-reason-native", MEASUREMENTS[2], 12),
+    organizationId: context.orgId, ownerUserId: actor };
+  const reason = "Preserve authenticated owner's established legacy policy";
+  await store.domains.create({ domainId: configuration.domainId, slug: "ordinary-native-cupcakes", displayName: "Ordinary native practice" }, reason);
+  await store.policies.append(configuration, reason);
+  const bindingId = "comparison-reason-native-binding";
+  await store.bindings.create({ bindingId, domainId: configuration.domainId, sourceKind: "manual-native",
+    externalId: "ordinary-native-cupcakes", metadata: { description: "ordinary" } }, reason);
+  const observation = { ...observationFor(configuration, "comparison-reason-native-observation", 6),
+    observedAt: "2026-01-04T12:00:00.000Z" };
+  await store.observations.create({ observation, idempotencyKey: observation.observationId, sourceBindingId: bindingId }, reason);
+  const before = await snapshot();
+  expect(await unit.run(request(actor), async batch => {
+    expect(batch.sources.map(source => source.domainId).sort()).toEqual(initial.value.domainIds);
+    expect(batch.sources).toHaveLength(4);
+    expect(batch.snapshotFingerprint).not.toBe(initial.value.fingerprint);
+    expect(batch.unsupported.some(row => row.domainId === configuration.domainId && typeof row.reason === "string" && row.reason.length > 0)).toBe(true);
+    expect(batch.canonicalRows.some((row:any) => row.observation_id === observation.observationId)).toBe(true);
+    expect(batch.nativeEvidence.some((row:any) => row.observation_id === observation.observationId)).toBe(true);
+    return true;
+  })).toEqual({ status: "completed", value: true });
+  expect(await snapshot()).toBe(before);
+});
+
 it("accepts an audited display-name cycle in chronological order without treating a repeated caption as drift", async () => {
   const actor = await owner("comparison-caption-cycle"), unit = comparison();
   const context = await createOrgContextResolver(f.db)(request(actor));
