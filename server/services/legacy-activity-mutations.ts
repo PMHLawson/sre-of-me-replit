@@ -341,9 +341,10 @@ class ComparisonReconciliationFailure extends BoundaryError{
 // locks while another writer owns rows in a later table. Failure rolls back.
 const comparisonLockSql="LOCK TABLE public.audit_events, public.deviation_domains, public.deviations, public.deviations_v2, public.dimension_definitions, public.domains, public.evaluation_results, public.observations, public.policy_versions, public.session_edits, public.sessions, public.source_bindings, public.user_settings IN SHARE ROW EXCLUSIVE MODE NOWAIT";
 function authenticateComparison(request:Request){
-  const actor=(request?.user as any)?.claims?.sub;
-  if(typeof request?.isAuthenticated!=="function"||request.isAuthenticated()!==true||!id.safeParse(actor).success)
-    throw new BoundaryError(401);
+  try{
+    const actor=(request?.user as any)?.claims?.sub;
+    if(typeof request?.isAuthenticated!=="function"||request.isAuthenticated()!==true||!id.safeParse(actor).success)throw 0;
+  }catch{throw new BoundaryError(401);}
   for(const field of ["body","query","params"]){
     const value=(request as any)[field];
     requireValid(value==null||typeof value==="object"&&!Array.isArray(value)&&Reflect.ownKeys(value).length===0);
