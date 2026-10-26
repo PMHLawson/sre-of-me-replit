@@ -26,6 +26,7 @@ import { registerRoutes } from "../routes";
 
 let f: Awaited<ReturnType<typeof startFixture>>, pool: Pool, server: Server, base: string, connects = 0;
 const authenticatedRequests = new WeakSet<object>(), forwardedRequests: object[] = [];
+const resolvedContexts: Array<{ orgId: string; actorUserId: string; role: string }> = [];
 const created: Record<string, any> = {};
 function payload(slug: string) {
   const { organizationId, ownerUserId, domainId, policyVersionId, revision, previousVersionId, ...configuration } =
@@ -53,11 +54,20 @@ beforeAll(async () => {
   verifyFixture(f.root);
   pool = new Pool({ host: f.root + "/socket", port: 5432, user: "synthetic", database: "postgres", password: "", ssl: false,
     max: 4, connectionTimeoutMillis: 5000, options: "-c statement_timeout=10000 -c lock_timeout=5000" });
-  const real = createDomainServiceV2(createPinnedOwnershipUnit({ connect: () => { connects++; return pool.connect(); } }),
-    { clock: () => new Date("2026-01-01T00:00:00Z") });
+  const ownershipUnit = createPinnedOwnershipUnit({ connect: () => { connects++; return pool.connect(); } });
+  const trackedUnit: typeof ownershipUnit = {
+    run: (request, operation) => ownershipUnit.run(request, ownership => {
+      // This seam is reached only after the real membership resolver succeeds,
+      // and before the service can perform its domain or saved-result lookup.
+      resolvedContexts.push({ orgId: ownership.context.orgId, actorUserId: ownership.context.actorUserId, role: ownership.context.role });
+      return operation(ownership);
+    }),
+  };
+  const real = createDomainServiceV2(trackedUnit, { clock: () => new Date("2026-01-01T00:00:00Z") });
   const forwarded = (request: any) => { expect(authenticatedRequests.has(request)).toBe(true); forwardedRequests.push(request); };
   const service: typeof real = {
     list: request => { forwarded(request); return real.list(request); },
+    listSavedEvaluations:(request,key,query)=>{forwarded(request);return real.listSavedEvaluations(request,key,query);},
     read: (request, key) => { forwarded(request); return real.read(request, key); },
     create: (request, input) => { forwarded(request); return real.create(request, input); },
     configure: (request, key, input) => { forwarded(request); return real.configure(request, key, input); },
@@ -68,7 +78,7 @@ beforeAll(async () => {
     // authenticate middleware; the router/service never read this fixture header.
     authenticate: (request: any, response, next) => {
       const actor = request.get("x-synthetic-fixture-actor");
-      if (!["router-a", "router-b", "router-c"].includes(actor)) { response.status(401).json({ message: "Authentication required" }); return; }
+      if (!["router-a", "router-b", "router-c", "router-revoked"].includes(actor)) { response.status(401).json({ message: "Authentication required" }); return; }
       request.isAuthenticated = () => true; request.user = { claims: { sub: actor } };
       authenticatedRequests.add(request); next();
     },
@@ -86,7 +96,7 @@ afterAll(async () => {
 it("real HTTP authentication rejects unauthenticated/malformed requests before all database access", async () => {
   const before = connects, state = await snapshot();
   for (const [path, method, body] of [["/", "GET", undefined], ["/", "POST", payload("unauthorized")],
-    ["/missing", "GET", undefined], ["/missing/policies", "POST", {}]] as const) {
+    ["/missing", "GET", undefined], ["/missing/policies", "POST", {}],["/missing/evaluations","GET",undefined]] as const) {
     expect((await call(path, undefined, method, body)).status).toBe(401);
     expect((await call(path, "__proto__", method, body)).status).toBe(401);
   }
@@ -103,6 +113,65 @@ it("real router creates and reads count-only domains with server identities, for
   }
   expect(forwardedRequests.length).toBeGreaterThan(0);
   expect(forwardedRequests.every(request => authenticatedRequests.has(request))).toBe(true);
+});
+it("saved-result GET is owner-scoped, cursor-bounded, summary-aware and read-only",async()=>{
+  const domainId=created["router-a"].domainId,policyVersionId=created["router-a"].policyVersions[0].configuration.policyVersionId;
+  for(let n=0;n<3;n++){
+    const start=new Date(Date.UTC(2026,0,1+n)).toISOString(),end=new Date(Date.UTC(2026,0,2+n)).toISOString();
+    await f.client.query(`INSERT INTO evaluation_results(result_id,org_id,owner_user_id,domain_id,policy_version_id,
+      window_start,window_end,timezone,day_start_hour,calculated_at,calculation_version,input_fingerprint,eligible_days,
+      result,components,explanation,budget_snapshot,budget_enabled_snapshot)
+      VALUES($1,'router-one','router-a',$2,$3,$4,$5,'UTC',0,'2026-01-10T00:00:00Z','summary-v1',$6,1,
+        $7::jsonb,'[]'::jsonb,$8::jsonb,NULL,false)`,
+      [`summary-router-${n}`,domainId,policyVersionId,start,end,`fingerprint-${n}`,
+        JSON.stringify({summary:`legacy summary ${n}`}),JSON.stringify({summary:"Legacy result; no replay proof"})]);
+  }
+  const before=await snapshot();
+  const first=await call(`/${domainId}/evaluations?limit=1`,"router-a");
+  expect(first.status).toBe(200);expect(first.body.results).toHaveLength(1);
+  expect(first.body.results[0].recordKind).toBe("summary-only");
+  expect(first.body.nextCursor).toEqual(expect.any(String));
+  const second=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`,"router-a");
+  expect(second.status).toBe(200);expect(second.body.results).toHaveLength(1);
+  const third=await call(`/${domainId}/evaluations?limit=1&cursor=${encodeURIComponent(second.body.nextCursor)}`,"router-a");
+  expect(third.status).toBe(200);expect(third.body.results).toHaveLength(1);expect(third.body.nextCursor).toBeNull();
+  const savedIds=[first,second,third].map(page=>page.body.results[0].result_id);
+  expect(savedIds.every(value=>typeof value==="string"&&value.length>0)).toBe(true);
+  expect(savedIds).toEqual(["summary-router-2","summary-router-1","summary-router-0"]);
+  expect((await call(`/${domainId}/evaluations?limit=1&ownerUserId=router-b`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1&score=100`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1&cursor=foreign`,"router-a")).status).toBe(400);
+  expect((await call(`/${domainId}/evaluations?limit=1`,"router-c")).status).toBe(404);
+  expect((await call(`/${created["router-c"].domainId}/evaluations?limit=1`,"router-a")).status).toBe(404);
+  expect(await snapshot()).toBe(before);
+});
+it("a removed member is denied before entering protected domain or saved-result reads",async()=>{
+  const actor="router-revoked",domainId=created["router-a"].domainId;
+  // Fresh synthetic identity: it has no owned or audited records that depend
+  // on this membership. Existing owners, history and audit constraints stay intact.
+  await f.client.query("INSERT INTO users(id) VALUES($1)",[actor]);
+  await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES('router-one',$1,'member')",[actor]);
+  for(const table of ["domains","policy_versions","dimension_definitions","source_bindings","observations",
+    "evaluation_results","deviations_v2","deviation_domains"]){
+    const owned=await f.client.query(`SELECT count(*)::int AS count FROM public.${table} WHERE owner_user_id=$1`,[actor]);
+    expect(owned.rows[0].count).toBe(0);
+  }
+  expect((await f.client.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor_user_id=$1",[actor])).rows[0].count).toBe(0);
+  const enteredBefore=resolvedContexts.length;
+  expect(await call("/",actor)).toEqual({status:200,body:{domains:[]}});
+  expect(resolvedContexts.length).toBeGreaterThan(enteredBefore);
+  expect(resolvedContexts.at(-1)).toEqual({orgId:"router-one",actorUserId:actor,role:"member"});
+  // With valid membership, the normal owner boundary still rejects this
+  // other member's domain. This is not formerly-owned-domain revocation.
+  expect((await call(`/${domainId}/evaluations?limit=1`,actor)).status).toBe(404);
+  const removed=await f.client.query("DELETE FROM organization_members WHERE org_id='router-one' AND user_id=$1",[actor]);
+  expect(removed.rowCount).toBe(1);
+  const before=await snapshot(),entered=resolvedContexts.length,forwarded=forwardedRequests.length,connected=connects;
+  expect(await call(`/${domainId}/evaluations?limit=1`,actor)).toEqual({status:403,body:{message:"Access denied"}});
+  expect(forwardedRequests).toHaveLength(forwarded+1);
+  expect(connects).toBe(connected+1);
+  expect(resolvedContexts).toHaveLength(entered);
+  expect(await snapshot()).toBe(before);
 });
 it("list/read/configure stay isolated across organizations and independent owners in the same organization", async () => {
   const before = await snapshot();

@@ -74,13 +74,17 @@ export function createEvaluator(registry: RecipeRegistry) {
       return unavailable("recipe_unapproved");
     if(["organizationId","ownerUserId","domainId","policyVersionId"].some(k=>
       r[k as keyof typeof r]!==c[k as keyof typeof c]))return unavailable("recipe_identity_mismatch");
-    let now:number, start:number, end:number, onboarding:number;
+    let now:number, start:number, end:number|null, onboarding:number;
     try {
-      now=instant(i.now);start=instant(i.coverage.policyStart);end=instant(i.coverage.policyEnd);
+      now=instant(i.now);start=instant(i.coverage.policyStart);
+      end=i.coverage.policyEnd===null?null:instant(i.coverage.policyEnd);
       onboarding=instant(i.coverage.onboardingAt);
-      if(start!==instant(c.effectiveFrom)||end<=start||now<start)return unavailable("policy_coverage_mismatch");
+      if(start!==instant(c.effectiveFrom)||(end!==null&&end<=start)||now<start)return unavailable("policy_coverage_mismatch");
       evidence.window=assembleWindow({now:i.now,windowDays:i.windowDays,boundary:c.boundary,
-        coverage:{start:new Date(Math.max(start,onboarding)).toISOString(),end:i.coverage.policyEnd},breaks:i.breaks});
+        coverage:{start:new Date(Math.max(start,onboarding)).toISOString(),
+          // The calculation cutoff bounds an open policy's evidence without
+          // pretending the policy itself ends at that instant.
+          end:i.coverage.policyEnd??i.now},breaks:i.breaks});
     } catch {return unavailable("window_assembly_unavailable");}
     const w=evidence.window;
     const seen=new Set<string>();
@@ -90,7 +94,7 @@ export function createEvaluator(registry: RecipeRegistry) {
       seen.add(o.observationId);
       let t:number;
       try { t=instant(o.observedAt); } catch { return unavailable("observation_context_mismatch"); }
-      if(t<start||t>=end)return unavailable("policy_boundary_unavailable");
+      if(t<start||(end!==null&&t>=end))return unavailable("policy_boundary_unavailable");
       if(t>now){evidence.future.push(o);continue;}
       if(t>=instant(w.end)){evidence.today.push(o);continue;}
       if(t<instant(w.start)){evidence.excluded.push({observationId:o.observationId,reason:"outside_window"});continue;}
@@ -98,7 +102,7 @@ export function createEvaluator(registry: RecipeRegistry) {
       evidence.completed.push(o);
     }
     // Missing historical policies cannot be silently treated as exempt history.
-    if(Math.max(instant(w.start),onboarding)<start || instant(w.end)>end)
+    if(Math.max(instant(w.start),onboarding)<start || (end!==null&&instant(w.end)>end))
       return unavailable("policy_boundary_unavailable");
     const adapted=c.targets.adapted;
     if(adapted && r.targetSelection==="normal")return unavailable("adaptation_selection_unavailable");

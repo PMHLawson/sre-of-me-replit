@@ -24,6 +24,15 @@ vi.mock("./replit_integrations/auth", () => ({
   },
 }));
 import { registerRoutes } from "./routes";
+import { createLegacySessionAdapter } from "./services/legacy-session-adapter";
+
+// These suites exercise legacy fallback handlers, independently of deployment
+// adoption flags. The real disabled adapter must never request a database pool.
+const forbiddenLegacyPool = vi.fn(async () => { throw new Error("FORBIDDEN: legacy fallback fixture database connection"); });
+const fallbackSessionMutations = createLegacySessionAdapter({
+  config: { enabled: false, owners: [] }, getPool: forbiddenLegacyPool,
+});
+afterEach(() => expect(forbiddenLegacyPool).not.toHaveBeenCalled());
 
 const OWNERS = ["synthetic-retention-owner-ALPHA", "synthetic-retention-owner-BETA"];
 const ID = "opaque:/synthetic retention?#%";
@@ -62,7 +71,7 @@ async function request(c: typeof cases[number]) {
 }
 beforeAll(async () => {
   // No server/index import, setupAuth, startup purge, real session or app lifecycle.
-  await registerRoutes(listener, app);
+  await registerRoutes(listener, app, fallbackSessionMutations);
   await new Promise<void>((resolve, reject) => {
     listener.once("error", reject);
     listener.listen(0, "127.0.0.1", () => { listener.removeListener("error", reject); resolve(); });

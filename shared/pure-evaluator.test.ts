@@ -439,6 +439,39 @@ describe("unavailable policy edges, provenance and isolation",()=>{
     const k=counts();k.policy.boundary.timezone="Not/A_Zone";unavailable(run(k),"invalid_policy");
     const l=counts();l.policy.boundary.dayStartHour=24;unavailable(run(l),"invalid_policy");
   });
+  it("open policy retains completed, exact-boundary Today, exact-now and future evidence",()=>{
+    const i=counts();i.coverage.policyEnd=null;
+    i.observations=["2026-01-14T12:00:00Z","2026-01-15T00:00:00Z",i.now,"2026-01-15T12:00:00.001Z"]
+      .map((observedAt,j)=>({...structuredClone(i.observations[0]),observationId:`open-${j}`,observedAt}));
+    const result=available(run(i));
+    expect(result.evidence.completed.map(o=>o.observationId)).toEqual(["open-0"]);
+    expect(result.evidence.today.map(o=>o.observationId)).toEqual(["open-1","open-2"]);
+    expect(result.evidence.future.map(o=>o.observationId)).toEqual(["open-3"]);
+    expect(result.evidence.rawObservations.map(o=>o.observationId)).toEqual(["open-0","open-1","open-2","open-3"]);
+    expect(result.evidence.window!.end).toBe("2026-01-15T00:00:00.000Z");
+    expect(i.coverage.policyEnd).toBeNull();
+  });
+  it("open policy does not fabricate pre-activation or zero-exposure coverage and requires coverage input",()=>{
+    const before=counts();before.policy.effectiveFrom="2026-01-16T00:00:00Z";
+    before.coverage.policyStart=before.policy.effectiveFrom;before.coverage.onboardingAt=before.policy.effectiveFrom;
+    before.coverage.policyEnd=null;unavailable(run(before),"policy_coverage_mismatch");
+    const equal=counts();equal.policy.effectiveFrom=equal.now;equal.coverage.policyStart=equal.now;
+    equal.coverage.onboardingAt=equal.now;equal.coverage.policyEnd=null;equal.observations=[];
+    const noExposure=run(equal);expect(noExposure.status).toBe("unavailable");
+    if(noExposure.status==="available")throw Error("zero exposure was scored");
+    expect(noExposure).not.toHaveProperty("score");
+    const missing=counts();(missing as unknown as {coverage?:unknown}).coverage=undefined;
+    unavailable(run(missing),"window_assembly_unavailable");
+  });
+  it("open current policy preserves finite-end historical calculations",()=>{
+    const finite=counts(),finiteResult=available(run(finite));
+    const open=structuredClone(finite);open.coverage.policyEnd=null;
+    const openResult=available(run(open));
+    expect(openResult.evidence.window).toEqual(finiteResult.evidence.window);
+    expect(openResult.evidence.components).toEqual(finiteResult.evidence.components);
+    expect(openResult.score).toBe(finiteResult.score);
+    expect(openResult.condition).toBe(finiteResult.condition);
+  });
   it("arithmetic overflow explicitly unavailable",()=>{
     const i=counts(),m=i.policy.measurements[0];
     if(m.kind==="count"){m.kind="repetitions";} // still typed integer count, not duration
@@ -499,21 +532,30 @@ describe("unavailable policy edges, provenance and isolation",()=>{
       return normalized===name||normalized.endsWith(`/${name}`);
     };
     const loaderPath="server/services/evaluation-history-v2.ts";
+    const persistencePath="server/services/evaluation-persistence-v2.ts";
     const scoringModules=["pure-evaluator","pure-derived","derived-exact","derived-profile"];
     for(const file of sources){
-      const refs=imports(file.source),isLoader=file.path===loaderPath;
-      // Only the dormant history loader may reach the cadence module; no
-      // application or shared source may activate either dormant module.
-      if(!isLoader)
+      const refs=imports(file.source),isLoader=file.path===loaderPath,isPersistence=file.path===persistencePath;
+      // Only the dormant loader may use cadence history and only the isolated
+      // persistence operation may combine it with scoring or trusted writes.
+      if(!isLoader&&!isPersistence)
         expect(refs.some(s=>targets(s,"evaluation-history-v2")||targets(s,"cadence-derived")),file.path).toBe(false);
+      if(!isPersistence)
+        expect(refs.some(s=>targets(s,"evaluation-persistence-v2")),file.path).toBe(false);
       if(isLoader){
         expect(refs.some(s=>targets(s,"evaluator-window"))).toBe(true);
         expect(refs.some(s=>targets(s,"evaluator-recipe"))).toBe(true);
         expect(refs.some(s=>targets(s,"cadence-derived"))).toBe(true);
       }
+      if(isPersistence){
+        expect(refs.some(s=>targets(s,"evaluation-history-v2"))).toBe(true);
+        expect(refs.some(s=>targets(s,"pure-evaluator"))).toBe(true);
+        expect(file.source).toMatch(/\.evaluations\.persistTrusted\s*\(/);
+      }
       if(/^(server|client|script)\//.test(file.path)){
-        expect(refs.some(s=>scoringModules.some(name=>targets(s,name))),file.path).toBe(false);
-        if(!isLoader)
+        if(!isPersistence)
+          expect(refs.some(s=>scoringModules.some(name=>targets(s,name))),file.path).toBe(false);
+        if(!isLoader&&!isPersistence)
           expect(refs.some(s=>targets(s,"evaluator-recipe")||targets(s,"evaluator-window")),file.path).toBe(false);
       }
     }

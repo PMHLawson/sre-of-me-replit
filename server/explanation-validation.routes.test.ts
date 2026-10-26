@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer } from "node:http";
 import { BoundaryError } from "./lib/org-context";
@@ -24,6 +24,15 @@ vi.mock("./replit_integrations/auth", () => ({
   },
 }));
 import { registerRoutes } from "./routes";
+import { createLegacySessionAdapter } from "./services/legacy-session-adapter";
+
+// These suites exercise legacy fallback handlers, independently of deployment
+// adoption flags. The real disabled adapter must never request a database pool.
+const forbiddenLegacyPool = vi.fn(async () => { throw new Error("FORBIDDEN: legacy fallback fixture database connection"); });
+const fallbackSessionMutations = createLegacySessionAdapter({
+  config: { enabled: false, owners: [] }, getPool: forbiddenLegacyPool,
+});
+afterEach(() => expect(forbiddenLegacyPool).not.toHaveBeenCalled());
 
 // Kept local rather than importing a .test file (which would register its tests twice).
 const inputs = [
@@ -64,7 +73,7 @@ app.use((req, _res, next) => {
 const listener = createServer(app);
 let origin: string;
 beforeAll(async () => {
-  await registerRoutes(listener, app, undefined, {
+  await registerRoutes(listener, app, fallbackSessionMutations, {
     create: async (req, input) => fake.storage.createDeviation({ ...(input as object), userId: (req.user as any).claims.sub }),
     edit: async (req, key, input) => fake.storage.updateDeviation((req.user as any).claims.sub, key, input),
     end: async (req, key, input) => fake.storage.endDeviation((req.user as any).claims.sub, key, input),

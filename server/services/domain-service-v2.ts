@@ -169,6 +169,10 @@ export function createDomainServiceV2(unit: Unit, options: { clock?: () => Date 
       for (const domain of domains) result.push(await view(store, domain, at,byDomain.get(domain.domain_id)??[]));
       return { domains: result };
     }),
+    listSavedEvaluations: (request:Request,key:unknown,query:unknown) => unit.run(request,async ownership=>{
+      const domainId=parse(id,key),store=createPolicyV2Storage(ownership.db,ownership.context,{clock});
+      return store.evaluations.page(domainId,query);
+    }),
     read: (request: Request, key: unknown) => unit.run(request, async ownership => {
       const domainId = parse(id, key), store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       return view(store, await store.domains.get([domainId]), serverClock(clock));

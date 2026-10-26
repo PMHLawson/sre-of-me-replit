@@ -18,7 +18,10 @@ beforeAll(async()=>{
   };
   app.use("/activities",createActivityV2Router({authenticate,service:Object.fromEntries(
     ["create","read","submission","list","eligibility","edit","delete","restore","mutation"].map(key=>[key,refuse])) as any}));
-  app.use("/domains",createPolicyV2Router({authenticate,service:{list:refuse,read:refuse,create:refuse,configure:refuse} as any}));
+  app.use("/domains",createPolicyV2Router({authenticate,service:{list:refuse,read:refuse,create:refuse,configure:refuse,
+    // This fixture exercises the existing list/error route, not saved-result reads.
+    listSavedEvaluations:async()=>{throw Error("Unexpected saved-result read in write-resource error fixture");},
+  } as any}));
   app.use("/onboarding",createOnboardingRouter({authenticate,service:{status:refuse,ensure:refuse,readSettings:refuse,updateSettings:refuse} as any}));
   server=createServer(app);await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
   const address=server.address();if(!address||typeof address==="string")throw Error("Synthetic HTTP listener unavailable");

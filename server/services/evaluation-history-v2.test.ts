@@ -1,5 +1,7 @@
 import { beforeAll,afterAll,beforeEach,describe,it,expect } from "vitest";
-import { startFixture } from "../lib/ownership-fixture";
+import { startFixture,verifyFixture } from "../lib/ownership-fixture";
+import { Pool,type PoolClient } from "pg";
+import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createOrgContextResolver,type OrgContext } from "../lib/org-context";
 import { createPolicyV2Storage } from "../storage/policy-v2-storage";
 import { configurationFor,observationFor,MEASUREMENTS,conditionFor } from "../../shared/fixtures/domain-config-cases";
@@ -7,10 +9,15 @@ import type { DomainConfiguration,MeasurementDefinition } from "../../shared/dom
 import type { CadenceEpisode } from "../../shared/cadence-derived";
 import { createEvaluationHistoryLoader,evaluationHistoryFingerprint,historyBreakFingerprint,
   type HistorySnapshot,type HistoryCoverageReceipt,type HistoryVerification } from "./evaluation-history-v2";
+import { createEvaluationPersistence } from "./evaluation-persistence-v2";
+import type { EvaluationRecipe } from "../../shared/evaluator-recipe";
+import { createEvaluator } from "../../shared/pure-evaluator";
+import { CADENCE_VERSION } from "../../shared/cadence-derived";
 
 describe("authenticated complete history and exact policy segmentation",()=>{
   let f:Awaited<ReturnType<typeof startFixture>>;
   let context:OrgContext,other:OrgContext,config:DomainConfiguration,episode:CadenceEpisode;
+  let scoringConfig:DomainConfiguration,scoringEpisode:CadenceEpisode;
   const now="2026-01-15T12:00:00Z";
   const frequency:MeasurementDefinition={measurementId:"frequency",displayName:"Qualifying days",meaning:"Days with qualifying practice",
     role:"practice",comparisonDirection:"higher_is_better",kind:"frequency",valueType:"integer",
@@ -22,7 +29,8 @@ describe("authenticated complete history and exact policy segmentation",()=>{
       counts:{configurations:snapshot.configurations.length,observations:snapshot.observations.length,
         corrections:snapshot.corrections.length,breaks:snapshot.breaks.length},
       origins:episodes.map(e=>({episodeId:e.episodeId,at:e.origin.at,sourceId:e.origin.sourceId,
-        evidenceId:"fixture-created-empty-before-recording",kind:"verified-empty-domain-activation"}))};
+        evidenceId:e.origin.at==="2026-01-01T00:00:00Z"?"fixture-created-empty-before-recording":"fixture-policy-source-reconciled",
+        kind:e.origin.at==="2026-01-01T00:00:00Z"?"verified-empty-domain-activation":"verified-source-reconciliation"}))};
   }
   const verifier=(episodes:CadenceEpisode[]=[episode]):HistoryVerification=>({
     // Synthetic fixture genesis is known here; a production callback must read
@@ -31,6 +39,8 @@ describe("authenticated complete history and exact policy segmentation",()=>{
   });
   const loader=(verification:HistoryVerification=verifier(),episodes:CadenceEpisode[]=[episode])=>
     createEvaluationHistoryLoader(f.db,context,config.domainId,episodes,verification);
+  const scoringLoader=(verification:HistoryVerification=verifier([scoringEpisode]))=>
+    createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[scoringEpisode],verification);
   beforeAll(async()=>{
     f=await startFixture("evaluation-history");
     await f.client.query(`INSERT INTO users(id) VALUES ('history-owner'),('history-other'),('history-peer');
@@ -41,7 +51,7 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     other=await createOrgContextResolver(f.db)({isAuthenticated:()=>true,user:{claims:{sub:"history-other"}}});
   },60000);
   beforeEach(async()=>{
-    await f.client.query(`DELETE FROM public.audit_events;DELETE FROM public.source_bindings;
+    await f.client.query(`DELETE FROM public.audit_events;DELETE FROM public.evaluation_results;DELETE FROM public.source_bindings;
       DELETE FROM public.deviation_domains;DELETE FROM public.deviations_v2;DELETE FROM public.deviations;
       DELETE FROM public.observations;DELETE FROM public.dimension_definitions;DELETE FROM public.policy_versions;
       DELETE FROM public.domains;DELETE FROM public.owner_write_resource_budgets;`);
@@ -57,15 +67,96 @@ describe("authenticated complete history and exact policy segmentation",()=>{
         kind:"verified-effective-policy-origin"},effectiveEnd:null};
     const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
     await store.domains.createWithPolicy({domainId:config.domainId,slug:"history",displayName:config.displayName},config,"Synthetic setup");
+    scoringConfig=configurationFor("history-scoring",structuredClone(MEASUREMENTS[0]),50);
+    Object.assign(scoringConfig,{organizationId:context.orgId,ownerUserId:context.actorUserId,
+      domainId:"history-scoring-domain",policyVersionId:"history-scoring-policy",effectiveFrom:"2026-01-01T00:00:00Z",
+      boundary:{timezone:"UTC",dayStartHour:0}});
+    const durationTarget=scoringConfig.targets.normal.conditions[0];
+    durationTarget.basis={kind:"period",windowDays:7};
+    durationTarget.periodAggregation={sourceBasis:"per_event",method:"sum"};
+    scoringConfig.measurements.push(frequency);
+    scoringConfig.targets.normal.conditions.push(conditionFor(frequency,5));
+    scoringConfig.qualification={kind:"condition",condition:conditionFor(MEASUREMENTS[0],10)};
+    scoringEpisode={episodeId:"history-scoring-episode",policy:structuredClone(scoringConfig),windowDays:14,
+      targetId:scoringConfig.targets.normal.targetId,frequencyMeasurementId:frequency.measurementId,
+      origin:{at:scoringConfig.effectiveFrom,sourceId:"fixture-scoring-source",kind:"verified-effective-policy-origin"},
+      effectiveEnd:null};
+    await store.domains.createWithPolicy({domainId:scoringConfig.domainId,slug:"history-scoring",
+      displayName:scoringConfig.displayName},scoringConfig,"Synthetic scoring setup");
   });
   afterAll(async()=>{if(f)await f.cleanup();},60000);
   async function add(id:string,at:string,amount=10,c=config){
     const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
     await store.observations.create({observation:{...observationFor(c,id,amount),observedAt:at},idempotencyKey:id},"Synthetic event");
   }
+  async function addScoring(id:string,at:string,amount=10){
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.observations.create({observation:{...observationFor(scoringConfig,id,amount),observedAt:at},
+      idempotencyKey:id},"Synthetic scoring event");
+  }
+  function scoringRecipe(c:DomainConfiguration=scoringConfig):EvaluationRecipe{
+    return {recipeId:"synthetic-reviewed-history-recipe",version:"1",organizationId:context.orgId,
+      ownerUserId:context.actorUserId,domainId:c.domainId,policyVersionId:c.policyVersionId,
+      targetId:c.targets.normal.targetId,targetSelection:"normal",qualification:c.qualification??null,
+      components:c.targets.normal.conditions.map(target=>{
+        const measurement=c.measurements.find(m=>m.measurementId===target.measurementId)!;
+        return {measurement:structuredClone(measurement),targetCondition:structuredClone(target),weight:0.5,mandatory:true,
+          percentage:"positive-linear-ratio-v1" as const,
+          actual:measurement.kind==="frequency"?"distinct-qualifying-days" as const:"sum-events" as const};
+      })};
+  }
+  function persistenceWriter(recipe=scoringRecipe(),history=scoringLoader()){
+    return createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
+      recipes:[recipe],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+  }
+
+  async function concurrentPersistenceSaves(){
+    verifyFixture(f.root); // before constructing this synthetic Unix-socket-only pool
+    const pool=new Pool({host:f.root+"/socket",port:5432,user:"synthetic",database:"postgres",password:"",ssl:false,
+      max:2,connectionTimeoutMillis:5000,options:"-c statement_timeout=10000 -c lock_timeout=2000"});
+    const clients:PoolClient[]=[],handedOff=new Set<PoolClient>();
+    try{
+      // Hold both leases before either operation starts: a shared fixture client
+      // cannot interleave BEGIN/COMMIT, and the pool cannot reuse one backend.
+      clients.push(await pool.connect());clients.push(await pool.connect());
+      const pids=await Promise.all(clients.map(async client=>
+        (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number));
+      expect(new Set(pids).size).toBe(2);
+      const request={isAuthenticated:()=>true,user:{claims:{sub:context.actorUserId}}};
+      const attempts=await Promise.allSettled(clients.map(async(client,index)=>{
+        const unit=createPinnedOwnershipUnit({connect:async()=>{handedOff.add(client);return client;}});
+        return unit.run(request,async current=>{
+          expect((await current.tx.query("SELECT pg_backend_pid() AS pid")).rows[0].pid).toBe(pids[index]);
+          // Every run resolves its own authenticated capability and binds a fresh
+          // history loader and writer to that operation's database/transaction.
+          const history=createEvaluationHistoryLoader(current.db,current.context,scoringConfig.domainId,
+            [scoringEpisode],verifier([scoringEpisode]));
+          const writer=createEvaluationPersistence({db:current.db,context:current.context,
+            domainId:scoringConfig.domainId,history,recipes:[scoringRecipe()],
+            calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+          return writer.calculateAndSave();
+        });
+      }));
+      const values=attempts.map(result=>{
+        if(result.status!=="fulfilled")throw result.reason;
+        return result.value;
+      });
+      expect(attempts.filter(result=>result.status==="fulfilled")).toHaveLength(2);
+      return values;
+    }finally{
+      // Pinned units release handed-off leases on success and failure. If setup
+      // failed before handoff, release its leases here, then close this pool
+      // before the fixture's existing owned-Postgres cleanup runs.
+      for(const client of clients)if(!handedOff.has(client))client.release();
+      await pool.end();
+      expect(pool.totalCount).toBe(0);
+    }
+  }
   async function state(){
     return (await f.client.query(`SELECT jsonb_build_object('observations',(SELECT jsonb_agg(to_jsonb(o)) FROM observations o),
-      'audit',(SELECT jsonb_agg(to_jsonb(a)) FROM audit_events a),'policy',(SELECT jsonb_agg(to_jsonb(p)) FROM policy_versions p)) AS data`)).rows[0].data;
+      'audit',(SELECT jsonb_agg(to_jsonb(a)) FROM audit_events a),'policy',(SELECT jsonb_agg(to_jsonb(p)) FROM policy_versions p),
+      'evaluations',(SELECT jsonb_agg(to_jsonb(e)) FROM evaluation_results e),
+      'budgets',(SELECT jsonb_agg(to_jsonb(b)) FROM owner_write_resource_budgets b)) AS data`)).rows[0].data;
   }
   it("requires the authentic capability, never a copied owner identity",()=>{
     expect(()=>createEvaluationHistoryLoader(f.db,{...context},config.domainId,[episode],verifier())).toThrow();
@@ -351,4 +442,243 @@ describe("authenticated complete history and exact policy segmentation",()=>{
     expect(result.evidence.snapshot?.databaseEvidence?.legacyDeviations).toHaveLength(1);
     expect(result.segments).toEqual([]);
   });
+  it("saves a reproducible trusted result once, preserves same-day qualification and audits changed evidence",async()=>{
+    for(const [id,at] of [["score-a","2026-01-10T09:00:00Z"],["score-b","2026-01-10T13:00:00Z"],
+      ["score-c","2026-01-10T18:00:00Z"]] as const)await addScoring(id,at,10);
+    const writer=persistenceWriter(),first=await writer.calculateAndSave();
+    expect(first).toMatchObject({status:"saved",action:"created"});
+    if(first.status!=="saved")throw Error("trusted source did not produce a saved synthetic result");
+    const row=first.result as any,trusted=row.result;
+    expect(row).toMatchObject({budget_enabled_snapshot:false,budget_snapshot:null,
+      calculation_version:"somr433-persist-v1",input_fingerprint:first.inputFingerprint});
+    expect(trusted).toMatchObject({kind:"trusted-evaluation-v1",schemaVersion:1,status:"available",
+      current:{status:"available"},cadence:{status:"available"},persistence:{status:"available"},
+      attention:{status:"available"},trend:{status:"unavailable"}});
+    expect(trusted.persistence).toEqual(trusted.cadence);
+    expect(trusted.persistence.evidence.calculationVersion).toBe(CADENCE_VERSION);
+    expect(trusted.evaluation.evidence.components.find((c:any)=>c.measurementId==="frequency").qualifyingDays)
+      .toEqual(["2026-01-10"]);
+    expect(trusted.provenance.input.observations).toHaveLength(3);
+    expect(trusted.provenance.input.recipe.recipeId).toBe("synthetic-reviewed-history-recipe");
+    expect(trusted.provenance.input.policy.targets.normal.conditions).toHaveLength(2);
+    const afterInsert=await state();
+    const retry=await writer.calculateAndSave();
+    const concurrent=await concurrentPersistenceSaves();
+    expect(retry).toMatchObject({status:"saved",action:"unchanged",resultId:first.resultId,inputFingerprint:first.inputFingerprint});
+    expect(concurrent.every(result=>result.status==="saved"&&result.action==="unchanged")).toBe(true);
+    expect(await state()).toEqual(afterInsert);
+    await addScoring("score-d","2026-01-11T10:00:00Z",10);
+    const revised=await writer.calculateAndSave();
+    expect(revised).toMatchObject({status:"saved",action:"updated",resultId:first.resultId});
+    if(revised.status!=="saved")throw Error("changed synthetic evidence was not saved");
+    expect(revised.inputFingerprint).not.toBe(first.inputFingerprint);
+    expect((revised.result as any).result.provenance.sourceSnapshot.observations).toHaveLength(4);
+    const audit=(await f.client.query(`SELECT action,"before","after" FROM audit_events
+      WHERE entity_type='evaluation_results' AND entity_id=$1 ORDER BY occurred_at,audit_event_id`,
+      [JSON.stringify([first.resultId])])).rows;
+    expect(audit.map((entry:any)=>entry.action)).toEqual(["create","update"]);
+    expect(audit[1].before.input_fingerprint).toBe(first.inputFingerprint);
+    expect(audit[1].after.input_fingerprint).toBe(revised.inputFingerprint);
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(1);
+  });
+  it("keeps unapproved recipes, missing coverage proof and reference comparisons unavailable",async()=>{
+    await addScoring("score-unavailable","2026-01-10T12:00:00Z",10);
+    const noRecipe=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(),recipes:[],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+    expect(await noRecipe.calculateAndSave()).toEqual({status:"unavailable",reason:"recipe_not_approved"});
+    const missingProof=verifier([scoringEpisode]);missingProof.verifyCoverage=async()=>null;
+    const noCoverage=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(missingProof),recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",
+      clock:()=>new Date(now)});
+    const result=await noCoverage.calculateAndSave();
+    expect(result).toMatchObject({status:"unavailable"});
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(0);
+    // Reference percentages are not computed by this foundation; a fixture's
+    // hand-written future expectation is deliberately not acceptance evidence.
+
+  });
+  it("does not persist an unapproved mixed-policy window",async()=>{
+    await addScoring("score-before-policy-change","2026-01-10T12:00:00Z",10);
+    const next=structuredClone(scoringConfig);
+    Object.assign(next,{policyVersionId:"history-scoring-policy-v2",revision:2,
+      previousVersionId:scoringConfig.policyVersionId,effectiveFrom:"2026-01-12T00:00:00Z"});
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.policies.append(next,"Synthetic policy transition");
+    const observation={...observationFor(next,"score-after-policy-change",10),observedAt:"2026-01-12T12:00:00Z"};
+    await store.observations.create({observation,idempotencyKey:"score-after-policy-change"},"Synthetic scoring event");
+    const before={...scoringEpisode,effectiveEnd:next.effectiveFrom};
+    const after:CadenceEpisode={...scoringEpisode,episodeId:"history-scoring-episode-v2",policy:next,
+      origin:{...scoringEpisode.origin,at:next.effectiveFrom}};
+    const history=createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[before,after],verifier([before,after]));
+    const writer=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
+      recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)});
+    expect(await writer.calculateAndSave()).toMatchObject({status:"unavailable",reason:"cross_version_aggregate_not_approved"});
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(0);
+  });
+  it("treats an equivalent refreshed receipt as an unchanged retry, but retains changed authority",async()=>{
+    await addScoring("receipt-event","2026-01-10T12:00:00Z",10);
+    let issuance=0,proof="fixture-created-empty-before-recording";
+    const verification:HistoryVerification={verifyCoverage:async snapshot=>{
+      const value=receipt(snapshot,[scoringEpisode]);
+      value.receiptId="synthetic-reissued-"+(++issuance);
+      value.origins[0].evidenceId=proof;
+      return value;
+    }};
+    const writer=persistenceWriter(scoringRecipe(),scoringLoader(verification));
+    const first=await writer.calculateAndSave();
+    expect(first).toMatchObject({status:"saved",action:"created"});
+    if(first.status!=="saved")throw Error("receipt test did not create result");
+    const firstReceipt=(first.result as any).result.provenance.coverageReceipt;
+    expect(firstReceipt.receiptId).toBe("synthetic-reissued-1");
+    const afterFirst=await state(),second=await writer.calculateAndSave();
+    expect(second).toMatchObject({status:"saved",action:"unchanged",resultId:first.resultId,
+      inputFingerprint:first.inputFingerprint});
+    if(second.status!=="saved")throw Error("receipt retry did not return existing result");
+    expect((second.result as any).result.provenance.coverageReceipt).toEqual(firstReceipt);
+    expect(await state()).toEqual(afterFirst);
+    proof="fixture-independent-activation-proof-revision-2";
+    const changed=await writer.calculateAndSave();
+    expect(changed).toMatchObject({status:"saved",action:"updated",resultId:first.resultId});
+    if(changed.status!=="saved")throw Error("changed authority did not update");
+    expect(changed.inputFingerprint).not.toBe(first.inputFingerprint);
+    expect((changed.result as any).result.provenance.coverageReceipt.origins[0].evidenceId).toBe(proof);
+  });
+  it("admits one concurrent first save on independent pinned clients with one result and create audit",async()=>{
+    await addScoring("concurrent-first-event","2026-01-10T12:00:00Z",10);
+    const admitted=async()=>Number((await f.client.query(
+      "SELECT coalesce(sum(day_count),0)::int AS count FROM owner_write_resource_budgets WHERE owner_user_id=$1",
+      [context.actorUserId])).rows[0].count);
+    const before=await admitted(),results=await concurrentPersistenceSaves();
+    expect(results.map(r=>r.status==="saved"?r.action:r.status).sort()).toEqual(["created","unchanged"]);
+    const ids=results.map(r=>r.status==="saved"?r.resultId:null);
+    expect(ids[0]).toBeTruthy();expect(ids[1]).toBe(ids[0]);
+    expect((await f.client.query("SELECT count(*)::int AS count FROM evaluation_results")).rows[0].count).toBe(1);
+    const audits=(await f.client.query(
+      "SELECT action FROM audit_events WHERE entity_type='evaluation_results' AND entity_id=$1",
+      [JSON.stringify([ids[0]])])).rows;
+    expect(audits.map(r=>r.action)).toEqual(["create"]);
+    expect(await admitted()).toBe(before+1);
+  });
+  it("binds the validated dependencies and scalar identity before options are replaced",async()=>{
+    await addScoring("bound-dependency-event","2026-01-10T12:00:00Z",10);
+    let foreignHistoryReads=0;
+    const options:any={db:f.db,context,domainId:scoringConfig.domainId,history:scoringLoader(),
+      recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",clock:()=>new Date(now)};
+    const writer=createEvaluationPersistence(options);
+    options.db={};options.context=other;options.domainId=config.domainId;
+    options.history={load:async()=>{foreignHistoryReads++;throw Error("unbranded replacement must not run");}};
+    options.clock=()=>{throw Error("replacement clock must not run");};
+    options.calculationVersion="replacement-calculation";options.recipes=[];
+    const saved=await writer.calculateAndSave();
+    expect(saved).toMatchObject({status:"saved",action:"created"});
+    expect(foreignHistoryReads).toBe(0);
+    if(saved.status!=="saved")throw Error("bound operation did not save");
+    expect(saved.result).toMatchObject({domain_id:scoringConfig.domainId,org_id:context.orgId,
+      owner_user_id:context.actorUserId,calculation_version:"somr433-persist-v1"});
+    expect((saved.result as any).result.provenance.input.now).toBe(new Date(now).toISOString());
+  });
+  it("keeps a future policy and its raw records pending while saving the current policy",async()=>{
+    await addScoring("persist-current-event","2026-01-10T12:00:00Z",10);
+    const next=structuredClone(scoringConfig);
+    Object.assign(next,{policyVersionId:"persist-future-policy",revision:2,
+      previousVersionId:scoringConfig.policyVersionId,effectiveFrom:"2026-01-20T00:00:00Z"});
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.policies.append(next,"Synthetic pending policy");
+    await add("persist-future-event","2026-01-20T12:00:00Z",10,next);
+    const current={...scoringEpisode,effectiveEnd:next.effectiveFrom};
+    const future:CadenceEpisode={...scoringEpisode,episodeId:"persist-future-episode",policy:next,
+      origin:{...scoringEpisode.origin,at:next.effectiveFrom}};
+    // No fabricated activation receipt is supplied for the future episode.
+    const history=createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[current,future],verifier([current]));
+    const saved=await persistenceWriter(scoringRecipe(),history).calculateAndSave();
+    expect(saved).toMatchObject({status:"saved",action:"created"});
+    if(saved.status!=="saved")throw Error("pending policy blocked a valid current save");
+    const trusted=(saved.result as any).result;
+    expect(trusted.provenance.input.policy.policyVersionId).toBe(scoringConfig.policyVersionId);
+    expect(trusted.provenance.sourceSnapshot.configurations).toHaveLength(2);
+    expect(trusted.provenance.sourceSnapshot.observations).toHaveLength(2);
+    expect(trusted.provenance.dispositions.find((d:any)=>d.observationId==="persist-future-event"))
+      .toMatchObject({kind:"future",reason:"future_policy_not_assessed"});
+  });
+  it("saves a full revised-policy window with original activation and replays the earlier saved result",async()=>{
+    await addScoring("historical-before-change","2026-01-03T12:00:00Z",10);
+    const oldRecipe=scoringRecipe();
+    const initialWriter=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(),recipes:[oldRecipe],calculationVersion:"somr433-persist-v1",
+      clock:()=>new Date("2026-01-08T12:00:00Z")});
+    const earlier=await initialWriter.calculateAndSave();
+    expect(earlier).toMatchObject({status:"saved",action:"created"});
+    if(earlier.status!=="saved")throw Error("earlier result unavailable");
+    const original=structuredClone((earlier.result as any).result);
+    const next=structuredClone(scoringConfig);
+    Object.assign(next,{policyVersionId:"persist-revised-policy",revision:2,
+      previousVersionId:scoringConfig.policyVersionId,effectiveFrom:"2026-01-10T00:00:00Z"});
+    next.targets.normal.conditions=next.targets.normal.conditions.map(c=>
+      c.measurementId===frequency.measurementId?conditionFor(frequency,3):c);
+    const store=createPolicyV2Storage(f.db,context,{clock:()=>new Date("2025-12-31T00:00:00Z")});
+    await store.policies.append(next,"Synthetic prospective revised frequency");
+    for(const day of [11,13,18,21,24])await add("revised-day-"+day,"2026-01-"+day+"T12:00:00Z",10,next);
+    const retired={...scoringEpisode,effectiveEnd:next.effectiveFrom};
+    const revised:CadenceEpisode={...scoringEpisode,episodeId:"persist-revised-episode",policy:next,
+      origin:{...scoringEpisode.origin,at:next.effectiveFrom}};
+    const history=createEvaluationHistoryLoader(f.db,context,scoringConfig.domainId,[retired,revised],
+      verifier([retired,revised]));
+    const laterWriter=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,history,
+      recipes:[oldRecipe,scoringRecipe(next)],calculationVersion:"somr433-persist-v1",
+      clock:()=>new Date("2026-01-25T12:00:00Z")});
+    const later=await laterWriter.calculateAndSave();
+    expect(later).toMatchObject({status:"saved",action:"created"});
+    if(later.status!=="saved")throw Error("retired policy blocked full revised window");
+    const trusted=(later.result as any).result;
+    expect(trusted.status).toBe("available");
+    expect(trusted.provenance.input.coverage.onboardingAt).toBe(scoringConfig.effectiveFrom);
+    expect(trusted.provenance.input.policy.policyVersionId).toBe(next.policyVersionId);
+    expect(trusted.evaluation.evidence.window).toMatchObject({
+      start:"2026-01-11T00:00:00.000Z",end:"2026-01-25T00:00:00.000Z",eligibleDays:14});
+    expect(trusted.persistence).toEqual(trusted.cadence);
+    expect(trusted.provenance.coverageReceipt.origins.find((o:any)=>o.episodeId===revised.episodeId))
+      .toMatchObject({kind:"verified-source-reconciliation",at:next.effectiveFrom});
+    const reloaded=(await f.client.query(
+      "SELECT result FROM evaluation_results WHERE result_id=$1 AND org_id=$2 AND owner_user_id=$3 AND domain_id=$4",
+      [earlier.resultId,context.orgId,context.actorUserId,scoringConfig.domainId])).rows[0].result;
+    expect(reloaded).toEqual(original);
+    expect(createEvaluator([oldRecipe])(reloaded.provenance.input)).toEqual(reloaded.evaluation);
+    expect(reloaded.provenance.input.policy.policyVersionId).toBe(scoringConfig.policyVersionId);
+    expect(reloaded.provenance.input.policy.targets.normal.conditions.find((c:any)=>c.measurementId==="frequency").constraint.value).toBe(5);
+  });
+  it("does not turn reconciliation-only history proof into new domain onboarding",async()=>{
+    await addScoring("no-domain-activation-event","2026-01-10T12:00:00Z",10);
+    const verification:HistoryVerification={verifyCoverage:async snapshot=>{
+      const value=receipt(snapshot,[scoringEpisode]);
+      value.origins[0].kind="verified-source-reconciliation";
+      value.origins[0].evidenceId="independent-import-reconciliation-without-activation";
+      return value;
+    }};
+    const before=await state();
+    expect(await persistenceWriter(scoringRecipe(),scoringLoader(verification)).calculateAndSave())
+      .toMatchObject({status:"unavailable"});
+    expect(await state()).toEqual(before);
+  });
+
+  it("updates the saved result when a known future record becomes actual Today practice",async()=>{
+    await addScoring("time-classified-event","2026-01-15T10:00:00Z",10);
+    let evaluationTime="2026-01-15T09:00:00Z";
+    const writer=createEvaluationPersistence({db:f.db,context,domainId:scoringConfig.domainId,
+      history:scoringLoader(),recipes:[scoringRecipe()],calculationVersion:"somr433-persist-v1",
+      clock:()=>new Date(evaluationTime)});
+    const before=await writer.calculateAndSave();
+    expect(before).toMatchObject({status:"saved",action:"created"});
+    if(before.status!=="saved")throw Error("initial time-classified result unavailable");
+    expect((before.result as any).result.evaluation.evidence.future.map((o:any)=>o.observationId)).toEqual(["time-classified-event"]);
+    evaluationTime=now;
+    const after=await writer.calculateAndSave();
+    expect(after).toMatchObject({status:"saved",action:"updated",resultId:before.resultId});
+    if(after.status!=="saved")throw Error("actual Today transition was not saved");
+    expect(after.inputFingerprint).not.toBe(before.inputFingerprint);
+    const trusted=(after.result as any).result;
+    expect(trusted.evaluation.evidence.today.map((o:any)=>o.observationId)).toEqual(["time-classified-event"]);
+    expect(trusted.cadence.evidence.pendingObservationIds).toEqual(["time-classified-event"]);
+    expect(trusted.provenance.sourceSnapshot.observations).toHaveLength(1);
+  });
+
 });
