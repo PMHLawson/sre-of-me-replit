@@ -391,8 +391,7 @@ async function comparisonCollection(u:MutationUnit,evidence:LegacyComparisonEvid
   }).sort((left,right)=>left.slug<right.slug?-1:left.slug>right.slug?1:0);
   const bound=new Set(sources.map(source=>source.domainId));
   const unsupported=all.domains.filter(row=>!bound.has(row.domain_id)).map(row=>({
-    domainId:String(row.domain_id),reason:evidence.reviewRequiredDomainIds.includes(String(row.domain_id))?
-      "legacy_provenance_review_required":"legacy_counterpart_unavailable"}));
+    domainId:String(row.domain_id),reason:"legacy_counterpart_unavailable"}));
   return {sources,unsupported,canonicalRows:sourceRows(all.observations),nativeEvidence:sourceRows(nativeObservations),
     reconciliation:{clean:true as const,counts:{ownedSessions:sessions.length,canonicalSessions:observations.length,
       legacyEdits:edits.length,importedSessions:proof.importedSessions,importedEdits:proof.importedEdits,mutationEvents:totalMutations}}};
