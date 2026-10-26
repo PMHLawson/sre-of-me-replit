@@ -484,15 +484,114 @@ export async function verifyLegacyComparisonProvenance(
       OR (t.entity_type='legacy_edit_import' AND (
         t."before"#>>'{sourceEdit,user_id}'=$2 OR t."after"#>>'{sourceSnapshot,row,user_id}'=$2))
     )`;
+    const present=(object:string)=>`coalesce(jsonb_typeof(${object}),'null')<>'null'`;
+    const compactKey=(object:string,keys:string[])=>"('[' || "+keys.map(key=>`to_jsonb(${object}->>'${key}')::text`).join(" || ',' || ")+" || ']')";
+    const scopedRow=(object:string,keys:string[],eventKey=false)=>`coalesce((jsonb_typeof(${object})='object'
+      AND ${object}->>'org_id'=$1 AND ${object}->>'owner_user_id'=$2
+      AND ${keys.map(key=>`${object}->>'${key}' IS NOT NULL`).join(" AND ")}
+      ${eventKey?`AND t.entity_id=${compactKey(object,keys)}`:""}),false)`;
+    const legacyRow=(object:string)=>`coalesce((jsonb_typeof(${object})='object' AND ${object}->>'user_id'=$2
+      AND ${object}->>'id' IS NOT NULL),false)`;
+    const bindingRow=(object:string,eventKey=false)=>`(${scopedRow(object,["binding_id","domain_id"],false)}
+      ${eventKey?`AND t.entity_id=${compactKey(object,["binding_id"])}`:""})`;
+    const canonicalRow=(object:string)=>`(${scopedRow(object,["observation_id","domain_id","policy_version_id"])}
+      AND coalesce((${object}#>>'{observation,organizationId}'=$1 AND ${object}#>>'{observation,ownerUserId}'=$2
+        AND ${object}#>>'{observation,observationId}'=${object}->>'observation_id'
+        AND ${object}#>>'{observation,domainId}'=${object}->>'domain_id'
+        AND ${object}#>>'{observation,policyVersionId}'=${object}->>'policy_version_id'),false))`;
+    const policyRow=(object:string)=>`(${scopedRow(object,["policy_version_id","domain_id"])}
+      AND coalesce((${object}#>>'{configuration,organizationId}'=$1 AND ${object}#>>'{configuration,ownerUserId}'=$2
+        AND ${object}#>>'{configuration,policyVersionId}'=${object}->>'policy_version_id'
+        AND ${object}#>>'{configuration,domainId}'=${object}->>'domain_id'),false))`;
+    const envelope=`(${legacyRow("t.\"after\"#>'{sourceSnapshot,row}'")}
+      AND ${bindingRow("t.\"after\"->'binding'")} AND ${policyRow("t.\"after\"->'policy'")}
+      AND coalesce((t."after"->>'sourceId'=t."after"#>>'{sourceSnapshot,row,id}'
+        AND t."after"#>>'{binding,domain_id}'=t."after"#>>'{policy,domain_id}'),false))`;
+    const mutationState=(object:string)=>`(${legacyRow(`${object}->'legacy'`)} AND ${canonicalRow(`${object}->'canonical'`)}
+      AND coalesce((${object}#>>'{canonical,legacy_source_id}'=${object}#>>'{legacy,id}'
+        AND ${object}#>>'{canonical,legacy_source_type}'='sessions'),false))`;
+    // Coherence qualifies BOTH current-key and historical inclusion. One owned
+    // side cannot authorize a contradictory foreign before/after snapshot.
+    const optionalPayloadScope=(object:string)=>{
+      const checks:[string,(value:string)=>string][]=[
+        [`(${object})->'binding'`,value=>bindingRow(value)],
+        [`(${object})->'policy'`,value=>policyRow(value)],
+        [`(${object})#>'{sourceSnapshot,row}'`,value=>legacyRow(value)],
+        [`(${object})->'importedObservation'`,value=>canonicalRow(value)],
+        [`(${object})->'sourceEdit'`,value=>legacyRow(value)],
+        [`(${object})->'legacyEdit'`,value=>legacyRow(value)],
+        [`(${object})->'legacy'`,value=>legacyRow(value)],
+        [`(${object})->'canonical'`,value=>canonicalRow(value)],
+        [`(${object})->'state'`,value=>mutationState(value)],
+      ];
+      return checks.map(([value,validate])=>`(NOT (${present(value)}) OR ${validate(value)})`).join(" AND ");
+    };
+    const partialProtocolClaim=`(t.entity_type IN ('source_bindings','legacy_session_import','legacy_session_mutation','legacy_edit_import') AND (
+      ${['t."before"','t."after"'].map(object=>{
+        const scoped=[object,...["binding","policy","importedObservation","canonical"].map(key=>`(${object})->'${key}'`),`(${object})#>'{state,canonical}'`];
+        const legacy=["legacy","sourceEdit","legacyEdit"].map(key=>`(${object})->'${key}'`).concat([`(${object})#>'{sourceSnapshot,row}'`,`(${object})#>'{state,legacy}'`]);
+        return scoped.map(value=>`(${value}->>'org_id'=$1 AND ${value}->>'owner_user_id'=$2)`)
+          .concat(legacy.map(value=>`${value}->>'user_id'=$2`)).join(" OR ");
+      }).join(" OR ")}))`;
+    const partialOwnedClaim=`((${partialHistoricalClaim}) OR (${partialProtocolClaim}))`;
+    const protocolPayloadScope=`(t.entity_type NOT IN ('source_bindings','legacy_session_import','legacy_session_mutation','legacy_edit_import') OR
+      ((${optionalPayloadScope('t."before"')}) AND (${optionalPayloadScope('t."after"')})))`;
+    const knownProtocolCoherence=`(
+      (t.entity_type<>'source_bindings' OR
+        (t.action='create' AND NOT (${present('t."before"')}) AND ${bindingRow('t."after"',true)}) OR
+        (t.action='delete' AND ${bindingRow('t."before"',true)} AND NOT (${present('t."after"')})) OR
+        (t.action='update' AND ${bindingRow('t."before"',true)} AND ${bindingRow('t."after"',true)}))
+      AND (t.entity_type<>'legacy_session_import' OR (t.action='create' AND NOT (${present('t."before"')})
+        AND ${envelope} AND ${canonicalRow("t.\"after\"->'importedObservation'")}
+        AND coalesce((t.entity_id=jsonb_build_array(t."after"->>'sourceId')::text
+          AND t."after"#>>'{importedObservation,legacy_source_id}'=t."after"->>'sourceId'
+          AND t."after"#>>'{importedObservation,legacy_source_type}'='sessions'
+          AND t."after"#>>'{importedObservation,domain_id}'=t."after"#>>'{binding,domain_id}'
+          AND t."after"#>>'{importedObservation,policy_version_id}'=t."after"#>>'{policy,policy_version_id}'),false)))
+      AND (t.entity_type<>'legacy_session_mutation' OR (
+        ${mutationState("t.\"after\"->'state'")}
+        AND coalesce((t.entity_id=jsonb_build_array(t."after"#>>'{state,legacy,id}')::text),false)
+        AND ((t.action='create' AND NOT (${present('t."before"')})) OR
+          (t.action='update' AND ${mutationState('t."before"')}
+            AND coalesce((t."before"#>>'{legacy,id}'=t."after"#>>'{state,legacy,id}'
+              AND t."before"#>>'{canonical,observation_id}'=t."after"#>>'{state,canonical,observation_id}'),false)))))
+      AND (t.entity_type<>'legacy_edit_import' OR (t.action='update'
+        AND ${legacyRow("t.\"before\"->'sourceEdit'")} AND ${envelope}
+        AND coalesce((t.entity_id=jsonb_build_array(t."before"#>>'{sourceEdit,id}')::text
+          AND t."after"->>'sourceEditId'=t."before"#>>'{sourceEdit,id}'),false)))
+    )`;
+    const rowKinds:[string,string[]][]=[
+      ["domains",["domain_id"]],["policy_versions",["policy_version_id"]],
+      ["dimension_definitions",["policy_version_id","measurement_id"]],
+      ["observations",["observation_id"]],["deviations_v2",["deviation_id"]],
+      ["deviation_domains",["deviation_id","domain_id"]],
+    ];
+    // Generic correction notes stay notes. Only recognized scoped row objects
+    // are checked here; no arbitrary text is interpreted as an ownership claim.
+    const typedSnapshot=(kind:string,object:string,keys:string[])=>{
+      const rowScope=scopedRow(object,keys,true);
+      return kind==="observations"?`(${rowScope} AND ${canonicalRow(object)})`:
+        kind==="policy_versions"?`(${rowScope} AND ${policyRow(object)})`:rowScope;
+    };
+    const scopedRowCoherence=rowKinds.map(([kind,keys])=>`(t.entity_type<>'${kind}' OR (${['t."before"','t."after"'].map(object=>
+      `(NOT (${present(object)}) OR NOT (coalesce(${object} ? 'org_id',false) OR coalesce(${object} ? 'owner_user_id',false) OR coalesce(${object} ? '${keys[0]}',false))
+        OR ${typedSnapshot(kind,object,keys)})`).join(" AND ")}))`).join(" AND ");
+    const legacyRowCoherence=["sessions","session_edits","deviations","legacy_deviation"].map(kind=>
+      `(t.entity_type<>'${kind}' OR (${['t."before"','t."after"'].map(object=>
+        `(NOT (${present(object)}) OR NOT (coalesce(${object} ? 'user_id',false) OR coalesce(${object} ? 'id',false))
+          OR (${legacyRow(object)} AND coalesce(t.entity_id=${compactKey(object,["id"])},false)))`).join(" AND ")}))`).join(" AND ");
+    const coherentAudit=`coalesce((${knownProtocolCoherence}) AND (${protocolPayloadScope}) AND (${scopedRowCoherence}) AND (${legacyRowCoherence}),false)`;
     const auditParameters=[org,actor,JSON.stringify(ownedAuditKeys)];
     // Only a count crosses the boundary for contradictory historical scope.
     // Such data cannot establish clean coverage, but its private JSON is withheld.
-    const ambiguous=await readComplete(tx,`SELECT count(*)::int AS count FROM public.audit_events t WHERE t.org_id=$1 AND
-      (${partialHistoricalClaim}) IS TRUE AND NOT coalesce((${currentOwnedAudit}),false) AND NOT coalesce((${historicalOwnedAudit}),false)`,
+    const ambiguous=await readComplete(tx,`SELECT count(*)::int AS count FROM public.audit_events t WHERE t.org_id=$1 AND (
+      ((${partialOwnedClaim}) IS TRUE AND NOT coalesce((${currentOwnedAudit}),false) AND NOT coalesce((${historicalOwnedAudit}),false))
+      OR ((coalesce((${currentOwnedAudit}),false) OR coalesce((${historicalOwnedAudit}),false) OR coalesce((${partialOwnedClaim}),false))
+        AND NOT (${coherentAudit})))`,
       auditParameters,["count"],1);
     requireValid(ambiguous.length===1&&ambiguous[0].count===0);
     const audits=await rows(tx,"audit_events",
-      `t.org_id=$1 AND ((${currentOwnedAudit}) OR (${historicalOwnedAudit}))`,auditParameters,"t.audit_event_id");
+      `t.org_id=$1 AND ((${currentOwnedAudit}) OR (${historicalOwnedAudit})) AND (${coherentAudit})`,auditParameters,"t.audit_event_id");
     // Unassigned rows are outside this authenticated comparison; zero is an
     // internal report placeholder, never a claim that global unowned data is absent.
     const all:State={org,actor,domains,policies,dimensions,bindings,sessions,edits,observations,audits,
