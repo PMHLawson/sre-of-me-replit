@@ -165,6 +165,39 @@ it("retains native/custom evidence honestly and never relabels malformed legacy 
   expect(operation).not.toHaveBeenCalled(); expect(await snapshot()).toBe(corrupted);
 });
 
+it("accepts an audited display-name cycle in chronological order without treating a repeated caption as drift", async () => {
+  const actor = await owner("comparison-caption-cycle"), unit = comparison();
+  const context = await createOrgContextResolver(f.db)(request(actor));
+  const store = createPolicyV2Storage(f.db, context), domain = (await store.domains.list()).find(row => row.slug === "music")!;
+  const originalCaption = domain.display_name;
+  await store.domains.update([domain.domain_id], { displayName: "Synthetic caption B" }, "Synthetic caption A to B");
+  await store.domains.update([domain.domain_id], { displayName: originalCaption }, "Synthetic caption B to A");
+  await store.domains.update([domain.domain_id], { displayName: "Synthetic caption C" }, "Synthetic caption A to C");
+  const audit = (await f.client.query("SELECT count(*)::int count,count(DISTINCT occurred_at)::int instants " +
+    "FROM audit_events WHERE actor_user_id=$1 AND entity_type='domains' AND entity_id=$2 AND action='update'",
+  [actor, JSON.stringify([domain.domain_id])])).rows[0];
+  // The fixture has a real, strictly ordered microsecond audit sequence.
+  expect(audit).toEqual({ count: 3, instants: 3 });
+  const before = await snapshot();
+  expect(await unit.run(request(actor), async batch => {
+    expect(batch.reconciliation.clean).toBe(true);
+    expect(batch.sources.some(source => source.domainId === domain.domain_id)).toBe(true);
+    return true;
+  })).toEqual({ status: "completed", value: true });
+  expect(await snapshot()).toBe(before);
+});
+
+it("reports a missing genuine legacy mirror as reconciliation failure without invoking the callback or repairing data", async () => {
+  const actor = await owner("comparison-missing-mirror"), unit = comparison();
+  const removed = await f.client.query("DELETE FROM observations WHERE owner_user_id=$1 AND legacy_source_type='sessions' AND legacy_source_id=$2",
+    [actor, actor + "-music"]);
+  expect(removed.rowCount).toBe(1);
+  const before = await snapshot(), operation = vi.fn(async () => true);
+  expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
+  expect(operation).not.toHaveBeenCalled();
+  expect(await snapshot()).toBe(before);
+});
+
 it("binds settings and declaration changes to the source fingerprint without changing saved practices", async () => {
   const actor = await owner("comparison-settings"), unit = comparison();
   const first = await unit.run(request(actor), async batch => batch.snapshotFingerprint);
@@ -198,6 +231,9 @@ it("rolls back derived results, audit and admission on callback failure, then pe
   await expect(unit.run(request(actor), async batch => {
     await write(batch); throw new BoundaryError(400);
   })).rejects.toMatchObject({ status: 400 });
+  expect(await snapshot()).toBe(before);
+  // A callback's not-found result is not a missing mirror in the collection gate.
+  await expect(unit.run(request(actor), async () => { throw new BoundaryError(404); })).rejects.toMatchObject({ status: 404 });
   expect(await snapshot()).toBe(before);
   const committed = await unit.run(request(actor), async batch => { await write(batch); return batch.snapshotFingerprint; });
   if (committed.status !== "completed") throw Error("Synthetic derived write unavailable");
