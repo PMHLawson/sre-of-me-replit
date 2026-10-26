@@ -533,15 +533,30 @@ describe("unavailable policy edges, provenance and isolation",()=>{
     };
     const loaderPath="server/services/evaluation-history-v2.ts";
     const persistencePath="server/services/evaluation-persistence-v2.ts";
+    const shadowPath="server/services/policy-shadow-service.ts";
+    const reportPath="script/report-policy-shadow.ts";
+    const capabilityPath="server/services/policy-shadow-capability.ts";
     const scoringModules=["pure-evaluator","pure-derived","derived-exact","derived-profile"];
     for(const file of sources){
-      const refs=imports(file.source),isLoader=file.path===loaderPath,isPersistence=file.path===persistencePath;
-      // Only the dormant loader may use cadence history and only the isolated
-      // persistence operation may combine it with scoring or trusted writes.
-      if(!isLoader&&!isPersistence)
+      const refs=imports(file.source),isLoader=file.path===loaderPath,isPersistence=file.path===persistencePath,
+        isShadow=file.path===shadowPath,isReport=file.path===reportPath;
+      const runtimeRefs=imports(file.source.replace(/^import\s+type[\s\S]*?;\s*/gm,""));
+      // Exact dormant modules only: the loader, accepted persistence operation,
+      // and explicitly constructed private comparison. No normal runtime path is exempt.
+      if(!isLoader&&!isPersistence&&!isShadow)
         expect(refs.some(s=>targets(s,"evaluation-history-v2")||targets(s,"cadence-derived")),file.path).toBe(false);
-      if(!isPersistence)
+      if(!isPersistence&&!isShadow)
         expect(refs.some(s=>targets(s,"evaluation-persistence-v2")),file.path).toBe(false);
+      if(!isReport){
+        expect(runtimeRefs.some(s=>targets(s,"policy-shadow-service")),file.path).toBe(false);
+        expect(runtimeRefs.some(s=>targets(s,"report-policy-shadow")),file.path).toBe(false);
+      }
+      if(file.path===capabilityPath){
+        expect(runtimeRefs).toEqual([]);
+        expect(file.source).toContain("new WeakSet<object>()");
+      }
+      if(file.path!==shadowPath)
+        expect(file.source).not.toMatch(/import\s*\{[^}]*issuePolicyShadowService[^}]*\}/);
       if(isLoader){
         expect(refs.some(s=>targets(s,"evaluator-window"))).toBe(true);
         expect(refs.some(s=>targets(s,"evaluator-recipe"))).toBe(true);
@@ -553,9 +568,9 @@ describe("unavailable policy edges, provenance and isolation",()=>{
         expect(file.source).toMatch(/\.evaluations\.persistTrusted\s*\(/);
       }
       if(/^(server|client|script)\//.test(file.path)){
-        if(!isPersistence)
+        if(!isPersistence&&!isShadow)
           expect(refs.some(s=>scoringModules.some(name=>targets(s,name))),file.path).toBe(false);
-        if(!isLoader&&!isPersistence)
+        if(!isLoader&&!isPersistence&&!isShadow)
           expect(refs.some(s=>targets(s,"evaluator-recipe")||targets(s,"evaluator-window")),file.path).toBe(false);
       }
     }

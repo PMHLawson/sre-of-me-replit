@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, historyReads } from "./storage";
+import {registerPolicyShadowMaintenance} from "./services/policy-shadow-maintenance";
+import type {PolicyShadowService} from "./services/policy-shadow-capability";
 import { createLegacyDeviationMutations } from "./services/legacy-deviation-mutations";
 import { ResourceLimitError } from "./lib/read-budget";
 import { WriteResourceLimitError } from "./lib/write-resource-budget";
@@ -49,7 +51,9 @@ export async function registerRoutes(
   deviationMutations = createLegacyDeviationMutations(createAuthenticatedBootstrapUnit({
     connect: async () => (await import("./db")).pool.connect(),
   })),
+  policyShadowMaintenance?: PolicyShadowService,
 ): Promise<Server> {
+  if(policyShadowMaintenance)registerPolicyShadowMaintenance(httpServer,policyShadowMaintenance);
   app.use("/api/v2/activities", createActivityV2Router({
     authenticate: isAuthenticated,
     service: createActivityServiceV2(createPinnedOwnershipUnit({
