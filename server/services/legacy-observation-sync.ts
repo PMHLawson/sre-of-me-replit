@@ -4,7 +4,7 @@ import { ResourceLimitError, MAX_READ_ROWS } from "../lib/read-budget";
 import { withTransactionReadBudget, readComplete, assertReadBytesAvailable } from "../lib/transaction-read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, bounded, createOrgContextResolver, revalidate,
-  type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
+  assertContext, type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
 
 type Request = Parameters<ReturnType<typeof createOrgContextResolver>>[0];
 type Row = Record<string, any>;
@@ -89,8 +89,9 @@ async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext)
     batch: `${version}:${hash(org,actor)}` };
 }
 type Planned = { source: Row; binding: Row; policy: Row; row: Row; edits: Row[] };
-function plan(s: State): Planned[] {
-  requireValid(s.domains.length === 4 && s.bindings.length === 4);
+function plan(s: State, comparison = false): Planned[] {
+  requireValid(comparison ? s.bindings.length <= 4 && s.domains.length === s.bindings.length :
+    s.domains.length === 4 && s.bindings.length === 4);
   const configurations = s.policies.map(p => {
     const parsed = DomainConfigurationSchema.safeParse(p.configuration); requireValid(parsed.success);
     const c = parsed.data;
@@ -105,7 +106,7 @@ function plan(s: State): Planned[] {
   });
   requireValid(ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations,observations:[]}).success);
   requireValid(s.dimensions.length === configurations.reduce((n,c) => n+c.measurements.length,0));
-  for (const slug of slugs) {
+  for (const slug of comparison ? s.bindings.map(b => String(b.external_id)) : slugs) {
     const ds = s.domains.filter(d => d.slug === slug), bs = s.bindings.filter(b => b.external_id === slug);
     requireValid(ds.length === 1 && bs.length === 1);
     const d = ds[0], b = bs[0];
@@ -114,7 +115,8 @@ function plan(s: State): Planned[] {
       configurations.some(c => c.domainId === d.domain_id));
     for (const [type,row,key] of [["domains",d,d.domain_id],["source_bindings",b,b.binding_id]] as const) {
       const a = s.audits.filter(a => a.entity_type === type && a.entity_id === JSON.stringify([key]));
-      requireValid(a.length === 1 && a[0].actor_kind === "user" && a[0].actor_user_id === s.actor &&
+      if(comparison&&type==="domains")verifyComparisonDomainLineage(s,row,a);
+      else requireValid(a.length === 1 && a[0].actor_kind === "user" && a[0].actor_user_id === s.actor &&
         a[0].action === "create" && a[0].before === null && equal(a[0].after,row.raw) &&
         a[0].reason === "Preserve authenticated owner's established legacy policy");
     }
@@ -353,26 +355,212 @@ export async function verifyLegacyImportProvenance(db: OwnershipDatabase, reques
     const pinned:OwnershipDatabase={transaction:async operation=>operation(tx)};
     const context = await createOrgContextResolver(pinned)(request);
     const current = await read(tx,pinned,context);
-    const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
-      const r = a.after?.sourceSnapshot?.row;
-      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
-        current.sessions.some(s => s.id === r.id));
-      return {...r,timestamp:new Date(r.timestamp),deleted_at:r.deleted_at === null ? null : new Date(r.deleted_at),raw:r};
-    });
-    const edits = current.audits.filter(a => a.entity_type === types[1]).map(a => {
-      const r = a.before?.sourceEdit;
-      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
-        current.edits.some(e => e.id === r.id && equal(e.raw,r)));
-      return {...r,edited_at:new Date(r.edited_at),raw:r};
-    });
-    requireValid(new Set(sessions.map(s => s.id)).size === sessions.length &&
-      new Set(edits.map(e => e.id)).size === edits.length);
-    const observations = current.audits.filter(a => a.entity_type === types[0]).map(a => {
-      const r = a.after?.importedObservation; requireValid(r && typeof r.observation_id === "string");
-      return {...r,raw:r};
-    });
-    const preserved = {...current,sessions,edits,observations};
-    requireValid(report(preserved,plan(preserved)).clean);
-    return {importedSessions:sessions.length,importedEdits:edits.length};
+    return preservedImportProof(current);
   })));
+}
+
+
+/** Shared arithmetic/provenance checks; only the comparison reader opts into a
+ * scoped binding set. Existing import/reconciliation entry points stay legacy-only. */
+function preservedImportProof(current: State, comparison = false) {
+  const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+    const r = a.after?.sourceSnapshot?.row;
+    requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+      current.sessions.some(s => s.id === r.id));
+    return {...r,timestamp:new Date(r.timestamp),deleted_at:r.deleted_at === null ? null : new Date(r.deleted_at),raw:r};
+  });
+  const edits = current.audits.filter(a => a.entity_type === types[1]).map(a => {
+    const r = a.before?.sourceEdit;
+    requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+      current.edits.some(e => e.id === r.id && equal(e.raw,r)));
+    return {...r,edited_at:new Date(r.edited_at),raw:r};
+  });
+  requireValid(new Set(sessions.map(s => s.id)).size === sessions.length &&
+    new Set(edits.map(e => e.id)).size === edits.length);
+  const observations = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+    const r = a.after?.importedObservation; requireValid(r && typeof r.observation_id === "string");
+    return {...r,raw:r};
+  });
+  const preserved = {...current,sessions,edits,observations};
+  requireValid(report(preserved,plan(preserved,comparison)).clean);
+  return {importedSessions:sessions.length,importedEdits:edits.length};
+}
+
+export type LegacyComparisonEvidence = {
+  proof: { importedSessions: number; importedEdits: number };
+  all: State;
+  scoped: State;
+  nativeObservations: Row[];
+};
+
+/**
+ * Internal read-only entry for the comparison unit. The caller owns the pinned
+ * maintenance transaction and its NOWAIT table locks. This does not import,
+ * repair, approve a recipe, or forge a legacy context for shadow mode.
+ */
+export async function verifyLegacyComparisonProvenance(
+  db: OwnershipDatabase, context: OrgContext, request: Request,
+): Promise<LegacyComparisonEvidence> {
+  authenticate(request);
+  assertContext(db,context);
+  if((request.user as any)?.claims?.sub!==context.actorUserId||context.role!=="owner"||
+    !["legacy","shadow"].includes(context.rolloutMode))throw new BoundaryError(403);
+  return bounded(()=>db.transaction(raw=>withTransactionReadBudget(raw,async tx=>{
+    await revalidate(tx,db,context);
+    const org=context.orgId,actor=context.actorUserId,scope=[org,actor];
+    const scopedRows=(table:string,order:string)=>rows(tx,table,"t.org_id=$1 AND t.owner_user_id=$2",scope,order);
+    const domains=await scopedRows("domains","t.domain_id");
+    const policies=await scopedRows("policy_versions","t.domain_id,t.revision");
+    const dimensions=await scopedRows("dimension_definitions","t.policy_version_id,t.measurement_id");
+    const bindings=await scopedRows("source_bindings","t.binding_id");
+    const sessions=await rows(tx,"sessions","t.user_id=$1",[actor],"t.domain,t.timestamp,t.id");
+    const edits=await rows(tx,"session_edits",
+      "t.user_id=$1 OR t.session_id IN (SELECT id FROM public.sessions WHERE user_id=$1)",[actor],"t.edited_at,t.id");
+    const observations=await scopedRows("observations","t.observation_id");
+    const legacyDeviationIds=await readComplete(tx,"SELECT id FROM public.deviations WHERE user_id=$1 ORDER BY id LIMIT $2 FOR SHARE",
+      [actor,MAX_READ_ROWS+1],["id"],MAX_READ_ROWS);
+    const deviationIds=await readComplete(tx,"SELECT deviation_id FROM public.deviations_v2 WHERE org_id=$1 AND owner_user_id=$2 ORDER BY deviation_id LIMIT $3 FOR SHARE",
+      [org,actor,MAX_READ_ROWS+1],["deviation_id"],MAX_READ_ROWS);
+    const associations=await readComplete(tx,"SELECT deviation_id,domain_id FROM public.deviation_domains WHERE org_id=$1 AND owner_user_id=$2 ORDER BY deviation_id,domain_id LIMIT $3 FOR SHARE",
+      [org,actor,MAX_READ_ROWS+1],["deviation_id","domain_id"],MAX_READ_ROWS);
+    // Audit identities are typed. A session ID must never authorize a foreign
+    // observation/domain audit merely because its untyped ID happens to collide.
+    const single=(items:Row[],key:string)=>items.map(row=>JSON.stringify([row[key]]));
+    const sessionKeys=single(sessions,"id"),editKeys=single(edits,"id");
+    const ownedAuditKeys:Record<string,string[]>={
+      users:[JSON.stringify([actor])],organizations:[JSON.stringify([org])],
+      organization_members:[JSON.stringify([org,actor])],user_settings:[JSON.stringify([actor])],
+      domains:single(domains,"domain_id"),policy_versions:single(policies,"policy_version_id"),
+      dimension_definitions:dimensions.map(row=>JSON.stringify([row.policy_version_id,row.measurement_id])),
+      source_bindings:single(bindings,"binding_id"),observations:single(observations,"observation_id"),
+      sessions:sessionKeys,legacy_session_import:sessionKeys,legacy_session_mutation:sessionKeys,
+      session_edits:editKeys,legacy_edit_import:editKeys,
+      deviations:single(legacyDeviationIds,"id"),legacy_deviation:single(legacyDeviationIds,"id"),
+      deviations_v2:single(deviationIds,"deviation_id"),
+      deviation_domains:associations.map(row=>JSON.stringify([row.deviation_id,row.domain_id])),
+    };
+    const currentOwnedAudit="EXISTS (SELECT 1 FROM jsonb_each($3::jsonb) AS owned(entity_type,identities) WHERE owned.entity_type=t.entity_type AND owned.identities ? t.entity_id)";
+    // A removed source has no current key. Retain its historical protocol only
+    // when stored payload scope AND the typed event key independently bind it.
+    // Actor identity alone never grants access to another entity's audit JSON.
+    const historicalOwnedAudit=`(
+      (t.entity_type='source_bindings' AND (
+        (t."after"->>'org_id'=$1 AND t."after"->>'owner_user_id'=$2 AND t."after"->>'binding_id' IS NOT NULL
+          AND t.entity_id=jsonb_build_array(t."after"->>'binding_id')::text
+          AND (t."after"->>'source_kind'='manual-legacy' OR t."after"#>>'{metadata,description}'='existing-owner-seed-v1'))
+        OR (t."before"->>'org_id'=$1 AND t."before"->>'owner_user_id'=$2 AND t."before"->>'binding_id' IS NOT NULL
+          AND t.entity_id=jsonb_build_array(t."before"->>'binding_id')::text
+          AND (t."before"->>'source_kind'='manual-legacy' OR t."before"#>>'{metadata,description}'='existing-owner-seed-v1'))))
+      OR (t.entity_type='legacy_session_import'
+        AND t."after"#>>'{sourceSnapshot,row,user_id}'=$2
+        AND t."after"#>>'{binding,org_id}'=$1 AND t."after"#>>'{binding,owner_user_id}'=$2
+        AND t."after"#>>'{importedObservation,org_id}'=$1 AND t."after"#>>'{importedObservation,owner_user_id}'=$2
+        AND t."after"->>'sourceId' IS NOT NULL AND t."after"->>'sourceId'=t."after"#>>'{sourceSnapshot,row,id}'
+        AND t.entity_id=jsonb_build_array(t."after"->>'sourceId')::text)
+      OR (t.entity_type='legacy_session_mutation'
+        AND t."after"#>>'{state,legacy,user_id}'=$2
+        AND t."after"#>>'{state,canonical,org_id}'=$1 AND t."after"#>>'{state,canonical,owner_user_id}'=$2
+        AND t."after"#>>'{state,legacy,id}' IS NOT NULL
+        AND t.entity_id=jsonb_build_array(t."after"#>>'{state,legacy,id}')::text)
+      OR (t.entity_type='legacy_edit_import'
+        AND t."before"#>>'{sourceEdit,user_id}'=$2 AND t."after"#>>'{sourceSnapshot,row,user_id}'=$2
+        AND t."after"#>>'{binding,org_id}'=$1 AND t."after"#>>'{binding,owner_user_id}'=$2
+        AND t."before"#>>'{sourceEdit,id}' IS NOT NULL
+        AND t."after"->>'sourceEditId'=t."before"#>>'{sourceEdit,id}'
+        AND t.entity_id=jsonb_build_array(t."before"#>>'{sourceEdit,id}')::text)
+    )`;
+    const partialHistoricalClaim=`(
+      (t.entity_type='source_bindings' AND (
+        (t."after"->>'org_id'=$1 AND t."after"->>'owner_user_id'=$2
+          AND (t."after"->>'source_kind'='manual-legacy' OR t."after"#>>'{metadata,description}'='existing-owner-seed-v1'))
+        OR (t."before"->>'org_id'=$1 AND t."before"->>'owner_user_id'=$2
+          AND (t."before"->>'source_kind'='manual-legacy' OR t."before"#>>'{metadata,description}'='existing-owner-seed-v1'))))
+      OR (t.entity_type='legacy_session_import' AND (
+        t."after"#>>'{sourceSnapshot,row,user_id}'=$2 OR
+        (t."after"#>>'{importedObservation,org_id}'=$1 AND t."after"#>>'{importedObservation,owner_user_id}'=$2)))
+      OR (t.entity_type='legacy_session_mutation' AND (
+        t."after"#>>'{state,legacy,user_id}'=$2 OR
+        (t."after"#>>'{state,canonical,org_id}'=$1 AND t."after"#>>'{state,canonical,owner_user_id}'=$2)))
+      OR (t.entity_type='legacy_edit_import' AND (
+        t."before"#>>'{sourceEdit,user_id}'=$2 OR t."after"#>>'{sourceSnapshot,row,user_id}'=$2))
+    )`;
+    const auditParameters=[org,actor,JSON.stringify(ownedAuditKeys)];
+    // Only a count crosses the boundary for contradictory historical scope.
+    // Such data cannot establish clean coverage, but its private JSON is withheld.
+    const ambiguous=await readComplete(tx,`SELECT count(*)::int AS count FROM public.audit_events t WHERE t.org_id=$1 AND
+      (${partialHistoricalClaim}) IS TRUE AND NOT coalesce((${currentOwnedAudit}),false) AND NOT coalesce((${historicalOwnedAudit}),false)`,
+      auditParameters,["count"],1);
+    requireValid(ambiguous.length===1&&ambiguous[0].count===0);
+    const audits=await rows(tx,"audit_events",
+      `t.org_id=$1 AND ((${currentOwnedAudit}) OR (${historicalOwnedAudit}))`,auditParameters,"t.audit_event_id");
+    // Unassigned rows are outside this authenticated comparison; zero is an
+    // internal report placeholder, never a claim that global unowned data is absent.
+    const all:State={org,actor,domains,policies,dimensions,bindings,sessions,edits,observations,audits,
+      unowned:0,batch:`${version}:${hash(org,actor)}`};
+    const claimsLegacyBinding=(binding:Row|undefined)=>binding?.source_kind==="manual-legacy"||
+      binding?.metadata?.description==="existing-owner-seed-v1";
+    // Explanation text is user-authored. Only semantic binding snapshots or a
+    // real import envelope can claim a legacy root, never that text by itself.
+    const semanticBindingSnapshots=audits.filter(a=>a.entity_type==="source_bindings").flatMap(a=>
+      [a.before,a.after].filter(claimsLegacyBinding).map(binding=>({audit:a,binding})));
+    requireValid(semanticBindingSnapshots.every(({audit,binding})=>binding&&typeof binding.binding_id==="string"&&
+      binding.org_id===org&&binding.owner_user_id===actor&&audit.entity_id===JSON.stringify([binding.binding_id])&&
+      bindings.some(row=>row.binding_id===binding.binding_id)));
+    const importedBindingClaims=audits.filter(a=>types.includes(a.entity_type)||
+      a.after?.version===version||a.before?.version===version).map(a=>a.after?.binding);
+    requireValid(importedBindingClaims.every(binding=>binding&&typeof binding.binding_id==="string"&&
+      bindings.some(row=>row.binding_id===binding.binding_id)));
+    const legacyBindings=bindings.filter(binding=>claimsLegacyBinding(binding)||
+      semanticBindingSnapshots.some(claim=>claim.binding.binding_id===binding.binding_id)||
+      importedBindingClaims.some(claim=>claim.binding_id===binding.binding_id));
+    requireValid(legacyBindings.every(b=>b.source_kind==="manual-legacy"&&equal(b.metadata,{description:"existing-owner-seed-v1"}))&&
+      legacyBindings.length<=4&&
+      new Set(legacyBindings.map(b=>b.domain_id)).size===legacyBindings.length&&
+      new Set(legacyBindings.map(b=>b.external_id)).size===legacyBindings.length&&
+      legacyBindings.every(b=>slugs.includes(b.external_id)));
+    const domainIds=new Set(legacyBindings.map(b=>b.domain_id));
+    const legacyDomains=domains.filter(d=>domainIds.has(d.domain_id));
+    requireValid(legacyDomains.length===legacyBindings.length);
+    const expectedIds=new Set(sessions.map(row=>uid("observation-v1",org,actor,row.id)));
+    const legacyMarked=(row:Row)=>row.legacy_source_type!=null||row.legacy_source_id!=null||
+      typeof row.idempotency_key==="string"&&row.idempotency_key.startsWith("legacy-sessions-v1:")||
+      ["legacy-history-import-v1","legacy-activity-mutation-v1"].includes(row.version)||
+      ["legacy-history-import-v1","legacy-activity-mutation-v1"].includes(row.observation?.version)||
+      expectedIds.has(row.observation_id);
+    const legacyObservations=observations.filter(legacyMarked);
+    const scoped:State={...all,domains:legacyDomains,bindings:legacyBindings,
+      policies:policies.filter(row=>domainIds.has(row.domain_id)),
+      dimensions:dimensions.filter(row=>domainIds.has(row.domain_id)),observations:legacyObservations};
+    const proof=preservedImportProof(scoped,true);
+    return {proof,all,scoped,nativeObservations:observations.filter(row=>!legacyMarked(row))};
+  })));
+}
+
+
+/** Comparison-only metadata replay. Immutable identity/slug and active lifecycle
+ * remain exact; unsupported lifecycle edits are refused rather than reanimated. */
+function verifyComparisonDomainLineage(state:State,row:Row,audits:Row[]) {
+  const creates=audits.filter(a=>a.action==="create");
+  requireValid(creates.length===1);
+  const first=creates[0];
+  requireValid(first.actor_kind==="user"&&first.actor_user_id===state.actor&&first.before===null&&
+    first.reason==="Preserve authenticated owner's established legacy policy"&&first.after&&typeof first.after==="object");
+  let current=first.after as Row;
+  requireValid(current.domain_id===row.domain_id&&current.org_id===state.org&&current.owner_user_id===state.actor&&
+    current.slug===row.slug&&current.deactivated_at===null&&current.tombstoned_at===null);
+  // Exact database microseconds order real audit events. Tied instants remain
+  // ambiguous; random audit IDs must never invent their chronological order.
+  const ordered=audits.map(event=>({event,at:ticks(event.occurred_at)}))
+    .sort((left,right)=>left.at<right.at?-1:left.at>right.at?1:0);
+  requireValid(ordered[0].event===first);
+  for(let index=1;index<ordered.length;index++){
+    requireValid(ordered[index-1].at<ordered[index].at);
+    const event=ordered[index].event,after=event.after;
+    requireValid(equal(event.before,current)&&event.action==="update"&&event.actor_kind==="user"&&event.actor_user_id===state.actor&&
+      typeof event.reason==="string"&&!!event.reason.trim()&&after&&typeof after==="object"&&
+      typeof after.display_name==="string"&&!!after.display_name.trim()&&after.display_name.length<=500&&
+      !equal(after,current)&&equal(after,{...current,display_name:after.display_name}));
+    current=after;
+  }
+  requireValid(equal(current,row.raw)&&row.deactivated_at===null&&row.tombstoned_at===null);
 }
