@@ -391,6 +391,7 @@ export type LegacyComparisonEvidence = {
   all: State;
   scoped: State;
   nativeObservations: Row[];
+  reviewRequiredDomainIds: string[];
 };
 
 /**
@@ -427,19 +428,31 @@ export async function verifyLegacyComparisonProvenance(
     const all:State={org,actor,domains,policies,dimensions,bindings,sessions,edits,observations,audits,
       unowned:0,batch:`${version}:${hash(org,actor)}`};
     const seedReason="Preserve authenticated owner's established legacy policy";
-    const seedBindingAudits=audits.filter(a=>a.entity_type==="source_bindings"&&a.action==="create"&&a.reason===seedReason);
-    requireValid(seedBindingAudits.every(a=>bindings.some(b=>a.entity_id===JSON.stringify([b.binding_id]))));
-    const legacyBindings=bindings.filter(b=>b.source_kind==="manual-legacy"||
-      b.metadata?.description==="existing-owner-seed-v1"||
-      seedBindingAudits.some(a=>a.entity_id===JSON.stringify([b.binding_id])));
+    const claimsLegacyBinding=(binding:Row|undefined)=>binding?.source_kind==="manual-legacy"||
+      binding?.metadata?.description==="existing-owner-seed-v1";
+    // Explanation text is user-authored. Only semantic binding snapshots or a
+    // real import envelope can claim a legacy root, never that text by itself.
+    const seedBindingAudits=audits.filter(a=>a.entity_type==="source_bindings"&&a.action==="create"&&claimsLegacyBinding(a.after));
+    requireValid(seedBindingAudits.every(a=>typeof a.after?.binding_id==="string"&&
+      a.entity_id===JSON.stringify([a.after.binding_id])&&bindings.some(b=>b.binding_id===a.after.binding_id)));
+    const importedBindingClaims=audits.filter(a=>types.includes(a.entity_type)||
+      a.after?.version===version||a.before?.version===version).map(a=>a.after?.binding);
+    requireValid(importedBindingClaims.every(binding=>binding&&typeof binding.binding_id==="string"&&
+      bindings.some(row=>row.binding_id===binding.binding_id)));
+    const legacyBindings=bindings.filter(binding=>claimsLegacyBinding(binding)||
+      seedBindingAudits.some(a=>a.after.binding_id===binding.binding_id)||
+      importedBindingClaims.some(claim=>claim.binding_id===binding.binding_id));
     requireValid(legacyBindings.every(b=>b.source_kind==="manual-legacy"&&equal(b.metadata,{description:"existing-owner-seed-v1"}))&&
       legacyBindings.length<=4&&
       new Set(legacyBindings.map(b=>b.domain_id)).size===legacyBindings.length&&
       new Set(legacyBindings.map(b=>b.external_id)).size===legacyBindings.length&&
       legacyBindings.every(b=>slugs.includes(b.external_id)));
-    const seedDomainAudits=audits.filter(a=>a.entity_type==="domains"&&a.action==="create"&&a.reason===seedReason);
-    requireValid(seedDomainAudits.every(a=>legacyBindings.some(b=>a.entity_id===JSON.stringify([b.domain_id]))));
     const domainIds=new Set(legacyBindings.map(b=>b.domain_id));
+    // If all semantic binding/import proof is absent, a historical explanation
+    // is ambiguous. Retain the domain for review without inventing a binding.
+    const reviewRequiredDomainIds=domains.filter(domain=>!domainIds.has(domain.domain_id)&&
+      audits.some(a=>a.entity_type==="domains"&&a.action==="create"&&a.entity_id===JSON.stringify([domain.domain_id])&&a.reason===seedReason))
+      .map(domain=>String(domain.domain_id));
     const legacyDomains=domains.filter(d=>domainIds.has(d.domain_id));
     requireValid(legacyDomains.length===legacyBindings.length);
     const expectedIds=new Set(sessions.map(row=>uid("observation-v1",org,actor,row.id)));
@@ -453,7 +466,7 @@ export async function verifyLegacyComparisonProvenance(
       policies:policies.filter(row=>domainIds.has(row.domain_id)),
       dimensions:dimensions.filter(row=>domainIds.has(row.domain_id)),observations:legacyObservations};
     const proof=preservedImportProof(scoped,true);
-    return {proof,all,scoped,nativeObservations:observations.filter(row=>!legacyMarked(row))};
+    return {proof,all,scoped,nativeObservations:observations.filter(row=>!legacyMarked(row)),reviewRequiredDomainIds};
   })));
 }
 
