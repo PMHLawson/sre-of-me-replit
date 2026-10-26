@@ -312,7 +312,7 @@ it.each([false, true])("refuses mixed-owner binding snapshots before transferrin
   // Both the current-key and historical-key paths must refuse contradictory
   // scope through metadata only. A later JavaScript filter would be too late.
   expect(trace.every(row => !row.rows.includes(sentinel))).toBe(true);
-  const auditQueries = trace.filter(row => row.sql.includes("public.audit_events"));
+  const auditQueries = trace.filter(row => /^\s*SELECT\b[\s\S]*\bFROM\s+public\.audit_events\b/i.test(row.sql));
   expect(auditQueries.length).toBeGreaterThan(0);
   expect(auditQueries.every(row => row.sql.includes("SELECT count(*)::int AS count FROM public.audit_events"))).toBe(true);
   expect(trace.some(row => row.sql === "ROLLBACK")).toBe(true);
@@ -387,6 +387,13 @@ it("captures a genuine native-only owner without seeding legacy bindings or inve
   // Includes the write-budget table: capture neither admits a write nor seeds,
   // imports, repairs, drops native evidence or modifies any existing record.
   expect(await snapshot()).toBe(before);
+  // An unbound legacy record is a missing counterpart, never a native-only
+  // success. The empty branch must preserve the same refusal boundary.
+  await f.client.query("INSERT INTO sessions(id,user_id,domain,duration_minutes,timestamp) " +
+    "VALUES($1,$2,'music',10,'2026-01-04T12:00:00Z')", [actor + "-unbound-legacy", actor]);
+  const corrupt = await snapshot(), operation = vi.fn(async () => true);
+  expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
+  expect(operation).not.toHaveBeenCalled(); expect(await snapshot()).toBe(corrupt);
 });
 
 it("binds settings and declaration changes to the source fingerprint without changing saved practices", async () => {

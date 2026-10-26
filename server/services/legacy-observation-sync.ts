@@ -630,7 +630,19 @@ export async function verifyLegacyComparisonProvenance(
     const scoped:State={...all,domains:legacyDomains,bindings:legacyBindings,
       policies:policies.filter(row=>domainIds.has(row.domain_id)),
       dimensions:dimensions.filter(row=>domainIds.has(row.domain_id)),observations:legacyObservations};
-    const proof=preservedImportProof(scoped,true);
+    let proof:LegacyComparisonEvidence["proof"];
+    if(legacyBindings.length===0){
+      // A native-only owner has no legacy bundle to validate. This private
+      // projection is empty only after all missing/contradictory claim checks.
+      // Retain native evidence as unsupported; never invent a legacy policy.
+      requireValid([scoped.domains,scoped.bindings,scoped.policies,scoped.dimensions,
+        scoped.sessions,scoped.edits,scoped.observations].every(collection=>collection.length===0)&&
+        semanticBindingSnapshots.length===0&&importedBindingClaims.length===0&&
+        !audits.some(a=>["legacy_session_import","legacy_edit_import","legacy_session_mutation"].includes(a.entity_type)||
+          [version,"legacy-activity-mutation-v1"].includes(a.after?.version)||
+          [version,"legacy-activity-mutation-v1"].includes(a.before?.version)));
+      proof={importedSessions:0,importedEdits:0};
+    }else proof=preservedImportProof(scoped,true);
     return {proof,all,scoped,nativeObservations:observations.filter(row=>!legacyMarked(row))};
   })));
 }
