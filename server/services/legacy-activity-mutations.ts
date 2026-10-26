@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal } from "node:util";
 import { z } from "zod";
-import { domainEnum,updateSessionSchema,activityTextSchema,activityTextChangeWithinLimit } from "../../shared/schema";
+import { domainEnum,normalizeComplianceWindowDays,updateSessionSchema,activityTextSchema,activityTextChangeWithinLimit,
+  type Session,type Domain,type Deviation } from "../../shared/schema";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
-import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase } from "../lib/org-context";
+import { BoundaryError, revalidate, createOrgContextResolver, type OwnershipDatabase,type OrgContext,type Transaction } from "../lib/org-context";
 import { ResourceLimitError, MAX_READ_ROWS, MAX_COLLECTION_ROWS } from "../lib/read-budget";
 import { withTransactionReadBudget, readComplete } from "../lib/transaction-read-budget";
 import { createAuditService } from "../lib/audit-service";
 import { withOwnerWriteBudget } from "../lib/write-resource-budget";
-import { verifyLegacyImportProvenance } from "./legacy-observation-sync";
+import { verifyLegacyImportProvenance, verifyLegacyComparisonProvenance, type LegacyComparisonEvidence } from "./legacy-observation-sync";
+import { withLogicalDayMemo, type PolicyEngineOptions } from "../lib/policy-engine";
 import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
 
 type Request = Parameters<ReturnType<typeof createPinnedOwnershipUnit>["run"]>[0];
@@ -308,4 +310,182 @@ export function createLegacyActivityMutations(unit:ReturnType<typeof createPinne
       const state=await get(u,parse(id,input));return {clean:true,mutations:await lineage(u,state)};
     }),
   });
+}
+
+
+export type LegacyComparisonRequest=Request;
+export type LegacyComparisonBatch={
+  readonly db:OwnershipDatabase;readonly tx:Transaction;readonly context:OrgContext;readonly asOf:string;
+  readonly legacyOptions:PolicyEngineOptions;
+  readonly reconciliation:{clean:true;counts:Record<string,number>};
+  readonly sources:Array<{domainId:string;slug:Domain;legacySessions:Session[];
+    canonicalObservationIds:string[];nativeObservationIds:string[]}>;
+  readonly unsupported:Array<{domainId:string;reason:string}>;
+  /** Complete private owner evidence; never a public report payload. */
+  readonly canonicalRows:Row[];readonly nativeEvidence:Row[];
+  readonly snapshotFingerprint:string;
+};
+export type LegacyComparisonOutcome<T>={status:"completed";value:T}|
+  {status:"unavailable";reason:"maintenance_resource_unavailable"|"reconciliation_failed"};
+export interface LegacyComparisonUnit{
+  run<T>(request:LegacyComparisonRequest,operation:(batch:LegacyComparisonBatch)=>Promise<T>):Promise<LegacyComparisonOutcome<T>>;
+}
+const comparisonUnits=new WeakSet<object>();
+export function isLegacyComparisonUnit(value:unknown):value is LegacyComparisonUnit {
+  return !!value&&typeof value==="object"&&comparisonUnits.has(value as object);
+}
+class ComparisonReconciliationFailure extends BoundaryError{
+  constructor(){super(400);}
+}
+// One static acquisition. NOWAIT avoids waiting with a partial set of strong
+// locks while another writer owns rows in a later table. Failure rolls back.
+const comparisonLockSql="LOCK TABLE public.audit_events, public.deviation_domains, public.deviations, public.deviations_v2, public.dimension_definitions, public.domains, public.evaluation_results, public.observations, public.policy_versions, public.session_edits, public.sessions, public.source_bindings, public.user_settings IN SHARE ROW EXCLUSIVE MODE NOWAIT";
+function authenticateComparison(request:Request){
+  const actor=(request?.user as any)?.claims?.sub;
+  if(typeof request?.isAuthenticated!=="function"||request.isAuthenticated()!==true||!id.safeParse(actor).success)
+    throw new BoundaryError(401);
+  for(const field of ["body","query","params"]){
+    const value=(request as any)[field];
+    requireValid(value==null||typeof value==="object"&&!Array.isArray(value)&&Reflect.ownKeys(value).length===0);
+  }
+}
+function sourceRows(rows:Row[]){return rows.map(row=>structuredClone(row.raw));}
+function legacySession(row:Row):Session{
+  const timestamp=new Date(row.timestamp),deletedAt=row.deleted_at===null?null:new Date(row.deleted_at);
+  requireValid(Number.isFinite(timestamp.getTime())&&(deletedAt===null||Number.isFinite(deletedAt.getTime())));
+  return {id:row.id,userId:row.user_id,domain:parse(z.enum(domainEnum),row.domain),durationMinutes:row.duration_minutes,
+    timestamp,notes:row.notes,deletedAt,isAnomaly:row.is_anomaly,anomalyNote:row.anomaly_note};
+}
+async function comparisonCollection(u:MutationUnit,evidence:LegacyComparisonEvidence){
+  const {all,scoped,proof,nativeObservations}=evidence,actor=u.context.actorUserId;
+  const sessions=sourceRows(scoped.sessions),observations=sourceRows(scoped.observations),
+    edits=sourceRows(scoped.edits),audits=sourceRows(scoped.audits);
+  const relevant=audits.filter(row=>["legacy_session_import","legacy_edit_import",entity].includes(row.entity_type)||
+    [version,"legacy-history-import-v1"].includes(row.after?.version)||[version,"legacy-history-import-v1"].includes(row.before?.version));
+  requireValid(relevant.every(row=>["legacy_session_import","legacy_edit_import",entity].includes(row.entity_type)&&
+    row.actor_kind==="user"&&row.actor_user_id===actor));
+  const mutations=relevant.filter(row=>row.entity_type===entity);
+  requireValid(mutations.every(row=>sessions.some(session=>session.id===row.after?.state?.legacy?.id)&&
+    row.entity_id===JSON.stringify([row.after.state.legacy.id])));
+  const editIds=relevant.filter(row=>row.entity_type==="legacy_edit_import").map(row=>row.before?.sourceEdit?.id);
+  editIds.push(...mutations.filter(row=>row.after?.operation==="edit").map(row=>row.after?.legacyEdit?.id));
+  requireValid(editIds.every(value=>typeof value==="string")&&new Set(editIds).size===editIds.length&&
+    edits.length===editIds.length&&edits.every(row=>row.user_id===actor&&editIds.includes(row.id)&&sessions.some(session=>session.id===row.session_id)));
+  let totalMutations=0;const canonicalIds=new Set<string>();
+  for(const session of sessions){
+    const state=await get(u,parse(id,session.id));
+    requireValid(equal(state.legacy,session));
+    totalMutations+=await lineage(u,state);
+    canonicalIds.add(state.canonical.observation_id);
+  }
+  requireValid(canonicalIds.size===sessions.length&&observations.length===sessions.length&&
+    observations.every(row=>canonicalIds.has(row.observation_id))&&totalMutations===mutations.length);
+  const sources=scoped.bindings.map(binding=>{
+    const domain=scoped.domains.find(row=>row.domain_id===binding.domain_id);
+    requireValid(domain&&domain.slug===binding.external_id&&domain.deactivated_at===null&&domain.tombstoned_at===null);
+    return {domainId:String(domain.domain_id),slug:parse(z.enum(domainEnum),domain.slug),
+      legacySessions:sessions.filter(row=>row.domain===domain.slug).map(legacySession),
+      canonicalObservationIds:observations.filter(row=>row.domain_id===domain.domain_id).map(row=>String(row.observation_id)).sort(),
+      nativeObservationIds:nativeObservations.filter(row=>row.domain_id===domain.domain_id).map(row=>String(row.observation_id)).sort()};
+  }).sort((left,right)=>left.slug<right.slug?-1:left.slug>right.slug?1:0);
+  const bound=new Set(sources.map(source=>source.domainId));
+  const unsupported=all.domains.filter(row=>!bound.has(row.domain_id)).map(row=>({
+    domainId:String(row.domain_id),reason:"legacy_counterpart_unavailable"}));
+  return {sources,unsupported,canonicalRows:sourceRows(all.observations),nativeEvidence:sourceRows(nativeObservations),
+    reconciliation:{clean:true as const,counts:{ownedSessions:sessions.length,canonicalSessions:observations.length,
+      legacyEdits:edits.length,importedSessions:proof.importedSessions,importedEdits:proof.importedEdits,mutationEvents:totalMutations}}};
+}
+async function comparisonLegacyOptions(u:MutationUnit,asOf:string){
+  const actor=u.context.actorUserId,now=new Date(asOf);
+  const settings=await readComplete(u.tx,"SELECT to_jsonb(t) raw FROM public.user_settings t WHERE user_id=$1 ORDER BY user_id LIMIT 2 FOR SHARE",
+    [actor],["raw"],1);
+  const users=await readComplete(u.tx,"SELECT created_at FROM public.users WHERE id=$1 LIMIT 2 FOR SHARE",[actor],["created_at"],1);
+  requireValid(users.length===1);
+  const setting=settings[0]?.raw;
+  const dayStartHour=setting?.day_start_hour??4,timezone=setting?.timezone??"America/New_York",
+    windowDays=normalizeComplianceWindowDays(setting?.window_days??7);
+  requireValid(Number.isInteger(dayStartHour)&&dayStartHour>=0&&dayStartHour<=23&&typeof timezone==="string"&&!!timezone.length);
+  const declarations=await readComplete(u.tx,"SELECT to_jsonb(t) raw FROM public.deviations t WHERE user_id=$1 ORDER BY id LIMIT $2 FOR SHARE",
+    [actor,MAX_COLLECTION_ROWS+1],["raw"],MAX_COLLECTION_ROWS);
+  const v2=await readComplete(u.tx,"SELECT to_jsonb(t) raw FROM public.deviations_v2 t WHERE org_id=$1 AND owner_user_id=$2 ORDER BY deviation_id LIMIT $3 FOR SHARE",
+    [u.context.orgId,actor,MAX_COLLECTION_ROWS+1],["raw"],MAX_COLLECTION_ROWS);
+  const associations=await readComplete(u.tx,"SELECT to_jsonb(t) raw FROM public.deviation_domains t WHERE org_id=$1 AND owner_user_id=$2 ORDER BY deviation_id,domain_id LIMIT $3 FOR SHARE",
+    [u.context.orgId,actor,MAX_COLLECTION_ROWS+1],["raw"],MAX_COLLECTION_ROWS);
+  const raw=declarations.map(row=>row.raw);
+  const active=raw.filter(row=>row.deleted_at===null&&row.ended_at===null&&new Date(row.start_at)<=now&&
+    (row.end_at===null||new Date(row.end_at)>=now));
+  const deviations=active.map(row=>({id:row.id,userId:row.user_id,domain:row.domain,reason:"",
+    startAt:new Date(row.start_at),endAt:row.end_at===null?null:new Date(row.end_at),endedAt:null,deletedAt:null,
+    excludeFromComposite:row.exclude_from_composite})) as Deviation[];
+  const created=users[0].created_at,userCreatedAt=created==null?undefined:new Date(created);
+  requireValid(!userCreatedAt||Number.isFinite(userCreatedAt.getTime()));
+  return {options:withLogicalDayMemo({now,dayStartHour,timezone,windowDays,userCreatedAt,deviations}),
+    evidence:{settings:setting??null,userCreatedAt:created==null?null:new Date(created).toISOString(),
+      deviations:raw,deviationsV2:v2.map(row=>row.raw),associations:associations.map(row=>row.raw)}};
+}
+/**
+ * Private bounded maintenance only. No ambient importer, route, flag, default
+ * recipe or history authority is installed. The real callback runs on the SAME
+ * pinned transaction after a clean collection gate; strong locks end at commit.
+ */
+export function createLegacyComparisonUnit(
+  unit:ReturnType<typeof createPinnedOwnershipUnit>,options:{clock?:()=>Date}={},
+):LegacyComparisonUnit{
+  if(!unit||typeof unit.run!=="function"||!options||typeof options!=="object"||Array.isArray(options)||
+    Object.keys(options).some(key=>key!=="clock")||options.clock!==undefined&&typeof options.clock!=="function")
+    throw new BoundaryError(503);
+  const execute=unit.run,clock=options.clock??(()=>new Date());
+  const comparison:LegacyComparisonUnit=Object.freeze({
+    async run<T>(request:Request,operation:(batch:LegacyComparisonBatch)=>Promise<T>):Promise<LegacyComparisonOutcome<T>>{
+      authenticateComparison(request);
+      if(typeof operation!=="function")throw new BoundaryError(400);
+      try{
+        const value=await execute(request,async original=>{
+          if(original.context.role!=="owner"||!["legacy","shadow"].includes(original.context.rolloutMode))throw new BoundaryError(403);
+          return withTransactionReadBudget(original.tx,tx=>withOwnerWriteBudget(tx,original.context.actorUserId,async({admitMutation})=>{
+            await tx.query(comparisonLockSql);
+            const current=clock();
+            if(!(current instanceof Date)||!Number.isFinite(current.getTime()))throw new BoundaryError(503);
+            const asOf=current.toISOString();
+            const db:OwnershipDatabase=Object.freeze({transaction:<V>(fn:(inner:Transaction)=>Promise<V>)=>
+              original.db.transaction(()=>fn(tx))});
+            const context=await createOrgContextResolver(db)(request);
+            if(context.orgId!==original.context.orgId||context.actorUserId!==original.context.actorUserId||
+              context.role!==original.context.role||context.rolloutMode!==original.context.rolloutMode)throw new BoundaryError(403);
+            const owned:MutationUnit={tx,db,context,mappingEvidence:new Map(),admitMutation};
+            let evidence:LegacyComparisonEvidence,collection:Awaited<ReturnType<typeof comparisonCollection>>,
+              legacy:Awaited<ReturnType<typeof comparisonLegacyOptions>>;
+            try{
+              await tx.query("SELECT set_config('TimeZone','UTC',true)");
+              evidence=await verifyLegacyComparisonProvenance(db,context,request);
+              collection=await comparisonCollection(owned,evidence);
+              legacy=await comparisonLegacyOptions(owned,asOf);
+            }catch(error){
+              if(error instanceof BoundaryError&&error.status===400)throw new ComparisonReconciliationFailure();
+              throw error;
+            }
+            const all=evidence.all;
+            const projection={scope:{orgId:context.orgId,actorUserId:context.actorUserId},
+              domains:sourceRows(all.domains),policies:sourceRows(all.policies),dimensions:sourceRows(all.dimensions),
+              bindings:sourceRows(all.bindings),sessions:sourceRows(all.sessions),edits:sourceRows(all.edits),
+              observations:sourceRows(all.observations),audits:sourceRows(all.audits).filter(row=>row.entity_type!=="evaluation_results"),
+              proof:evidence.proof,legacy:legacy.evidence};
+            const snapshotFingerprint=hash("legacy-comparison-source-v1",JSON.stringify(projection));
+            const batch:LegacyComparisonBatch=Object.freeze({db,tx,context,asOf,legacyOptions:legacy.options,
+              ...structuredClone(collection),snapshotFingerprint});
+            return operation(batch);
+          }));
+        });
+        return {status:"completed",value};
+      }catch(error){
+        // The pinned unit has already rolled back. Its resource error combines
+        // lock conflicts, deadlines and read budgets; never label every503 busy.
+        if(error instanceof ResourceLimitError)return {status:"unavailable",reason:"maintenance_resource_unavailable"};
+        if(error instanceof ComparisonReconciliationFailure)return {status:"unavailable",reason:"reconciliation_failed"};
+        throw error;
+      }
+    },
+  });
+  comparisonUnits.add(comparison);
+  return comparison;
 }

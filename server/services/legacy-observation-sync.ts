@@ -4,7 +4,7 @@ import { ResourceLimitError, MAX_READ_ROWS } from "../lib/read-budget";
 import { withTransactionReadBudget, readComplete, assertReadBytesAvailable } from "../lib/transaction-read-budget";
 import { ConfigurationBundleSchema, DomainConfigurationSchema, ObservationSchema } from "../../shared/domain-config";
 import { BoundaryError, bounded, createOrgContextResolver, revalidate,
-  type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
+  assertContext, type OwnershipDatabase, type Transaction, type OrgContext } from "../lib/org-context";
 
 type Request = Parameters<ReturnType<typeof createOrgContextResolver>>[0];
 type Row = Record<string, any>;
@@ -89,8 +89,9 @@ async function read(tx: Transaction, db: OwnershipDatabase, context: OrgContext)
     batch: `${version}:${hash(org,actor)}` };
 }
 type Planned = { source: Row; binding: Row; policy: Row; row: Row; edits: Row[] };
-function plan(s: State): Planned[] {
-  requireValid(s.domains.length === 4 && s.bindings.length === 4);
+function plan(s: State, comparison = false): Planned[] {
+  requireValid(comparison ? s.bindings.length > 0 && s.bindings.length <= 4 && s.domains.length === s.bindings.length :
+    s.domains.length === 4 && s.bindings.length === 4);
   const configurations = s.policies.map(p => {
     const parsed = DomainConfigurationSchema.safeParse(p.configuration); requireValid(parsed.success);
     const c = parsed.data;
@@ -105,7 +106,7 @@ function plan(s: State): Planned[] {
   });
   requireValid(ConfigurationBundleSchema.safeParse({schemaVersion:1,configurations,observations:[]}).success);
   requireValid(s.dimensions.length === configurations.reduce((n,c) => n+c.measurements.length,0));
-  for (const slug of slugs) {
+  for (const slug of comparison ? s.bindings.map(b => String(b.external_id)) : slugs) {
     const ds = s.domains.filter(d => d.slug === slug), bs = s.bindings.filter(b => b.external_id === slug);
     requireValid(ds.length === 1 && bs.length === 1);
     const d = ds[0], b = bs[0];
@@ -114,7 +115,8 @@ function plan(s: State): Planned[] {
       configurations.some(c => c.domainId === d.domain_id));
     for (const [type,row,key] of [["domains",d,d.domain_id],["source_bindings",b,b.binding_id]] as const) {
       const a = s.audits.filter(a => a.entity_type === type && a.entity_id === JSON.stringify([key]));
-      requireValid(a.length === 1 && a[0].actor_kind === "user" && a[0].actor_user_id === s.actor &&
+      if(comparison&&type==="domains")verifyComparisonDomainLineage(s,row,a);
+      else requireValid(a.length === 1 && a[0].actor_kind === "user" && a[0].actor_user_id === s.actor &&
         a[0].action === "create" && a[0].before === null && equal(a[0].after,row.raw) &&
         a[0].reason === "Preserve authenticated owner's established legacy policy");
     }
@@ -353,26 +355,128 @@ export async function verifyLegacyImportProvenance(db: OwnershipDatabase, reques
     const pinned:OwnershipDatabase={transaction:async operation=>operation(tx)};
     const context = await createOrgContextResolver(pinned)(request);
     const current = await read(tx,pinned,context);
-    const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
-      const r = a.after?.sourceSnapshot?.row;
-      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
-        current.sessions.some(s => s.id === r.id));
-      return {...r,timestamp:new Date(r.timestamp),deleted_at:r.deleted_at === null ? null : new Date(r.deleted_at),raw:r};
-    });
-    const edits = current.audits.filter(a => a.entity_type === types[1]).map(a => {
-      const r = a.before?.sourceEdit;
-      requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
-        current.edits.some(e => e.id === r.id && equal(e.raw,r)));
-      return {...r,edited_at:new Date(r.edited_at),raw:r};
-    });
-    requireValid(new Set(sessions.map(s => s.id)).size === sessions.length &&
-      new Set(edits.map(e => e.id)).size === edits.length);
-    const observations = current.audits.filter(a => a.entity_type === types[0]).map(a => {
-      const r = a.after?.importedObservation; requireValid(r && typeof r.observation_id === "string");
-      return {...r,raw:r};
-    });
-    const preserved = {...current,sessions,edits,observations};
-    requireValid(report(preserved,plan(preserved)).clean);
-    return {importedSessions:sessions.length,importedEdits:edits.length};
+    return preservedImportProof(current);
   })));
+}
+
+
+/** Shared arithmetic/provenance checks; only the comparison reader opts into a
+ * scoped binding set. Existing import/reconciliation entry points stay legacy-only. */
+function preservedImportProof(current: State, comparison = false) {
+  const sessions = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+    const r = a.after?.sourceSnapshot?.row;
+    requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+      current.sessions.some(s => s.id === r.id));
+    return {...r,timestamp:new Date(r.timestamp),deleted_at:r.deleted_at === null ? null : new Date(r.deleted_at),raw:r};
+  });
+  const edits = current.audits.filter(a => a.entity_type === types[1]).map(a => {
+    const r = a.before?.sourceEdit;
+    requireValid(r && typeof r.id === "string" && r.user_id === current.actor &&
+      current.edits.some(e => e.id === r.id && equal(e.raw,r)));
+    return {...r,edited_at:new Date(r.edited_at),raw:r};
+  });
+  requireValid(new Set(sessions.map(s => s.id)).size === sessions.length &&
+    new Set(edits.map(e => e.id)).size === edits.length);
+  const observations = current.audits.filter(a => a.entity_type === types[0]).map(a => {
+    const r = a.after?.importedObservation; requireValid(r && typeof r.observation_id === "string");
+    return {...r,raw:r};
+  });
+  const preserved = {...current,sessions,edits,observations};
+  requireValid(report(preserved,plan(preserved,comparison)).clean);
+  return {importedSessions:sessions.length,importedEdits:edits.length};
+}
+
+export type LegacyComparisonEvidence = {
+  proof: { importedSessions: number; importedEdits: number };
+  all: State;
+  scoped: State;
+  nativeObservations: Row[];
+};
+
+/**
+ * Internal read-only entry for the comparison unit. The caller owns the pinned
+ * maintenance transaction and its NOWAIT table locks. This does not import,
+ * repair, approve a recipe, or forge a legacy context for shadow mode.
+ */
+export async function verifyLegacyComparisonProvenance(
+  db: OwnershipDatabase, context: OrgContext, request: Request,
+): Promise<LegacyComparisonEvidence> {
+  authenticate(request);
+  assertContext(db,context);
+  if((request.user as any)?.claims?.sub!==context.actorUserId||context.role!=="owner"||
+    !["legacy","shadow"].includes(context.rolloutMode))throw new BoundaryError(403);
+  return bounded(()=>db.transaction(raw=>withTransactionReadBudget(raw,async tx=>{
+    await revalidate(tx,db,context);
+    const org=context.orgId,actor=context.actorUserId,scope=[org,actor];
+    const scopedRows=(table:string,order:string)=>rows(tx,table,"t.org_id=$1 AND t.owner_user_id=$2",scope,order);
+    const domains=await scopedRows("domains","t.domain_id");
+    const policies=await scopedRows("policy_versions","t.domain_id,t.revision");
+    const dimensions=await scopedRows("dimension_definitions","t.policy_version_id,t.measurement_id");
+    const bindings=await scopedRows("source_bindings","t.binding_id");
+    const sessions=await rows(tx,"sessions","t.user_id=$1",[actor],"t.domain,t.timestamp,t.id");
+    const edits=await rows(tx,"session_edits",
+      "t.user_id=$1 OR t.session_id IN (SELECT id FROM public.sessions WHERE user_id=$1)",[actor],"t.edited_at,t.id");
+    const observations=await scopedRows("observations","t.observation_id");
+    const entityIds=[...sessions.map(r=>r.id),...edits.map(r=>r.id),...domains.map(r=>r.domain_id),
+      ...policies.map(r=>r.policy_version_id),...bindings.map(r=>r.binding_id),...observations.map(r=>r.observation_id)]
+      .map(value=>JSON.stringify([value]));
+    const audits=await rows(tx,"audit_events",
+      "t.org_id=$1 AND (t.actor_user_id=$2 OR t.entity_id=ANY($3::text[]))",[org,actor,entityIds],"t.audit_event_id");
+    // Unassigned rows are outside this authenticated comparison; zero is an
+    // internal report placeholder, never a claim that global unowned data is absent.
+    const all:State={org,actor,domains,policies,dimensions,bindings,sessions,edits,observations,audits,
+      unowned:0,batch:`${version}:${hash(org,actor)}`};
+    const seedReason="Preserve authenticated owner's established legacy policy";
+    const seedBindingAudits=audits.filter(a=>a.entity_type==="source_bindings"&&a.action==="create"&&a.reason===seedReason);
+    requireValid(seedBindingAudits.every(a=>bindings.some(b=>a.entity_id===JSON.stringify([b.binding_id]))));
+    const legacyBindings=bindings.filter(b=>b.source_kind==="manual-legacy"||
+      b.metadata?.description==="existing-owner-seed-v1"||
+      seedBindingAudits.some(a=>a.entity_id===JSON.stringify([b.binding_id])));
+    requireValid(legacyBindings.every(b=>b.source_kind==="manual-legacy"&&equal(b.metadata,{description:"existing-owner-seed-v1"}))&&
+      legacyBindings.length>0&&legacyBindings.length<=4&&
+      new Set(legacyBindings.map(b=>b.domain_id)).size===legacyBindings.length&&
+      new Set(legacyBindings.map(b=>b.external_id)).size===legacyBindings.length&&
+      legacyBindings.every(b=>slugs.includes(b.external_id)));
+    const domainIds=new Set(legacyBindings.map(b=>b.domain_id));
+    const legacyDomains=domains.filter(d=>domainIds.has(d.domain_id));
+    requireValid(legacyDomains.length===legacyBindings.length);
+    const expectedIds=new Set(sessions.map(row=>uid("observation-v1",org,actor,row.id)));
+    const legacyMarked=(row:Row)=>row.legacy_source_type!=null||row.legacy_source_id!=null||
+      typeof row.idempotency_key==="string"&&row.idempotency_key.startsWith("legacy-sessions-v1:")||
+      ["legacy-history-import-v1","legacy-activity-mutation-v1"].includes(row.version)||
+      ["legacy-history-import-v1","legacy-activity-mutation-v1"].includes(row.observation?.version)||
+      expectedIds.has(row.observation_id);
+    const legacyObservations=observations.filter(legacyMarked);
+    const scoped:State={...all,domains:legacyDomains,bindings:legacyBindings,
+      policies:policies.filter(row=>domainIds.has(row.domain_id)),
+      dimensions:dimensions.filter(row=>domainIds.has(row.domain_id)),observations:legacyObservations};
+    const proof=preservedImportProof(scoped,true);
+    return {proof,all,scoped,nativeObservations:observations.filter(row=>!legacyMarked(row))};
+  })));
+}
+
+
+/** Comparison-only metadata replay. Immutable identity/slug and active lifecycle
+ * remain exact; unsupported lifecycle edits are refused rather than reanimated. */
+function verifyComparisonDomainLineage(state:State,row:Row,audits:Row[]) {
+  const creates=audits.filter(a=>a.action==="create");
+  requireValid(creates.length===1);
+  const first=creates[0];
+  requireValid(first.actor_kind==="user"&&first.actor_user_id===state.actor&&first.before===null&&
+    first.reason==="Preserve authenticated owner's established legacy policy"&&first.after&&typeof first.after==="object");
+  let current=first.after as Row;
+  requireValid(current.domain_id===row.domain_id&&current.org_id===state.org&&current.owner_user_id===state.actor&&
+    current.slug===row.slug&&current.deactivated_at===null&&current.tombstoned_at===null);
+  const remaining=audits.filter(a=>a!==first);
+  while(remaining.length){
+    const next=remaining.filter(a=>equal(a.before,current));
+    requireValid(next.length===1);
+    const event=next[0],after=event.after;
+    requireValid(event.action==="update"&&event.actor_kind==="user"&&event.actor_user_id===state.actor&&
+      typeof event.reason==="string"&&!!event.reason.trim()&&after&&typeof after==="object"&&
+      typeof after.display_name==="string"&&!!after.display_name.trim()&&after.display_name.length<=500&&
+      !equal(after,current)&&equal(after,{...current,display_name:after.display_name}));
+    current=after;remaining.splice(remaining.indexOf(event),1);
+  }
+  requireValid(equal(current,row.raw)&&row.deactivated_at===null&&row.tombstoned_at===null);
 }
