@@ -25,7 +25,7 @@ async function snapshot() {
     result[table] = (await f.client.query("SELECT to_jsonb(t) row FROM public." + table + " t ORDER BY to_jsonb(t)::text")).rows;
   return JSON.stringify(result);
 }
-async function owner(actor: string) {
+async function owner(actor: string, emptyBeforeImport = false) {
   await f.client.query("INSERT INTO users(id,created_at) VALUES($1,'2025-12-01T00:00:00Z')", [actor]);
   await f.client.query("INSERT INTO user_settings(user_id,timezone,day_start_hour,window_days) VALUES($1,'America/New_York',6,14)", [actor]);
   for (const slug of slugs)
@@ -34,6 +34,9 @@ async function owner(actor: string) {
     [actor + "-" + slug, actor, slug, "Private synthetic practice " + actor, slug === "fitness",
       slug === "fitness" ? "Private synthetic anomaly " + actor : null]);
   await seedPolicyV2(f.db, request(actor));
+  // Invented fixture only: establish an empty source set before any immutable
+  // import receipt exists, retaining the genuine domain/binding seed evidence.
+  if (emptyBeforeImport) await f.client.query("DELETE FROM sessions WHERE user_id=$1", [actor]);
   await importLegacyObservations(f.db, request(actor));
   return actor;
 }
@@ -196,6 +199,86 @@ it("does not treat a free-form preservation reason on an ordinary native domain 
   expect(await snapshot()).toBe(before);
 });
 
+it("selects same-organization correction evidence by entity type and owned key, not cross-table identifier collisions", async () => {
+  const actor = await owner("comparison-typed-audit"), foreign = "comparison-typed-audit-member", unit = comparison();
+  const ownerContext = await createOrgContextResolver(f.db)(request(actor));
+  await f.client.query("INSERT INTO users(id,created_at) VALUES($1,'2025-12-01T00:00:00Z')", [foreign]);
+  await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [ownerContext.orgId, foreign]);
+  const initial = await unit.run(request(actor), async batch => ({ fingerprint: batch.snapshotFingerprint,
+    ownedObservationId: batch.sources[0].canonicalObservationIds[0] }));
+  if (initial.status !== "completed") throw Error("Synthetic owner comparison unavailable");
+  const context = await createOrgContextResolver(f.db)(request(foreign));
+  const store = createPolicyV2Storage(f.db, context, { clock: () => new Date("2025-12-31T00:00:00Z") });
+  const collision = actor + "-music", sentinel = "SYNTHETIC_FOREIGN_TYPED_AUDIT_SENTINEL";
+  // A foreign domain and observation deliberately reuse an OWNED SESSION id.
+  // They are not owned domains or observations despite that untyped collision.
+  const configuration = { ...configurationFor("comparison-foreign-collision", MEASUREMENTS[2], 12),
+    organizationId: context.orgId, ownerUserId: foreign, domainId: collision };
+  await store.domains.create({ domainId: configuration.domainId, slug: "foreign-collision", displayName: sentinel }, sentinel);
+  await store.policies.append(configuration, sentinel);
+  const observation = { ...observationFor(configuration, collision, 7), observedAt: "2026-01-04T12:00:00.000Z", notes: sentinel };
+  await store.observations.create({ observation, idempotencyKey: "comparison-foreign-collision" }, sentinel);
+  // Deliberately suspicious foreign evidence must not poison this owner's gate.
+  await f.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") " +
+    "VALUES('comparison-foreign-version-audit',$1,'user',$2,'observations',$3,'update',clock_timestamp(),$4,$5::jsonb,$6::jsonb)",
+  [context.orgId, foreign, JSON.stringify([collision]), sentinel, JSON.stringify({ privateBefore: sentinel }),
+    JSON.stringify({ version: "legacy-activity-mutation-v1", privateForeign: sentinel })]);
+  await f.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") " +
+    "VALUES('comparison-current-actor-foreign-audit',$1,'user',$2,'domains',$3,'update',clock_timestamp(),$4,$5::jsonb,$6::jsonb)",
+  [context.orgId, actor, JSON.stringify([collision]), sentinel, JSON.stringify({ privateBefore: sentinel }),
+    JSON.stringify({ version: "legacy-activity-mutation-v1", privateForeign: sentinel })]);
+  // Being the current actor does not make a foreign entity owned.
+  const before = await snapshot();
+  expect(await unit.run(request(actor), async batch => {
+    expect(batch.snapshotFingerprint).toBe(initial.value.fingerprint);
+    expect(batch.reconciliation.counts).toMatchObject({ ownedSessions: 4, canonicalSessions: 4 });
+    expect(batch.canonicalRows.some((row:any) => row.owner_user_id === foreign || row.observation_id === collision)).toBe(false);
+    expect(batch.nativeEvidence.some((row:any) => row.owner_user_id === foreign)).toBe(false);
+    expect(batch.unsupported.some(row => row.domainId === collision)).toBe(false);
+    expect(JSON.stringify(batch)).not.toContain(sentinel);
+    return true;
+  })).toEqual({ status: "completed", value: true });
+  expect(await snapshot()).toBe(before);
+  const owned = (await f.client.query("SELECT to_jsonb(o) row FROM observations o WHERE owner_user_id=$1 AND observation_id=$2",
+    [actor, initial.value.ownedObservationId])).rows[0].row;
+  // A generic other-member review audit TO an owned observation remains source
+  // evidence. It does not pretend to be an owner-only legacy mutation/import.
+  await f.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") " +
+    "VALUES('comparison-owned-generic-audit',$1,'user',$2,'observations',$3,'update',clock_timestamp(),'Synthetic owned observation review',$4::jsonb,$4::jsonb)",
+  [context.orgId, foreign, JSON.stringify([initial.value.ownedObservationId]), JSON.stringify(owned)]);
+  const reviewed = await snapshot();
+  const retained = await unit.run(request(actor), async batch => batch.snapshotFingerprint);
+  expect(retained.status).toBe("completed");
+  if (retained.status !== "completed") throw Error("Synthetic owned review comparison unavailable");
+  expect(retained.value).not.toBe(initial.value.fingerprint);
+  expect(await snapshot()).toBe(reviewed);
+  await f.client.query("INSERT INTO audit_events(audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,\"before\",\"after\") " +
+    "VALUES('comparison-owned-system-audit',$1,'system',NULL,'observations',$2,'update',clock_timestamp(),'Synthetic system owned review',$3::jsonb,$3::jsonb)",
+  [context.orgId, JSON.stringify([initial.value.ownedObservationId]), JSON.stringify(owned)]);
+  const systemReviewed = await snapshot();
+  const system = await unit.run(request(actor), async batch => batch.snapshotFingerprint);
+  expect(system.status).toBe("completed");
+  if (system.status !== "completed") throw Error("Synthetic system review comparison unavailable");
+  expect(system.value).not.toBe(retained.value);
+  expect(await snapshot()).toBe(systemReviewed);
+});
+
+it.each([false, true])("refuses a missing genuine legacy binding with semantic seed-create evidence (empty import %s)", async empty => {
+  const actor = await owner("comparison-missing-binding-" + empty, empty), unit = comparison();
+  const binding = (await f.client.query("SELECT binding_id FROM source_bindings WHERE owner_user_id=$1 AND source_kind='manual-legacy' AND external_id='music'",
+    [actor])).rows[0];
+  expect(binding).toBeDefined();
+  expect((await f.client.query("DELETE FROM source_bindings WHERE owner_user_id=$1 AND binding_id=$2", [actor, binding.binding_id])).rowCount).toBe(1);
+  const seed = (await f.client.query("SELECT count(*)::int count FROM audit_events a WHERE actor_user_id=$1 AND entity_type='source_bindings' " +
+    "AND entity_id=$2 AND action='create' AND (to_jsonb(a)->'after')->>'source_kind'='manual-legacy'",
+  [actor, JSON.stringify([binding.binding_id])])).rows[0];
+  expect(seed.count).toBe(1);
+  const before = await snapshot(), operation = vi.fn(async () => true);
+  expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
+  expect(operation).not.toHaveBeenCalled();
+  expect(await snapshot()).toBe(before);
+});
+
 it("accepts an audited display-name cycle in chronological order without treating a repeated caption as drift", async () => {
   const actor = await owner("comparison-caption-cycle"), unit = comparison();
   const context = await createOrgContextResolver(f.db)(request(actor));
@@ -223,6 +306,21 @@ it("reports a missing genuine legacy mirror as reconciliation failure without in
   const removed = await f.client.query("DELETE FROM observations WHERE owner_user_id=$1 AND legacy_source_type='sessions' AND legacy_source_id=$2",
     [actor, actor + "-music"]);
   expect(removed.rowCount).toBe(1);
+  const before = await snapshot(), operation = vi.fn(async () => true);
+  expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
+  expect(operation).not.toHaveBeenCalled();
+  expect(await snapshot()).toBe(before);
+});
+
+it("rejects removal of both the owned source and mirror while their immutable import receipt still exists", async () => {
+  const actor = await owner("comparison-both-removed"), sourceId = actor + "-fitness", unit = comparison();
+  expect((await f.client.query("DELETE FROM observations WHERE owner_user_id=$1 AND legacy_source_type='sessions' AND legacy_source_id=$2",
+    [actor, sourceId])).rowCount).toBe(1);
+  expect((await f.client.query("DELETE FROM sessions WHERE user_id=$1 AND id=$2", [actor, sourceId])).rowCount).toBe(1);
+  const proof = (await f.client.query("SELECT count(*)::int count FROM audit_events a WHERE actor_user_id=$1 AND entity_type='legacy_session_import' " +
+    "AND entity_id=$2 AND (to_jsonb(a)->'after')->>'sourceId'=$3",
+  [actor, JSON.stringify([sourceId]), sourceId])).rows[0];
+  expect(proof.count).toBe(1);
   const before = await snapshot(), operation = vi.fn(async () => true);
   expect(await unit.run(request(actor), operation)).toEqual({ status: "unavailable", reason: "reconciliation_failed" });
   expect(operation).not.toHaveBeenCalled();
