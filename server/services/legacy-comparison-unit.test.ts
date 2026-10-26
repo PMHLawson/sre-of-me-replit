@@ -198,6 +198,29 @@ it("reports a missing genuine legacy mirror as reconciliation failure without in
   expect(await snapshot()).toBe(before);
 });
 
+it("captures a genuine native-only owner without seeding legacy bindings or inventing a legacy counterpart", async () => {
+  const actor = "comparison-native-only";
+  await f.client.query("INSERT INTO users(id,created_at) VALUES($1,'2025-12-01T00:00:00Z')", [actor]);
+  await f.client.query("INSERT INTO organizations(org_id,display_name) VALUES('comparison-native-only-org','Synthetic native workspace')");
+  await f.client.query("INSERT INTO organization_members(org_id,user_id,role) VALUES('comparison-native-only-org',$1,'owner')", [actor]);
+  // This owner never invokes the preservation seed or legacy import.
+  const native = await addNative(actor, "comparison-only-native"), unit = comparison(), before = await snapshot();
+  expect(await unit.run(request(actor), async batch => {
+    expect(batch.context).toMatchObject({ actorUserId: actor, orgId: "comparison-native-only-org", role: "owner" });
+    expect(batch.sources).toEqual([]);
+    expect(batch.reconciliation.clean).toBe(true);
+    expect(batch.reconciliation.counts).toMatchObject({ ownedSessions: 0, canonicalSessions: 0,
+      importedSessions: 0, importedEdits: 0, mutationEvents: 0 });
+    expect(batch.unsupported.some(row => row.domainId === native.domainId && typeof row.reason === "string" && row.reason.length > 0)).toBe(true);
+    expect(batch.canonicalRows.map((row:any) => row.observation_id)).toEqual([native.observationId]);
+    expect(batch.nativeEvidence.map((row:any) => row.observation_id)).toEqual([native.observationId]);
+    return true;
+  })).toEqual({ status: "completed", value: true });
+  // Includes the write-budget table: capture neither admits a write nor seeds,
+  // imports, repairs, drops native evidence or modifies any existing record.
+  expect(await snapshot()).toBe(before);
+});
+
 it("binds settings and declaration changes to the source fingerprint without changing saved practices", async () => {
   const actor = await owner("comparison-settings"), unit = comparison();
   const first = await unit.run(request(actor), async batch => batch.snapshotFingerprint);
