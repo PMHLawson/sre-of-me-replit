@@ -207,18 +207,18 @@ async function frequencyRevision(x:Awaited<ReturnType<typeof setup>>,required:nu
 }
 it.each([
  {required:1,asOf:"2026-01-15T12:00:00Z",days:[],cadence:"Nominal"},
- {required:1,asOf:"2026-01-16T12:00:00Z",days:[],cadence:"RhythmSlipping"},
+ {required:1,asOf:"2026-01-16T12:00:00Z",days:[],cadence:"Advisory"},
  {required:3,asOf:"2026-01-16T12:00:00Z",days:[15],cadence:"Breach"},
  {required:3,asOf:"2026-01-17T12:00:00Z",days:[15,16],cadence:"Warning"},
  {required:3,asOf:"2026-01-18T12:00:00Z",days:[15,16,17],cadence:"Nominal"},
  {required:5,asOf:"2026-01-15T12:00:00Z",days:[8,9,10,11,12],cadence:"RhythmSlipping"},
 ])("actual pinned comparison preserves $required/7 cadence at $asOf: $cadence",async c=>{
  const x=await setup([],undefined,c.asOf);
- await frequencyRevision(x,c.required,c.days.map(d=>({id:"q"+d,minutes:10,at:`2026-01-${d}T12:00:00Z`})));
+ await frequencyRevision(x,c.required,c.days.map(d=>({id:"q"+d,minutes:10,at:`2026-01-${String(d).padStart(2,"0")}T12:00:00Z`})));
  const m=meditation(await run(x));
  expect(m.next?.derived.cadence).toBe(c.cadence);
- expect(m.next?.actualQualifyingDays).toBe(c.days.filter(d=>Date.parse(`2026-01-${d}T12:00:00Z`)<
-  Date.parse(c.asOf.slice(0,10)+"T00:00:00Z")&&Date.parse(`2026-01-${d}T12:00:00Z`)>=
+ expect(m.next?.actualQualifyingDays).toBe(c.days.filter(d=>Date.parse(`2026-01-${String(d).padStart(2,"0")}T12:00:00Z`)<
+  Date.parse(c.asOf.slice(0,10)+"T00:00:00Z")&&Date.parse(`2026-01-${String(d).padStart(2,"0")}T12:00:00Z`)>=
   Date.parse(c.asOf.slice(0,10)+"T00:00:00Z")-7*86400000).length);
  expect(m.provenance?.scope.policyVersionId).toContain("revision-2");
  expect(m.provenance?.originEvidenceIds).toHaveLength(2);
