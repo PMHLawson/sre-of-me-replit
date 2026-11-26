@@ -19,6 +19,18 @@ const reasonSchema = text;
 function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const r = schema.safeParse(value); if (!r.success) throw new BoundaryError(400); return r.data;
 }
+function instantTicks(value:string):bigint|undefined {
+  const milliseconds=Date.parse(value),fraction=value.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1]??"";
+  if(!Number.isFinite(milliseconds)||fraction.length>6)return;
+  return BigInt(milliseconds)*BigInt(1000)+BigInt(fraction.padEnd(6,"0").slice(3));
+}
+function intervalAfter(start:string,end:string|null):boolean {
+  if(end===null)return true;
+  const startTicks=instantTicks(start),endTicks=instantTicks(end);
+  return startTicks!==undefined&&endTicks!==undefined&&endTicks>startTicks;
+}
+const editableAt=z.string().max(64).datetime({offset:true}).refine(value=>
+  (value.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1].length??0)<=6);
 const domainInput = z.object({ domainId:id,slug:id,displayName:text }).strict();
 const domainPatch = z.object({ displayName:text.optional(),deactivatedAt:at.nullable().optional(),tombstonedAt:at.nullable().optional() }).strict()
   .refine(v => Object.keys(v).length > 0);
@@ -29,12 +41,16 @@ const newObservationSchema=ObservationSchema.extend({
 const observationInput = z.object({ observation:ObservationSchema,idempotencyKey:id,sourceBindingId:id.optional() }).strict();
 const bindingInput = z.object({ bindingId:id,domainId:id,sourceKind:id,externalId:id,
   metadata:z.object({ description:text.optional() }).strict().nullable().optional() }).strict();
-const deviationInput = z.object({ deviationId:id,startAt:at,endAt:at.nullable(),scope:z.enum(["all","selected"]),
+const deviationInput = z.object({ deviationId:id,startAt:ActivityTimestampSchema,endAt:ActivityTimestampSchema.nullable(),scope:z.enum(["all","selected"]),
   type:z.enum(["stitch","substitute_target"]),reason:text,
   // Store declared intent only. Interpretation belongs to a later packet.
   policy:z.object({ note:text.optional() }).strict(),
   provenance:z.object({ description:text.optional() }).strict() }).strict()
   .refine(v => v.endAt === null || Date.parse(v.endAt) > Date.parse(v.startAt));
+const deviationEditInput = z.object({startAt:editableAt,endAt:editableAt.nullable(),reason:text}).strict()
+  .refine(v=>intervalAfter(v.startAt,v.endAt));
+const selectedDomainIds = z.array(id).min(1).max(100)
+  .refine(values=>new Set(values).size===values.length);
 const evaluationInput = z.object({ resultId:id,domainId:id,policyVersionId:id,windowStart:at,windowEnd:at,
   timezone:text,dayStartHour:z.number().int().min(0).max(23),calculationVersion:id,inputFingerprint:id,
   eligibleDays:z.number().finite().nonnegative(),
@@ -181,6 +197,13 @@ const readColumns = {
     "metadata"
   ]
 } as const;
+const deviationTimestampColumns=new Set(["start_at","end_at","ended_at","deleted_at"]);
+function columnProjection(kind:Kind):string {
+  if(kind!=="deviation")return "*";
+  return readColumns.deviation.map(column=>deviationTimestampColumns.has(column)
+    ?`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${column}`
+    :column).join(",");
+}
 const auditColumns=["audit_event_id","org_id","actor_kind","actor_user_id","entity_type","entity_id","action","occurred_at","reason","before","after"] as const;
 type Kind = keyof typeof tables;
 function semanticEqual(a:unknown,b:unknown):boolean {
@@ -222,20 +245,20 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
   }
   async function get(tx:Transaction,kind:Kind,keys:string[],lock=false) {
     const spec=tables[kind];
-    const rows=await readComplete(tx,`SELECT * FROM public.${spec.table} WHERE org_id=$1 AND owner_user_id=$2 AND ${
+    const rows=await readComplete(tx,`SELECT ${columnProjection(kind)} FROM public.${spec.table} WHERE org_id=$1 AND owner_user_id=$2 AND ${
       spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")} LIMIT 2${lock?" FOR UPDATE":""}`,[...scope,...keys],readColumns[kind],1);
     if(rows.length!==1)throw new BoundaryError(404);return rows[0];
   }
   async function list(tx:Transaction,kind:Kind,extra="",args:unknown[]=[]) {
     const maximum=rowBudget(kind);
-    return readComplete(tx,`SELECT * FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
+    return readComplete(tx,`SELECT ${columnProjection(kind)} FROM public.${tables[kind].table} WHERE org_id=$1 AND owner_user_id=$2${extra}
       ORDER BY ${tables[kind].keys.join(",")} LIMIT $${args.length+3}`,[...scope,...args,maximum+1],readColumns[kind],maximum);
   }
   async function insert(tx:Transaction,kind:Kind,values:Record<string,unknown>,reason:string) {
     const row={org_id:scope[0],owner_user_id:scope[1],...values},columns=Object.keys(row);
     await admitWrite(tx);
     const result=await tx.query(`INSERT INTO public.${tables[kind].table} (${columns.join(",")})
-      VALUES (${columns.map((_,i)=>`$${i+1}`).join(",")}) RETURNING *`,Object.values(row));
+      VALUES (${columns.map((_,i)=>`$${i+1}`).join(",")}) RETURNING ${columnProjection(kind)}`,Object.values(row));
     const after=result.rows[0];
     await createAuditService(tx,db,context).append(tables[kind].table,tables[kind].keys.map(k=>after[k]),"create",reason,null,after);
     return after;
@@ -254,7 +277,7 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
     if(unchanged||(Object.hasOwn(patch,"deleted_at")&&before.deleted_at!==null))return before;
     await admitWrite(tx);
     const r=await tx.query(`UPDATE public.${spec.table} SET ${columns.map((k,i)=>`${k}=$${i+3+keys.length}`).join(",")}
-      WHERE org_id=$1 AND owner_user_id=$2 AND ${spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")} RETURNING *`,
+      WHERE org_id=$1 AND owner_user_id=$2 AND ${spec.keys.map((k,i)=>`${k}=$${i+3}`).join(" AND ")} RETURNING ${columnProjection(kind)}`,
     [...scope,...keys,...Object.values(patch)]);
     if(r.rows.length!==1)throw new BoundaryError(404);
     await createAuditService(tx,db,context).append(spec.table,keys,"update",reason,before,r.rows[0]);return r.rows[0];
@@ -803,14 +826,84 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         const p=parse(deviationInput,input);return insert(tx,"deviation",{deviation_id:p.deviationId,start_at:p.startAt,
           end_at:p.endAt,scope:p.scope,type:p.type,reason:p.reason,policy:p.policy,provenance:p.provenance},parse(reasonSchema,reason));
       }),
+      // The break row and selected-practice set share the caller's pinned
+      // transaction. Input order is not semantic, and PostgreSQL compares
+      // timestamps at full stored precision so retries cannot erase fractions.
+      editSelected:(keys:unknown,input:unknown,domainIds:unknown,reason:unknown)=>run(async tx=>{
+        const [deviationId]=identity("deviation",keys),p=parse(deviationEditInput,input);
+        const ids=parse(selectedDomainIds,domainIds).slice().sort();
+        const auditReason=parse(reasonSchema,reason),before=await get(tx,"deviation",[deviationId],true);
+        if(before.deleted_at!==null)throw new BoundaryError(404);
+        if(before.scope!=="selected")throw new BoundaryError(400);
+        for(const domainId of ids)await get(tx,"domain",[domainId],true);
+        const current=await readComplete(tx,`SELECT * FROM public.deviation_domains
+          WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3
+          ORDER BY domain_id LIMIT $4 FOR UPDATE`,
+        [...scope,deviationId,MAX_COLLECTION_ROWS+1],readColumns.association,MAX_COLLECTION_ROWS);
+        const currentIds=current.map(row=>String(row.domain_id)).sort();
+        const fieldChanges=(await tx.query(`SELECT
+          start_at IS DISTINCT FROM $4::timestamptz AS start_changed,
+          end_at IS DISTINCT FROM $5::timestamptz AS end_changed,
+          reason IS DISTINCT FROM $6::text AS reason_changed
+          FROM public.deviations_v2 WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3`,
+        [...scope,deviationId,p.startAt,p.endAt,p.reason])).rows[0];
+        if(!fieldChanges)throw new BoundaryError(404);
+        const patch:Record<string,unknown>={};
+        if(fieldChanges.start_changed) {
+          const normalized=ActivityTimestampSchema.safeParse(p.startAt);
+          if(!normalized.success)throw new BoundaryError(400);
+          patch.start_at=normalized.data;
+        }
+        if(fieldChanges.end_changed) {
+          if(p.endAt===null)patch.end_at=null;
+          else {
+            const normalized=ActivityTimestampSchema.safeParse(p.endAt);
+            if(!normalized.success)throw new BoundaryError(400);
+            patch.end_at=normalized.data;
+          }
+        }
+        if(fieldChanges.reason_changed)patch.reason=p.reason;
+        const desired=new Set(ids),existing=new Set(currentIds);
+        const removed=currentIds.filter(value=>!desired.has(value));
+        const added=ids.filter(value=>!existing.has(value));
+        if(!Object.keys(patch).length&&!removed.length&&!added.length)
+          return {deviation:before,domainIds:currentIds};
+        let deviation=before;
+        if(Object.keys(patch).length) {
+          const columns=Object.keys(patch);
+          await admitWrite(tx);
+          const changed=await tx.query(`UPDATE public.deviations_v2 SET
+            ${columns.map((column,index)=>`${column}=$${index+4}`).join(",")}
+            WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3 RETURNING ${columnProjection("deviation")}`,
+          [...scope,deviationId,...Object.values(patch)]);
+          if(changed.rows.length!==1)throw new BoundaryError(404);
+          deviation=changed.rows[0];
+          await createAuditService(tx,db,context).append("deviations_v2",[deviationId],"update",auditReason,before,deviation);
+        }
+        for(const domainId of removed)await remove(tx,"association",[deviationId,domainId],auditReason);
+        for(const domainId of added)await insert(tx,"association",{deviation_id:deviationId,domain_id:domainId},auditReason);
+        return {deviation,domainIds:ids};
+      }),
       end:(keys:unknown,endedAt:unknown,reason:unknown)=>run(async tx=>{
         const k=identity("deviation",keys),end=parse(at,endedAt),before=await get(tx,"deviation",k,true);
-        if(Date.parse(end)<new Date(before.start_at).getTime())throw new BoundaryError(400);
+        const canEnd=(await tx.query(`SELECT $4::timestamptz>=start_at AS allowed FROM public.deviations_v2
+          WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3`,[...scope,...k,end])).rows[0];
+        if(!canEnd?.allowed)throw new BoundaryError(400);
         return update(tx,"deviation",k,{ended_at:end},parse(reasonSchema,reason));
       }),
       delete:(keys:unknown,reason:unknown)=>run(tx=>update(tx,"deviation",identity("deviation",keys),{deleted_at:new Date()},parse(reasonSchema,reason))),
     }),
     associations:Object.freeze({...reads("association"),
+      listForDeviation:(input:unknown)=>run(async tx=>{
+        const deviationId=parse(id,input);
+        await get(tx,"deviation",[deviationId]);
+        // Existing breaks may predate the 100-choice write limit. Keep the
+        // established complete-read ceiling without truncating those records.
+        return readComplete(tx,`SELECT ${columnProjection("association")} FROM public.deviation_domains
+          WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3
+          ORDER BY domain_id LIMIT $4`,
+        [...scope,deviationId,MAX_COLLECTION_ROWS+1],readColumns.association,MAX_COLLECTION_ROWS);
+      }),
       create:(keys:unknown,reason:unknown)=>run(async tx=>{
         const [deviationId,domainId]=identity("association",keys),r=parse(reasonSchema,reason);
         const d=await get(tx,"deviation",[deviationId]);await get(tx,"domain",[domainId]);

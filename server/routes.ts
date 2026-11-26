@@ -29,6 +29,8 @@ import { createPersonalWorkspaceService } from "./services/personal-workspace-se
 import { createOnboardingRouter } from "./routes/onboarding";
 import { createActivityServiceV2 } from "./services/activity-service-v2";
 import { createActivityV2Router } from "./routes/activity-v2";
+import { createDeviationV2Router } from "./routes/deviation-v2";
+import { createDeviationServiceV2 } from "./services/deviation-service-v2";
 import {
   computeCompositeState,
   isInRampUp,
@@ -73,6 +75,12 @@ export async function registerRoutes(
   app.use("/api/v2/domains", createPolicyV2Router({
     authenticate: isAuthenticated,
     service: createDomainServiceV2(createPinnedOwnershipUnit({
+      connect: async () => (await import("./db")).pool.connect(),
+    })),
+  }));
+  app.use("/api/v2/deviations", createDeviationV2Router({
+    authenticate: isAuthenticated,
+    service: createDeviationServiceV2(createPinnedOwnershipUnit({
       connect: async () => (await import("./db")).pool.connect(),
     })),
   }));

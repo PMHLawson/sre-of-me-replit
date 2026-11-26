@@ -250,9 +250,19 @@ it("the actual registerRoutes management mount preserves lazy database import an
       const response = await fetch(url, { headers });
       expect(response.status).toBe(401); expect(mountStats).toEqual({ dbImports: 0, dbConnects: 0 });
     }
+    const deviationsUrl = `http://127.0.0.1:${address.port}/api/v2/deviations`;
+    for (const headers of [{}, { "x-synthetic-fixture-actor": "__proto__" },
+      { "x-synthetic-fixture-actor": "router-a", "x-synthetic-auth-false": "yes" }]) {
+      const response = await fetch(deviationsUrl, { headers });
+      expect(response.status).toBe(401); expect(mountStats).toEqual({ dbImports: 0, dbConnects: 0 });
+    }
+    const validDeviation = await fetch(deviationsUrl, { headers: { "x-synthetic-fixture-actor": "router-a" } });
+    expect(validDeviation.status).toBe(503);
+    expect(await validDeviation.json()).toEqual({ message: "Service unavailable" });
+    expect(mountStats).toEqual({ dbImports: 1, dbConnects: 1 });
     const valid = await fetch(url, { headers: { "x-synthetic-fixture-actor": "router-a" } });
     expect(valid.status).toBe(503); expect(await valid.json()).toEqual({ message: "Service unavailable" });
-    expect(mountStats).toEqual({ dbImports: 1, dbConnects: 1 });
+    expect(mountStats).toEqual({ dbImports: 1, dbConnects: 2 });
   } finally { await new Promise<void>((resolve, reject) => mounted.close(error => error ? reject(error) : resolve())); }
 });
 
