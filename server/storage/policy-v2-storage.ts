@@ -896,10 +896,12 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
       listForDeviation:(input:unknown)=>run(async tx=>{
         const deviationId=parse(id,input);
         await get(tx,"deviation",[deviationId]);
+        // Existing breaks may predate the 100-choice write limit. Keep the
+        // established complete-read ceiling without truncating those records.
         return readComplete(tx,`SELECT ${columnProjection("association")} FROM public.deviation_domains
           WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3
           ORDER BY domain_id LIMIT $4`,
-        [...scope,deviationId,101],readColumns.association,100);
+        [...scope,deviationId,MAX_COLLECTION_ROWS+1],readColumns.association,MAX_COLLECTION_ROWS);
       }),
       create:(keys:unknown,reason:unknown)=>run(async tx=>{
         const [deviationId,domainId]=identity("association",keys),r=parse(reasonSchema,reason);

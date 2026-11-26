@@ -265,6 +265,120 @@ describe("authenticated selected-practice break lifecycle", () => {
     )).rows.map(row => row.action)).toEqual(["create", "update"]);
   });
 
+  it("opens, ends, and deletes a historical 101-practice break without unrelated-link overflow", async () => {
+    const legacyBreakId = "legacy-break-101";
+    const targetDomainIds = Array.from({ length: 101 }, (_, index) =>
+      `legacy-target-practice-${String(index + 1).padStart(3, "0")}`);
+    const unrelatedBreakIds = [
+      "legacy-unrelated-over-limit",
+      "legacy-unrelated-group-a",
+      "legacy-unrelated-group-b",
+    ];
+    const unrelatedCounts = [1001, 100, 100];
+    const unrelatedDomainIds = Array.from(
+      { length: unrelatedCounts.reduce((total, count) => total + count, 0) },
+      (_, index) => `legacy-unrelated-practice-${String(index + 1).padStart(4, "0")}`,
+    );
+    const unrelatedLinkBreakIds = unrelatedCounts.flatMap((count, breakIndex) =>
+      Array.from({ length: count }, () => unrelatedBreakIds[breakIndex]));
+
+    await fixture.client.query(`INSERT INTO public.domains(domain_id,org_id,owner_user_id,slug,display_name)
+      SELECT domain_id,'break-org-a','break-a','legacy-'||domain_id,'Synthetic legacy practice'
+      FROM unnest($1::text[]) AS t(domain_id)`, [[...targetDomainIds, ...unrelatedDomainIds]]);
+    await fixture.client.query(`INSERT INTO public.deviations_v2
+      (deviation_id,org_id,owner_user_id,start_at,end_at,scope,type,reason,policy,provenance)
+      SELECT deviation_id,'break-org-a','break-a','2026-04-01T08:00:00.123Z',
+        '2026-04-05T08:00:00.456Z','selected','stitch','Synthetic historical break','{}'::jsonb,'{}'::jsonb
+      FROM unnest($1::text[]) AS t(deviation_id)`, [[legacyBreakId, ...unrelatedBreakIds]]);
+    await fixture.client.query(`INSERT INTO public.deviation_domains(org_id,owner_user_id,deviation_id,domain_id)
+      SELECT 'break-org-a','break-a',$1,domain_id FROM unnest($2::text[]) AS t(domain_id)`,
+    [legacyBreakId, targetDomainIds]);
+    await fixture.client.query(`INSERT INTO public.deviation_domains(org_id,owner_user_id,deviation_id,domain_id)
+      SELECT 'break-org-a','break-a',deviation_id,domain_id
+      FROM unnest($1::text[],$2::text[]) AS t(deviation_id,domain_id)`,
+    [unrelatedLinkBreakIds, unrelatedDomainIds]);
+
+    await fixture.client.query(`INSERT INTO public.audit_events
+      (audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      SELECT 'somr438-legacy-break-101-create','break-org-a','user','break-a','deviations_v2',
+        '["legacy-break-101"]','create','2026-03-31T08:00:00Z','Synthetic retained break history',NULL,to_jsonb(d)
+      FROM public.deviations_v2 d WHERE d.deviation_id=$1`, [legacyBreakId]);
+    await fixture.client.query(`INSERT INTO public.audit_events
+      (audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
+      SELECT 'somr438-legacy-link-'||a.domain_id,'break-org-a','user','break-a','deviation_domains',
+        '["'||a.deviation_id||'","'||a.domain_id||'"]','create',clock_timestamp(),
+        'Synthetic retained selected-practice history',NULL,to_jsonb(a)
+      FROM public.deviation_domains a WHERE a.deviation_id=$1`, [legacyBreakId]);
+
+    const totalBefore = (await fixture.client.query(`SELECT
+      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-a') AS breaks,
+      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-a') AS links,
+      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-a') AS audits`)).rows[0];
+    const tooManyNewChoices = await call("/", "break-a", "POST", createBody(targetDomainIds));
+    expect(tooManyNewChoices.status).toBe(400);
+    expect((await fixture.client.query(`SELECT
+      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-a') AS breaks,
+      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-a') AS links,
+      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-a') AS audits`)).rows[0]).toEqual(totalBefore);
+
+    // The existing complete-read ceiling still applies to a single oversized break.
+    expect((await call(`/${unrelatedBreakIds[0]}`, "break-a")).status).toBe(503);
+
+    const expectedPractices = targetDomainIds.slice().sort();
+    const opened = await call(`/${legacyBreakId}`, "break-a");
+    expect(opened.status).toBe(200);
+    expect(opened.body.practiceIds).toEqual(expectedPractices);
+    const ended = await call(`/${legacyBreakId}/end`, "break-a", "POST", { changeReason: "Synthetic end legacy break" });
+    expect(ended.status).toBe(200);
+    expect(ended.body.practiceIds).toEqual(expectedPractices);
+    const openedAfterEnd = await call(`/${legacyBreakId}`, "break-a");
+    expect(openedAfterEnd.status).toBe(200);
+    expect(openedAfterEnd.body.practiceIds).toEqual(expectedPractices);
+
+    const deleted = await call(`/${legacyBreakId}`, "break-a", "DELETE", { changeReason: "Synthetic delete legacy break" });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.practiceIds).toEqual(expectedPractices);
+    expect((await fixture.client.query(
+      "SELECT domain_id FROM public.deviation_domains WHERE deviation_id=$1 ORDER BY domain_id", [legacyBreakId],
+    )).rows.map(row => row.domain_id)).toEqual(expectedPractices);
+    expect((await fixture.client.query(`SELECT count(*)::int AS count FROM public.audit_events
+      WHERE actor_user_id='break-a' AND entity_type='deviation_domains' AND entity_id LIKE $1`,
+    [`["${legacyBreakId}",%`])).rows[0].count).toBe(101);
+  });
+
+  it("keeps an unchanged pre-existing break's exact finer timestamps and history on save", async () => {
+    const created = await call("/", "break-a", "POST", createBody(["break-a-meditation"]));
+    expect(created.status).toBe(201);
+    const id = created.body.deviationId as string;
+    const exactStart = "2026-04-01T08:00:00.123456Z";
+    const exactEnd = "2026-04-04T08:00:00.654321Z";
+    await fixture.client.query(`UPDATE public.deviations_v2 SET start_at=$2,end_at=$3 WHERE deviation_id=$1`,
+    [id, exactStart, exactEnd]);
+    await fixture.client.query(`UPDATE public.audit_events a SET "after"=to_jsonb(d)
+      FROM public.deviations_v2 d
+      WHERE a.entity_type='deviations_v2' AND a.entity_id=$1 AND a.action='create' AND d.deviation_id=$2`,
+    [JSON.stringify([id]), id]);
+
+    const beforeSave = await snapshot();
+    const saved = await call(`/${id}`, "break-a", "PATCH", {
+      startAt: exactStart,
+      endAt: exactEnd,
+      reason: created.body.reason,
+      changeReason: "Synthetic unchanged legacy save",
+      practiceIds: ["break-a-meditation"],
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body.startAt).toBe(exactStart);
+    expect(saved.body.endAt).toBe(exactEnd);
+    expect(instantTicks(saved.body.startAt)).toBe(instantTicks(exactStart));
+    expect(instantTicks(saved.body.endAt)).toBe(instantTicks(exactEnd));
+    expect(await snapshot()).toBe(beforeSave);
+    const history = await audits(JSON.stringify([id]));
+    expect(history.map(event => event.action)).toEqual(["create"]);
+    expect(instantTicks(history[0].after.start_at)).toBe(instantTicks(exactStart));
+    expect(instantTicks(history[0].after.end_at)).toBe(instantTicks(exactEnd));
+  });
+
   it("permits overlapping breaks and preserves historical practice rows through end and soft delete", async () => {
     const first = await call("/", "break-a", "POST", createBody(["break-a-meditation"]));
     const second = await call("/", "break-a", "POST", createBody(["break-a-meditation"], {
