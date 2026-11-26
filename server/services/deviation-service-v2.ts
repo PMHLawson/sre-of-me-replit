@@ -3,6 +3,7 @@ import { z } from "zod";
 import { BoundaryError } from "../lib/org-context";
 import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createPolicyV2Storage } from "../storage/policy-v2-storage";
+import { ActivityTimestampSchema } from "../../shared/activity";
 
 type Unit = ReturnType<typeof createPinnedOwnershipUnit>;
 type Request = Parameters<Unit["run"]>[0];
@@ -10,25 +11,35 @@ type Store = ReturnType<typeof createPolicyV2Storage>;
 
 const id = z.string().min(1).max(200).refine(value =>
   value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value) && value !== "__proto__");
-const instant = z.string().datetime({ offset: true });
+const editableInstant = z.string().max(64).datetime({ offset: true }).refine(value =>
+  (value.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1].length ?? 0) <= 6);
 const reason = z.string().trim().min(1).max(500);
 const practiceIdsSchema = z.array(id).min(1).max(100)
   .refine(values => new Set(values).size === values.length);
 const createInput = z.object({
-  startAt: instant,
-  endAt: instant.nullable(),
+  startAt: ActivityTimestampSchema,
+  endAt: ActivityTimestampSchema.nullable(),
   reason,
   changeReason: reason,
   practiceIds: practiceIdsSchema,
   type: z.enum(["stitch", "substitute_target"]),
 }).strict().refine(value => value.endAt === null || Date.parse(value.endAt) > Date.parse(value.startAt));
 const editInput = z.object({
-  startAt: instant,
-  endAt: instant.nullable(),
+  startAt: editableInstant,
+  endAt: editableInstant.nullable(),
   reason,
   changeReason: reason,
   practiceIds: practiceIdsSchema,
-}).strict().refine(value => value.endAt === null || Date.parse(value.endAt) > Date.parse(value.startAt));
+}).strict().refine(value => {
+  if(value.endAt===null)return true;
+  const ticks=(instant:string)=>{
+    const milliseconds=Date.parse(instant),fraction=instant.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1]??"";
+    if(!Number.isFinite(milliseconds)||fraction.length>6)return undefined;
+    return BigInt(milliseconds)*1000n+BigInt(fraction.padEnd(6,"0").slice(3));
+  };
+  const start=ticks(value.startAt),end=ticks(value.endAt);
+  return start!==undefined&&end!==undefined&&end>start;
+});
 const lifecycleInput = z.object({ changeReason: reason }).strict();
 
 function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
@@ -42,7 +53,13 @@ function normalizedIds(values: string[]) {
 function iso(value: unknown): string | null {
   if (value === null) return null;
   if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
-  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return new Date(value).toISOString();
+  if (typeof value === "string") {
+    const match=value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/);
+    if(match&&Number.isFinite(Date.parse(value))) {
+      const fraction=match[2].endsWith("000")?match[2].slice(0,3):match[2].replace(/0+$/,"");
+      return `${match[1]}.${fraction}Z`;
+    }
+  }
   throw new BoundaryError(503);
 }
 function view(deviation: Record<string, any>, practiceIds: string[]) {
@@ -62,6 +79,9 @@ function view(deviation: Record<string, any>, practiceIds: string[]) {
 }
 async function associations(store: Store) {
   return store.associations.list() as Promise<Record<string, any>[]>;
+}
+async function associationsFor(store:Store,deviationId:string) {
+  return store.associations.listForDeviation(deviationId) as Promise<Record<string,any>[]>;
 }
 async function validatePractices(store: Store, practiceIds: string[]) {
   // Resolve every selected practice through the authenticated owner's scoped
@@ -95,7 +115,7 @@ export function createDeviationServiceV2(unit: Unit, options: { clock?: () => Da
       const store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       const row: any = await store.deviations.get([key]);
       if (row.deleted_at !== null) throw new BoundaryError(404);
-      return view(row, idsFor(row.deviation_id, await associations(store)));
+      return view(row, idsFor(row.deviation_id, await associationsFor(store,row.deviation_id)));
     }),
     create: (request: Request, input: unknown) => unit.run(request, async ownership => {
       const payload = parse(createInput, input);
@@ -134,19 +154,19 @@ export function createDeviationServiceV2(unit: Unit, options: { clock?: () => Da
       const store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       const current: any = await store.deviations.get([key]);
       if (current.deleted_at !== null) throw new BoundaryError(404);
-      if (current.ended_at !== null) return view(current, idsFor(current.deviation_id, await associations(store)));
+      if (current.ended_at !== null) return view(current, idsFor(current.deviation_id, await associationsFor(store,current.deviation_id)));
       const now = clock();
       if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new BoundaryError(503);
       const row = await store.deviations.end([key], now.toISOString(), payload.changeReason);
-      return view(row, idsFor(current.deviation_id, await associations(store)));
+      return view(row, idsFor(current.deviation_id, await associationsFor(store,current.deviation_id)));
     }),
     softDelete: (request: Request, key: unknown, input: unknown) => unit.run(request, async ownership => {
       const payload = parse(lifecycleInput, input);
       const store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       const current: any = await store.deviations.get([key]);
-      if (current.deleted_at !== null) return view(current, idsFor(current.deviation_id, await associations(store)));
+      if (current.deleted_at !== null) return view(current, idsFor(current.deviation_id, await associationsFor(store,current.deviation_id)));
       const row = await store.deviations.delete([key], payload.changeReason);
-      return view(row, idsFor(current.deviation_id, await associations(store)));
+      return view(row, idsFor(current.deviation_id, await associationsFor(store,current.deviation_id)));
     }),
   });
 }
