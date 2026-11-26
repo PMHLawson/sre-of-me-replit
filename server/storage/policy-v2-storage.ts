@@ -35,6 +35,10 @@ const deviationInput = z.object({ deviationId:id,startAt:at,endAt:at.nullable(),
   policy:z.object({ note:text.optional() }).strict(),
   provenance:z.object({ description:text.optional() }).strict() }).strict()
   .refine(v => v.endAt === null || Date.parse(v.endAt) > Date.parse(v.startAt));
+const deviationEditInput = z.object({startAt:at,endAt:at.nullable(),reason:text}).strict()
+  .refine(v=>v.endAt===null||Date.parse(v.endAt)>Date.parse(v.startAt));
+const selectedDomainIds = z.array(id).min(1).max(100)
+  .refine(values=>new Set(values).size===values.length);
 const evaluationInput = z.object({ resultId:id,domainId:id,policyVersionId:id,windowStart:at,windowEnd:at,
   timezone:text,dayStartHour:z.number().int().min(0).max(23),calculationVersion:id,inputFingerprint:id,
   eligibleDays:z.number().finite().nonnegative(),
@@ -803,9 +807,58 @@ export function createPolicyV2Storage(db: OwnershipDatabase, context: OrgContext
         const p=parse(deviationInput,input);return insert(tx,"deviation",{deviation_id:p.deviationId,start_at:p.startAt,
           end_at:p.endAt,scope:p.scope,type:p.type,reason:p.reason,policy:p.policy,provenance:p.provenance},parse(reasonSchema,reason));
       }),
+      // The break row and selected-practice set share the caller's pinned
+      // transaction. Input order is not semantic, and PostgreSQL compares
+      // timestamps at full stored precision so retries cannot erase fractions.
+      editSelected:(keys:unknown,input:unknown,domainIds:unknown,reason:unknown)=>run(async tx=>{
+        const [deviationId]=identity("deviation",keys),p=parse(deviationEditInput,input);
+        const ids=parse(selectedDomainIds,domainIds).slice().sort();
+        const auditReason=parse(reasonSchema,reason),before=await get(tx,"deviation",[deviationId],true);
+        if(before.deleted_at!==null)throw new BoundaryError(404);
+        if(before.scope!=="selected")throw new BoundaryError(400);
+        for(const domainId of ids)await get(tx,"domain",[domainId],true);
+        const current=await readComplete(tx,`SELECT * FROM public.deviation_domains
+          WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3
+          ORDER BY domain_id LIMIT $4 FOR UPDATE`,
+        [...scope,deviationId,MAX_COLLECTION_ROWS+1],readColumns.association,MAX_COLLECTION_ROWS);
+        const currentIds=current.map(row=>String(row.domain_id)).sort();
+        const fieldChanges=(await tx.query(`SELECT
+          start_at IS DISTINCT FROM $4::timestamptz AS start_changed,
+          end_at IS DISTINCT FROM $5::timestamptz AS end_changed,
+          reason IS DISTINCT FROM $6::text AS reason_changed
+          FROM public.deviations_v2 WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3`,
+        [...scope,deviationId,p.startAt,p.endAt,p.reason])).rows[0];
+        if(!fieldChanges)throw new BoundaryError(404);
+        const patch:Record<string,unknown>={};
+        if(fieldChanges.start_changed)patch.start_at=p.startAt;
+        if(fieldChanges.end_changed)patch.end_at=p.endAt;
+        if(fieldChanges.reason_changed)patch.reason=p.reason;
+        const desired=new Set(ids),existing=new Set(currentIds);
+        const removed=currentIds.filter(value=>!desired.has(value));
+        const added=ids.filter(value=>!existing.has(value));
+        if(!Object.keys(patch).length&&!removed.length&&!added.length)
+          return {deviation:before,domainIds:currentIds};
+        let deviation=before;
+        if(Object.keys(patch).length) {
+          const columns=Object.keys(patch);
+          await admitWrite(tx);
+          const changed=await tx.query(`UPDATE public.deviations_v2 SET
+            ${columns.map((column,index)=>`${column}=$${index+4}`).join(",")}
+            WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3 RETURNING *`,
+          [...scope,deviationId,...Object.values(patch)]);
+          if(changed.rows.length!==1)throw new BoundaryError(404);
+          deviation=changed.rows[0];
+          await createAuditService(tx,db,context).append("deviations_v2",[deviationId],"update",auditReason,before,deviation);
+        }
+        for(const domainId of removed)await remove(tx,"association",[deviationId,domainId],auditReason);
+        for(const domainId of added)await insert(tx,"association",{deviation_id:deviationId,domain_id:domainId},auditReason);
+        return {deviation,domainIds:ids};
+      }),
       end:(keys:unknown,endedAt:unknown,reason:unknown)=>run(async tx=>{
         const k=identity("deviation",keys),end=parse(at,endedAt),before=await get(tx,"deviation",k,true);
-        if(Date.parse(end)<new Date(before.start_at).getTime())throw new BoundaryError(400);
+        const canEnd=(await tx.query(`SELECT $4::timestamptz>=start_at AS allowed FROM public.deviations_v2
+          WHERE org_id=$1 AND owner_user_id=$2 AND deviation_id=$3`,[...scope,...k,end])).rows[0];
+        if(!canEnd?.allowed)throw new BoundaryError(400);
         return update(tx,"deviation",k,{ended_at:end},parse(reasonSchema,reason));
       }),
       delete:(keys:unknown,reason:unknown)=>run(tx=>update(tx,"deviation",identity("deviation",keys),{deleted_at:new Date()},parse(reasonSchema,reason))),
