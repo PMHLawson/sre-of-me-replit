@@ -35,7 +35,7 @@ const editInput = z.object({
   const ticks=(instant:string)=>{
     const milliseconds=Date.parse(instant),fraction=instant.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1]??"";
     if(!Number.isFinite(milliseconds)||fraction.length>6)return undefined;
-    return BigInt(milliseconds)*1000n+BigInt(fraction.padEnd(6,"0").slice(3));
+    return BigInt(milliseconds)*BigInt(1000)+BigInt(fraction.padEnd(6,"0").slice(3));
   };
   const start=ticks(value.startAt),end=ticks(value.endAt);
   return start!==undefined&&end!==undefined&&end>start;

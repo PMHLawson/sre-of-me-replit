@@ -22,7 +22,7 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
 function instantTicks(value:string):bigint|undefined {
   const milliseconds=Date.parse(value),fraction=value.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1]??"";
   if(!Number.isFinite(milliseconds)||fraction.length>6)return;
-  return BigInt(milliseconds)*1000n+BigInt(fraction.padEnd(6,"0").slice(3));
+  return BigInt(milliseconds)*BigInt(1000)+BigInt(fraction.padEnd(6,"0").slice(3));
 }
 function intervalAfter(start:string,end:string|null):boolean {
   if(end===null)return true;
