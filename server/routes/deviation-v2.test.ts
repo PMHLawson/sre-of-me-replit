@@ -14,6 +14,24 @@ const changeReason = "Synthetic lifecycle test";
 const createBody = (practiceIds: string[], extra: Record<string, unknown> = {}) => ({
   startAt, endAt, reason, changeReason, practiceIds, type: "stitch", ...extra,
 });
+function instantTicks(value: unknown): string | null {
+  if (value === null) return null;
+  const text = value instanceof Date ? value.toISOString() : value;
+  if (typeof text !== "string") throw new Error("Expected a timestamp value");
+  const milliseconds = Date.parse(text);
+  const fraction = text.match(/\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)/)?.[1] ?? "";
+  if (!Number.isFinite(milliseconds) || fraction.length > 6) throw new Error(`Invalid timestamp: ${text}`);
+  return (BigInt(milliseconds) * 1000n + BigInt(fraction.padEnd(6, "0").slice(3))).toString();
+}
+function comparableDeviation(value: Record<string, any>) {
+  return {
+    ...value,
+    start_at: instantTicks(value.start_at),
+    end_at: instantTicks(value.end_at),
+    ended_at: instantTicks(value.ended_at),
+    deleted_at: instantTicks(value.deleted_at),
+  };
+}
 
 describe("authenticated selected-practice break lifecycle", () => {
   let fixture: Awaited<ReturnType<typeof startFixture>>;
@@ -72,7 +90,7 @@ describe("authenticated selected-practice break lifecycle", () => {
       ('break-a-reading','break-org-a','break-a','reading','Reading'),
       ('break-b-meditation','break-org-b','break-b','meditation','Other Meditation'),
       ('break-c-meditation','break-org-a','break-c','member-meditation','Member Meditation');
-      INSERT INTO public.sessions(id,user_id,domain,timestamp,duration)
+      INSERT INTO public.sessions(id,user_id,domain,timestamp,duration_minutes)
       VALUES ('synthetic-history-entry','break-a','meditation','2026-03-01T08:00:00Z',20)`);
     verifyFixture(fixture.root);
     pool = new Pool({
@@ -179,6 +197,9 @@ describe("authenticated selected-practice break lifecycle", () => {
     expect((await call("/", "break-a", "POST", createBody(["break-a-meditation", "break-c-meditation"]))).status).toBe(404);
     expect((await call("/", "break-a", "POST", createBody(["break-a-meditation", "break-a-meditation"]))).status).toBe(400);
     expect((await call("/", "break-a", "POST", { ...createBody(["break-a-meditation"]), changeReason: " " })).status).toBe(400);
+    expect((await call("/", "break-a", "POST", createBody(["break-a-meditation"], {
+      startAt: "2026-04-01T08:00:00.123456Z",
+    }))).status).toBe(400);
     expect(await snapshot()).toBe(before);
   });
 
@@ -189,7 +210,11 @@ describe("authenticated selected-practice break lifecycle", () => {
     expect((await call(`/${id}`, "break-b")).status).toBe(404);
     expect((await call(`/${id}`, "break-c")).status).toBe(404);
     expect((await call(`/${id}`, "break-b", "PATCH", {
-      ...createBody(["break-b-meditation"]),
+      startAt: "2026-04-01T09:00:00.123Z",
+      endAt: "2026-04-05T09:00:00.456Z",
+      reason: "Synthetic foreign edit attempt",
+      changeReason: "Synthetic valid foreign edit",
+      practiceIds: ["break-b-meditation"],
     })).status).toBe(404);
     expect((await call(`/${id}`, "break-c", "DELETE", { changeReason })).status).toBe(404);
     expect(await snapshot()).toBe(before);
@@ -213,9 +238,16 @@ describe("authenticated selected-practice break lifecycle", () => {
       reason: edit.reason,
       practiceIds: ["break-a-exercise", "break-a-reading"],
     });
+    const stored = (await fixture.client.query(
+      "SELECT to_jsonb(d) AS row FROM public.deviations_v2 d WHERE deviation_id=$1", [id],
+    )).rows[0].row;
+    expect(instantTicks(changed.body.startAt)).toBe(instantTicks(stored.start_at));
+    expect(instantTicks(changed.body.endAt)).toBe(instantTicks(stored.end_at));
     const beforeRetry = await snapshot();
     const retry = await call(`/${id}`, "break-a", "PATCH", {
       ...edit,
+      startAt: "2026-04-01T04:00:00.123-05:00",
+      endAt: "2026-04-05T04:00:00.456-05:00",
       changeReason: "Synthetic reordered no-op",
       practiceIds: ["break-a-exercise", "break-a-reading"],
     });
@@ -348,20 +380,27 @@ describe("authenticated selected-practice break lifecycle", () => {
     ];
     const results = await Promise.all(changes.map(body => call(`/${id}`, "break-a", "PATCH", body)));
     expect(results.map(result => result.status)).toEqual([200, 200]);
-    const events = await fixture.client.query(`SELECT "before","after" FROM public.audit_events
+    const events = await fixture.client.query(`SELECT reason,"before","after",
+      to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at_exact
+      FROM public.audit_events
       WHERE actor_user_id='break-a' AND entity_type='deviations_v2' AND entity_id=$1
       ORDER BY occurred_at,audit_event_id`, [JSON.stringify([id])]);
     expect(events.rows).toHaveLength(3);
     expect(events.rows[0].before).toBeNull();
-    expect(events.rows[1].before).toEqual(events.rows[0].after);
-    expect(events.rows[2].before).toEqual(events.rows[1].after);
+    expect(comparableDeviation(events.rows[1].before)).toEqual(comparableDeviation(events.rows[0].after));
+    expect(comparableDeviation(events.rows[2].before)).toEqual(comparableDeviation(events.rows[1].after));
+    const eventTimes = events.rows.map(event => instantTicks(event.occurred_at_exact)!);
+    expect(BigInt(eventTimes[1])).toBeGreaterThan(BigInt(eventTimes[0]));
+    expect(BigInt(eventTimes[2])).toBeGreaterThan(BigInt(eventTimes[1]));
     const current = (await fixture.client.query(
       "SELECT to_jsonb(d) AS row FROM public.deviations_v2 d WHERE deviation_id=$1", [id],
     )).rows[0].row;
-    expect(events.rows[2].after).toEqual(current);
+    expect(comparableDeviation(events.rows[2].after)).toEqual(comparableDeviation(current));
     const currentPractices = (await fixture.client.query(
       "SELECT domain_id FROM public.deviation_domains WHERE deviation_id=$1 ORDER BY domain_id", [id],
     )).rows.map(row => row.domain_id);
-    expect(results.at(-1)?.body.practiceIds).toEqual(currentPractices);
+    const lastCommitted = changes.find(change => change.changeReason === events.rows[2].reason);
+    expect(lastCommitted).toBeDefined();
+    expect(currentPractices).toEqual(lastCommitted!.practiceIds.slice().sort());
   });
 });
