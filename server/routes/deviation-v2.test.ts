@@ -79,11 +79,12 @@ describe("authenticated selected-practice break lifecycle", () => {
   beforeAll(async () => {
     fixture = await startFixture("somr438-deviation-http");
     await fixture.client.query(`INSERT INTO public.users(id) VALUES
-      ('break-a'),('break-b'),('break-c');
+      ('break-a'),('break-b'),('break-c'),('break-legacy');
       INSERT INTO public.organizations(org_id,display_name) VALUES
-      ('break-org-a','Synthetic A'),('break-org-b','Synthetic B');
+      ('break-org-a','Synthetic A'),('break-org-b','Synthetic B'),('break-org-legacy','Synthetic legacy compatibility owner');
       INSERT INTO public.organization_members(org_id,user_id,role) VALUES
-      ('break-org-a','break-a','owner'),('break-org-a','break-c','member'),('break-org-b','break-b','owner');
+      ('break-org-a','break-a','owner'),('break-org-a','break-c','member'),('break-org-b','break-b','owner'),
+      ('break-org-legacy','break-legacy','owner');
       INSERT INTO public.domains(domain_id,org_id,owner_user_id,slug,display_name) VALUES
       ('break-a-meditation','break-org-a','break-a','meditation','Meditation'),
       ('break-a-exercise','break-org-a','break-a','exercise','Exercise'),
@@ -112,7 +113,7 @@ describe("authenticated selected-practice break lifecycle", () => {
       service,
       authenticate: (req: any, res, next) => {
         const actor = req.get("x-synthetic-fixture-actor");
-        if (!["break-a", "break-b", "break-c"].includes(actor)) {
+        if (!["break-a", "break-b", "break-c", "break-legacy"].includes(actor)) {
           res.status(401).json({ message: "Authentication required" });
           return;
         }
@@ -283,66 +284,66 @@ describe("authenticated selected-practice break lifecycle", () => {
       Array.from({ length: count }, () => unrelatedBreakIds[breakIndex]));
 
     await fixture.client.query(`INSERT INTO public.domains(domain_id,org_id,owner_user_id,slug,display_name)
-      SELECT domain_id,'break-org-a','break-a','legacy-'||domain_id,'Synthetic legacy practice'
+      SELECT domain_id,'break-org-legacy','break-legacy','legacy-'||domain_id,'Synthetic legacy practice'
       FROM unnest($1::text[]) AS t(domain_id)`, [[...targetDomainIds, ...unrelatedDomainIds]]);
     await fixture.client.query(`INSERT INTO public.deviations_v2
       (deviation_id,org_id,owner_user_id,start_at,end_at,scope,type,reason,policy,provenance)
-      SELECT deviation_id,'break-org-a','break-a','2026-04-01T08:00:00.123Z',
+      SELECT deviation_id,'break-org-legacy','break-legacy','2026-04-01T08:00:00.123Z',
         '2026-04-05T08:00:00.456Z','selected','stitch','Synthetic historical break','{}'::jsonb,'{}'::jsonb
       FROM unnest($1::text[]) AS t(deviation_id)`, [[legacyBreakId, ...unrelatedBreakIds]]);
     await fixture.client.query(`INSERT INTO public.deviation_domains(org_id,owner_user_id,deviation_id,domain_id)
-      SELECT 'break-org-a','break-a',$1,domain_id FROM unnest($2::text[]) AS t(domain_id)`,
+      SELECT 'break-org-legacy','break-legacy',$1,domain_id FROM unnest($2::text[]) AS t(domain_id)`,
     [legacyBreakId, targetDomainIds]);
     await fixture.client.query(`INSERT INTO public.deviation_domains(org_id,owner_user_id,deviation_id,domain_id)
-      SELECT 'break-org-a','break-a',deviation_id,domain_id
+      SELECT 'break-org-legacy','break-legacy',deviation_id,domain_id
       FROM unnest($1::text[],$2::text[]) AS t(deviation_id,domain_id)`,
     [unrelatedLinkBreakIds, unrelatedDomainIds]);
 
     await fixture.client.query(`INSERT INTO public.audit_events
       (audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
-      SELECT 'somr438-legacy-break-101-create','break-org-a','user','break-a','deviations_v2',
+      SELECT 'somr438-legacy-break-101-create','break-org-legacy','user','break-legacy','deviations_v2',
         '["legacy-break-101"]','create','2026-03-31T08:00:00Z','Synthetic retained break history',NULL,to_jsonb(d)
       FROM public.deviations_v2 d WHERE d.deviation_id=$1`, [legacyBreakId]);
     await fixture.client.query(`INSERT INTO public.audit_events
       (audit_event_id,org_id,actor_kind,actor_user_id,entity_type,entity_id,action,occurred_at,reason,"before","after")
-      SELECT 'somr438-legacy-link-'||a.domain_id,'break-org-a','user','break-a','deviation_domains',
+      SELECT 'somr438-legacy-link-'||a.domain_id,'break-org-legacy','user','break-legacy','deviation_domains',
         '["'||a.deviation_id||'","'||a.domain_id||'"]','create',clock_timestamp(),
         'Synthetic retained selected-practice history',NULL,to_jsonb(a)
       FROM public.deviation_domains a WHERE a.deviation_id=$1`, [legacyBreakId]);
 
     const totalBefore = (await fixture.client.query(`SELECT
-      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-a') AS breaks,
-      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-a') AS links,
-      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-a') AS audits`)).rows[0];
-    const tooManyNewChoices = await call("/", "break-a", "POST", createBody(targetDomainIds));
+      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-legacy') AS breaks,
+      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-legacy') AS links,
+      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-legacy') AS audits`)).rows[0];
+    const tooManyNewChoices = await call("/", "break-legacy", "POST", createBody(targetDomainIds));
     expect(tooManyNewChoices.status).toBe(400);
     expect((await fixture.client.query(`SELECT
-      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-a') AS breaks,
-      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-a') AS links,
-      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-a') AS audits`)).rows[0]).toEqual(totalBefore);
+      (SELECT count(*)::int FROM public.deviations_v2 WHERE owner_user_id='break-legacy') AS breaks,
+      (SELECT count(*)::int FROM public.deviation_domains WHERE owner_user_id='break-legacy') AS links,
+      (SELECT count(*)::int FROM public.audit_events WHERE actor_user_id='break-legacy') AS audits`)).rows[0]).toEqual(totalBefore);
 
     // The existing complete-read ceiling still applies to a single oversized break.
-    expect((await call(`/${unrelatedBreakIds[0]}`, "break-a")).status).toBe(503);
+    expect((await call(`/${unrelatedBreakIds[0]}`, "break-legacy")).status).toBe(503);
 
     const expectedPractices = targetDomainIds.slice().sort();
-    const opened = await call(`/${legacyBreakId}`, "break-a");
+    const opened = await call(`/${legacyBreakId}`, "break-legacy");
     expect(opened.status).toBe(200);
     expect(opened.body.practiceIds).toEqual(expectedPractices);
-    const ended = await call(`/${legacyBreakId}/end`, "break-a", "POST", { changeReason: "Synthetic end legacy break" });
+    const ended = await call(`/${legacyBreakId}/end`, "break-legacy", "POST", { changeReason: "Synthetic end legacy break" });
     expect(ended.status).toBe(200);
     expect(ended.body.practiceIds).toEqual(expectedPractices);
-    const openedAfterEnd = await call(`/${legacyBreakId}`, "break-a");
+    const openedAfterEnd = await call(`/${legacyBreakId}`, "break-legacy");
     expect(openedAfterEnd.status).toBe(200);
     expect(openedAfterEnd.body.practiceIds).toEqual(expectedPractices);
 
-    const deleted = await call(`/${legacyBreakId}`, "break-a", "DELETE", { changeReason: "Synthetic delete legacy break" });
+    const deleted = await call(`/${legacyBreakId}`, "break-legacy", "DELETE", { changeReason: "Synthetic delete legacy break" });
     expect(deleted.status).toBe(200);
     expect(deleted.body.practiceIds).toEqual(expectedPractices);
     expect((await fixture.client.query(
-      "SELECT domain_id FROM public.deviation_domains WHERE deviation_id=$1 ORDER BY domain_id", [legacyBreakId],
+      "SELECT domain_id FROM public.deviation_domains WHERE owner_user_id='break-legacy' AND deviation_id=$1 ORDER BY domain_id", [legacyBreakId],
     )).rows.map(row => row.domain_id)).toEqual(expectedPractices);
     expect((await fixture.client.query(`SELECT count(*)::int AS count FROM public.audit_events
-      WHERE actor_user_id='break-a' AND entity_type='deviation_domains' AND entity_id LIKE $1`,
+      WHERE actor_user_id='break-legacy' AND entity_type='deviation_domains' AND entity_id LIKE $1`,
     [`["${legacyBreakId}",%`])).rows[0].count).toBe(101);
   });
 
@@ -412,7 +413,10 @@ describe("authenticated selected-practice break lifecycle", () => {
     expect((await fixture.client.query(
       "SELECT count(*)::int AS count FROM public.deviation_domains WHERE deviation_id=$1", [id],
     )).rows[0].count).toBe(1);
-    expect((await call("/", "break-a")).body.map((entry: any) => entry.deviationId)).not.toContain(id);
+    const listedAfterDelete = await call("/", "break-a");
+    expect(listedAfterDelete.status).toBe(200);
+    expect(Array.isArray(listedAfterDelete.body)).toBe(true);
+    expect(listedAfterDelete.body.map((entry: any) => entry.deviationId)).not.toContain(id);
     expect((await call(`/${id}`, "break-a")).status).toBe(404);
     const afterDelete = await snapshot();
     const repeatedDelete = await call(`/${id}`, "break-a", "DELETE", { changeReason: "Synthetic repeated delete" });

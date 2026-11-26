@@ -199,7 +199,8 @@ const readColumns = {
 } as const;
 const deviationTimestampColumns=new Set(["start_at","end_at","ended_at","deleted_at"]);
 function columnProjection(kind:Kind):string {
-  return readColumns[kind].map(column=>kind==="deviation"&&deviationTimestampColumns.has(column)
+  if(kind!=="deviation")return "*";
+  return readColumns.deviation.map(column=>deviationTimestampColumns.has(column)
     ?`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${column}`
     :column).join(",");
 }
