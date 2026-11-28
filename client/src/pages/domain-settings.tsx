@@ -6,6 +6,7 @@ import type { ActivityEligibility } from "@shared/activity";
 import { personalActivityEligibilityQuery } from "@/lib/activities-api";
 import { useAuth } from "@/hooks/use-auth";
 import DomainPolicyForm, { type DomainPolicyFormProps } from "@/components/domains/domain-policy-form";
+import { DeviationSection } from "@/components/deviations/deviation-section";
 import { describeCondition, DomainsApiError, PERSONAL_DOMAINS_QUERY, personalDomainBoundaryQuery, personalDomainsQuery,
   personalPolicySelection, type PersonalDomain, type PersonalPolicyVersion } from "@/lib/domains-api";
 
@@ -262,6 +263,8 @@ export default function DomainSettingsPage() {
       {ownerId && query.isSuccess && !activeForm && <PersonalDomainActions domain={domainId ? domain : undefined}
         onAdd={() => setForm(openPersonalDomainDraft(ownerId))}
         onConfigure={() => { if (domain) setForm(openPersonalDomainDraft(ownerId, domain)); }} />}
+      {ownerId && !domainId && query.isSuccess && Array.isArray(query.data) && !activeForm &&
+        <DeviationSection personalOwnerId={ownerId} />}
       <PersonalDomainDraftSlot session={activeForm} ownerId={ownerId} domainId={domainId}
         latestPolicyVersionId={query.isSuccess ? latest?.policyVersionId ?? null : undefined}
         onSaved={saved} onCancel={() => setForm(null)} onReconcile={reconcile} />

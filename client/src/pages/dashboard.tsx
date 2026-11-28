@@ -546,7 +546,7 @@ function DashboardContent() {
           ))}
         </div>
 
-        <DeviationSection />
+        <DeviationSection entryPoint="dashboard" />
 
         <div className="mt-8 flex gap-3 px-2">
           <button

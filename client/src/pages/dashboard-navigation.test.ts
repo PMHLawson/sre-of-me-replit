@@ -88,7 +88,8 @@ vi.mock('@/components/overachievement-badge', () => ({
 }));
 
 vi.mock('@/components/deviations/deviation-section', () => ({
-  DeviationSection: () => null,
+  DeviationSection: ({ entryPoint }: { entryPoint: string }) =>
+    React.createElement('section', { 'data-testid': 'shared-deviation-entry', 'data-entry-point': entryPoint }),
 }));
 
 import Dashboard from './dashboard';
@@ -170,5 +171,11 @@ describe('Dashboard navigation semantics', () => {
     expect(card).toContain('RAMP-UP');
     expect(card).toContain('hover:bg-primary/15');
     expect(card).toContain('active:scale-[0.98]');
+  });
+
+  it('uses the shared deviation entry point on Dashboard', () => {
+    const html = renderDashboard(false);
+    expect(html).toContain('data-testid="shared-deviation-entry"');
+    expect(html).toContain('data-entry-point="dashboard"');
   });
 });

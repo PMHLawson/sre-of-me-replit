@@ -1,7 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BoundaryError } from "../lib/org-context";
-import { createPinnedOwnershipUnit } from "../lib/pinned-ownership-unit";
+import { BoundaryError, revalidate } from "../lib/org-context";
+import { readComplete } from "../lib/transaction-read-budget";
+import { createAuditService } from "../lib/audit-service";
+import { createPinnedOwnershipUnit, type OwnershipUnit } from "../lib/pinned-ownership-unit";
 import { createPolicyV2Storage } from "../storage/policy-v2-storage";
 import { ActivityTimestampSchema } from "../../shared/activity";
 
@@ -17,6 +19,7 @@ const reason = z.string().trim().min(1).max(500);
 const practiceIdsSchema = z.array(id).min(1).max(100)
   .refine(values => new Set(values).size === values.length);
 const createInput = z.object({
+  clientRequestId: z.string().uuid().optional(),
   startAt: ActivityTimestampSchema,
   endAt: ActivityTimestampSchema.nullable(),
   reason,
@@ -46,6 +49,27 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const result = schema.safeParse(value);
   if (!result.success) throw new BoundaryError(400);
   return result.data;
+}
+const submissionReceipt = z.object({
+  deviationId: z.string().uuid(),
+  intent: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+function digest(values: readonly unknown[]) {
+  return createHash("sha256").update(JSON.stringify(values)).digest("hex");
+}
+
+async function findReceipt(ownership: OwnershipUnit, eventId: string) {
+  const { tx, db, context } = ownership;
+  await revalidate(tx, db, context);
+  const rows = await readComplete(tx, `SELECT "after" AS receipt FROM public.audit_events
+    WHERE audit_event_id=$1 AND org_id=$2 AND actor_user_id=$3 AND actor_kind='user'
+    AND entity_type='deviation_create_receipts' AND action='create' LIMIT 2`,
+    [eventId, context.orgId, context.actorUserId], ["receipt"], 1);
+  if (rows.length === 0) return null;
+  const receipt = submissionReceipt.safeParse(rows[0].receipt);
+  if (!receipt.success) throw new BoundaryError(503);
+  return receipt.data;
 }
 function normalizedIds(values: string[]) {
   return values.slice().sort();
@@ -120,6 +144,17 @@ export function createDeviationServiceV2(unit: Unit, options: { clock?: () => Da
     create: (request: Request, input: unknown) => unit.run(request, async ownership => {
       const payload = parse(createInput, input);
       const practiceIds = normalizedIds(payload.practiceIds);
+      const eventId = payload.clientRequestId === undefined ? null : "break-create-v1-" +
+        digest([ownership.context.orgId, ownership.context.actorUserId, payload.clientRequestId.toLowerCase()]);
+      const intent = eventId === null ? null : digest([payload.startAt, payload.endAt,
+        payload.type, payload.reason, payload.changeReason, practiceIds]);
+      if (eventId !== null) {
+        const saved = await findReceipt(ownership, eventId);
+        if (saved) {
+          if (saved.intent !== intent) throw new BoundaryError(400);
+          return { deviationId: saved.deviationId };
+        }
+      }
       const store = createPolicyV2Storage(ownership.db, ownership.context, { clock });
       await validatePractices(store, practiceIds);
       const deviationId = randomUUID();
@@ -137,6 +172,12 @@ export function createDeviationServiceV2(unit: Unit, options: { clock?: () => Da
       }, payload.changeReason);
       for (const practiceId of practiceIds)
         await store.associations.create([deviationId, practiceId], payload.changeReason);
+      if (eventId !== null) {
+        await createAuditService(ownership.tx, ownership.db, ownership.context).append(
+          "deviation_create_receipts", [deviationId], "create", "Recorded break submission",
+          null, { deviationId, intent }, eventId);
+        return { deviationId };
+      }
       return view(row, practiceIds);
     }),
     edit: (request: Request, key: unknown, input: unknown) => unit.run(request, async ownership => {

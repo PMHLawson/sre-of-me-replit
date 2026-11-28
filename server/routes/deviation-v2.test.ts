@@ -521,4 +521,50 @@ describe("authenticated selected-practice break lifecycle", () => {
     expect(lastCommitted).toBeDefined();
     expect(currentPractices).toEqual(lastCommitted!.practiceIds.slice().sort());
   });
+
+  it("returns one receipt for concurrent deliveries and allows a separate intentional save", async () => {
+    const first = "642d736d-bd82-4404-b494-30298da4cf61";
+    const next = "2530f289-f73f-44ad-a774-fbec4b023ed5";
+    const practices = ["break-a-exercise", "break-a-meditation"];
+    const send = (key: string, actor = "break-a", selected = practices) =>
+      call("/", actor, "POST", createBody(selected, { clientRequestId: key }));
+    const count = async (query: string) => Number((await fixture.client.query(query)).rows[0].count);
+    const countRows = () => count("SELECT count(*) FROM public.deviations_v2 WHERE owner_user_id='break-a'");
+    const countEntries = () => count("SELECT count(*) FROM public.audit_events WHERE actor_user_id='break-a' AND entity_type='deviations_v2' AND action='create'");
+    const rowsBefore = await countRows(), entriesBefore = await countEntries();
+    const [a, b] = await Promise.all([send(first), send(first)]);
+    expect([a.status, b.status]).toEqual([201, 201]);
+    expect(a.body).toEqual({ deviationId: expect.any(String) });
+    expect(b.body).toEqual(a.body);
+    expect(await countRows()).toBe(rowsBefore + 1);
+    expect(await countEntries()).toBe(entriesBefore + 1);
+    const records = await snapshot();
+    expect((await send(first, "break-a", [...practices].reverse())).body).toEqual(a.body);
+    const conflict = await call("/", "break-a", "POST", createBody(practices, {
+      clientRequestId: first, reason: "Another reason",
+    }));
+    expect(conflict.status).toBe(400);
+    expect(await snapshot()).toBe(records);
+    const sameDetails = await send(next);
+    expect(sameDetails.status).toBe(201);
+    expect(sameDetails.body.deviationId).not.toBe(a.body.deviationId);
+    expect(await countRows()).toBe(rowsBefore + 2);
+    expect(await countEntries()).toBe(entriesBefore + 2);
+    const changeSelection = await call("/" + a.body.deviationId, "break-a", "PATCH", {
+      startAt, endAt, reason: "Changed selection", changeReason: "Edited after save",
+      practiceIds: ["break-a-reading", "break-a-meditation"],
+    });
+    expect(changeSelection.status).toBe(200);
+    const edited = await snapshot();
+    expect((await send(first)).body).toEqual(a.body);
+    expect(await snapshot()).toBe(edited);
+    const otherOwner = await send(first, "break-c", ["break-c-meditation"]);
+    expect(otherOwner.status).toBe(201);
+    expect(otherOwner.body.deviationId).not.toBe(a.body.deviationId);
+    expect((await call("/" + a.body.deviationId, "break-a", "DELETE", { changeReason: "Test cleanup" })).status).toBe(200);
+    const deleted = await snapshot();
+    expect((await send(first)).body).toEqual(a.body);
+    expect((await call("/" + a.body.deviationId, "break-a")).status).toBe(404);
+    expect(await snapshot()).toBe(deleted);
+  });
 });
