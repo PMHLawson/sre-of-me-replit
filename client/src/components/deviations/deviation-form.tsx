@@ -22,7 +22,8 @@ import {
 import { useAppStore, type Domain, type Deviation, type DeviationDraft, type DeviationPatch } from '@/store';
 import { DeviationText } from '@/components/session-text';
 import { isActivityOwner } from '@/lib/activities-api';
-import { allSelection, compareBreakInstants, formatBreakTime, occurrenceForInstant, orderedSelection, resolveWallTime, wallTimeCandidates } from '@/lib/deviation-time';
+import { allSelection, browserDateTimeValue, compareBreakInstants, formatBreakTime, occurrenceForInstant, orderedSelection,
+  resolveBreakTime, sameInstant, wallTimeCandidates } from '@/lib/deviation-time';
 import type { PersonalDeviation, PersonalDeviationCreate, PersonalDeviationEdit } from '@/lib/deviation-v2-api';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -308,6 +309,7 @@ export interface PersonalDeviationFormProps {
   practices: PersonalDeviationPracticeOption[];
   editing?: PersonalDeviation | null;
   onSubmit: (input: PersonalDeviationCreate | PersonalDeviationEdit) => Promise<PersonalDeviation | null>;
+  onReloadAfterUncertainCreate?: () => Promise<PersonalDeviation[]>;
 }
 
 export function PersonalDeviationPracticePicker({ practices, selectedIds, onChange, editing, disabled = false }: {
@@ -339,8 +341,10 @@ export function PersonalDeviationPracticePicker({ practices, selectedIds, onChan
       })}
       {editing?.practiceIds.filter(id => !practices.some(practice => practice.domainId === id)).map(id =>
         <label key={id} className="flex items-center gap-2 text-sm text-muted-foreground">
-          <input type="checkbox" checked onChange={event => onChange(orderedSelection(selectedIds, id, event.target.checked))} />
-          Saved practice ({id}) is unavailable; uncheck to remove it intentionally.
+          <input type="checkbox" checked={selected.has(id)} disabled={disabled}
+            onChange={event => onChange(orderedSelection(selectedIds, id, event.target.checked))}
+            data-testid={`checkbox-break-practice-${id}`} />
+          Saved practice ({id}) is unavailable; {selected.has(id) ? 'selected and will be kept' : 'unchecked and will be removed on save'}.
         </label>)}
       {!practices.some(practice => practice.active) && !editing &&
         <p className="text-sm text-muted-foreground">No active personal practices are available.</p>}
@@ -353,8 +357,20 @@ function hasUnsupportedNewPrecision(value: string): boolean {
   return (value.match(/\.(\d+)$/)?.[1].length ?? 0) > 3;
 }
 
+function samePracticeSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every(id => right.includes(id));
+}
+
+function matchesUncertainCreate(saved: PersonalDeviation, draft: PersonalDeviationCreate): boolean {
+  return saved.scope === 'selected' && saved.type === draft.type && saved.reason === draft.reason &&
+    sameInstant(saved.startAt, draft.startAt) &&
+    (saved.endAt === null ? draft.endAt === null : draft.endAt !== null && sameInstant(saved.endAt, draft.endAt)) &&
+    samePracticeSet(saved.practiceIds, draft.practiceIds);
+}
+
 /** Signed-in personal break editor. The legacy deviation form above remains unchanged. */
-export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, practices, editing, onSubmit }: PersonalDeviationFormProps) {
+export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, practices, editing, onSubmit,
+  onReloadAfterUncertainCreate }: PersonalDeviationFormProps) {
   const isEdit = !!editing;
   const [selectedIds, setSelectedIds] = useState<string[]>(() => editing?.practiceIds.slice() ?? []);
   const [reason, setReason] = useState(() => editing?.reason ?? '');
@@ -367,6 +383,10 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
   const [endOccurrence, setEndOccurrence] = useState<number | null>(() => editing?.endAt ? occurrenceForInstant(editing.endAt, timezone) : null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uncertainCreate, setUncertainCreate] = useState<PersonalDeviationCreate | null>(null);
+  const [matchingSaved, setMatchingSaved] = useState<PersonalDeviation | null>(null);
+  const [reloadMessage, setReloadMessage] = useState<string | null>(null);
+  const [reloadSaving, setReloadSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -381,21 +401,24 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
     setStartOccurrence(editing ? occurrenceForInstant(editing.startAt, timezone) : null);
     setEndOccurrence(editing?.endAt ? occurrenceForInstant(editing.endAt, timezone) : null);
     setError(null);
+    setUncertainCreate(null);
+    setMatchingSaved(null);
+    setReloadMessage(null);
   }, [open, editing?.deviationId, timezone]);
 
   if (!open || !isActivityOwner(ownerId)) return null;
   const startCandidates = wallTimeCandidates(startLocal, timezone);
   const endCandidates = endLocal ? wallTimeCandidates(endLocal, timezone) : [];
-  const startInstant = isEdit && !startDirty ? editing?.startAt ?? null :
-    resolveWallTime(startLocal, timezone, startOccurrence ?? -1);
-  const endInstant = !endLocal ? null : isEdit && !endDirty ? editing?.endAt ?? null :
-    resolveWallTime(endLocal, timezone, endOccurrence ?? -1);
+  const startInstant = resolveBreakTime(startLocal, timezone, startOccurrence, isEdit ? editing?.startAt ?? null : null, startDirty);
+  const endInstant = !endLocal ? null :
+    resolveBreakTime(endLocal, timezone, endOccurrence, isEdit ? editing?.endAt ?? null : null, endDirty);
   const tooManySavedPractices = !!editing && editing.practiceIds.length > 100;
   const tooManySelected = selectedIds.length > 100;
-  const retroactive = !!startInstant && Date.parse(startInstant) < Date.now();
+  const retroactive = startDirty && !!startInstant && Date.parse(startInstant) < Date.now();
+  const locked = submitting || !!uncertainCreate;
 
   const handleSubmit = async () => {
-    if (submitting || !isActivityOwner(ownerId)) return;
+    if (submitting || uncertainCreate || !isActivityOwner(ownerId)) return;
     setError(null);
     if (!reason.trim()) { setError('A break reason is required.'); return; }
     if (reason.trim().length > 500 || !changeReason.trim() || changeReason.trim().length > 500) {
@@ -405,6 +428,10 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
     if (tooManySelected) { setError('Choose no more than 100 practices. No saved selection will be removed automatically.'); return; }
     if (!startLocal || !startInstant) { setError('Choose a valid start time in your saved timezone.'); return; }
     if (endLocal && !endInstant) { setError('Choose a valid end time in your saved timezone.'); return; }
+    if (isEdit && editing?.endedAt && compareBreakInstants(startInstant, editing.endedAt) !== -1) {
+      setError('Start time must be before the break’s recorded actual end.');
+      return;
+    }
     if (endInstant && compareBreakInstants(endInstant, startInstant) !== 1) {
       setError('End time must be later than start time.'); return;
     }
@@ -412,8 +439,9 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
       setError('New breaks support millisecond precision. Existing finer saved times are preserved when left unchanged.'); return;
     }
     setSubmitting(true);
+    let attemptedCreate: PersonalDeviationCreate | null = null;
     try {
-      const input = isEdit ? {
+      const input: PersonalDeviationCreate | PersonalDeviationEdit = isEdit ? {
         startAt: startInstant,
         endAt: endInstant,
         reason: reason.trim(),
@@ -427,17 +455,50 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
         practiceIds: selectedIds,
         type: 'stitch' as const,
       };
+      if (!isEdit) attemptedCreate = input as PersonalDeviationCreate;
       const saved = await onSubmit(input);
+      if (!isActivityOwner(ownerId)) return;
       if (!saved) {
-        setError('The save was not confirmed. Your entries are still here; refresh the saved breaks before trying again.');
+        if (!isEdit) {
+          setUncertainCreate(input as PersonalDeviationCreate);
+          setError('The create request was not confirmed. Your draft is preserved; reload saved breaks before another attempt.');
+        } else setError('The save was not confirmed. Your entries are still here; refresh the saved breaks before trying again.');
         return;
       }
-      if (!isActivityOwner(ownerId)) return;
       onOpenChange(false);
     } catch {
-      setError('The break could not be confirmed. Your entries are still here; refresh saved breaks before trying again.');
+      if (!isActivityOwner(ownerId)) return;
+      if (attemptedCreate) setUncertainCreate(attemptedCreate);
+      setError(isEdit
+        ? 'The break could not be confirmed. Your entries are still here; refresh saved breaks before trying again.'
+        : 'The create request was not confirmed. Your draft is preserved; reload saved breaks before another attempt.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const reloadAfterUncertainCreate = async () => {
+    if (!uncertainCreate || !onReloadAfterUncertainCreate || reloadSaving || !isActivityOwner(ownerId)) return;
+    setReloadSaving(true);
+    setReloadMessage(null);
+    setMatchingSaved(null);
+    try {
+      const rows = await onReloadAfterUncertainCreate();
+      if (!isActivityOwner(ownerId)) return;
+      const matching = rows.find(row => matchesUncertainCreate(row, uncertainCreate));
+      if (matching) {
+        setMatchingSaved(matching);
+        setReloadMessage('A matching break is in the refreshed saved list. Review it before taking any further action.');
+        setError(null);
+      } else {
+        setUncertainCreate(null);
+        setError(null);
+        setReloadMessage('Saved breaks were reloaded; no exact match was found. Your draft is preserved and can be submitted again.');
+      }
+    } catch {
+      if (isActivityOwner(ownerId)) setReloadMessage('Saved breaks could not be reloaded. Your draft is preserved and resubmission remains blocked.');
+    } finally {
+      setReloadSaving(false);
     }
   };
 
@@ -450,41 +511,47 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
       </label>)}
     </fieldset> : null;
 
-  return <Dialog open={open} onOpenChange={value => !submitting && onOpenChange(value)}>
+  return <Dialog open={open} onOpenChange={value => !submitting && (!uncertainCreate || !!matchingSaved) && onOpenChange(value)}>
     <DialogContent data-testid="dialog-personal-break-form">
       <DialogHeader>
         <DialogTitle>{isEdit ? 'Edit personal break' : 'Record a personal break'}</DialogTitle>
         <DialogDescription>Choose your practices and exact times in your saved timezone, {timezone}. Breaks may overlap.</DialogDescription>
       </DialogHeader>
       <PersonalDeviationPracticePicker practices={practices} selectedIds={selectedIds}
-        onChange={setSelectedIds} editing={editing} disabled={submitting} />
+        onChange={setSelectedIds} editing={editing} disabled={locked} />
       {tooManySavedPractices && <p role="status">This break has {editing.practiceIds.length} saved practices. They are all kept selected. Remove selections intentionally to edit; none will be trimmed automatically.</p>}
       <div className="space-y-2">
         <Label htmlFor="personal-break-reason">Reason for this break</Label>
         <Textarea id="personal-break-reason" value={reason} onChange={event => setReason(event.target.value)}
-          maxLength={500} required rows={3} disabled={submitting} data-testid="input-personal-break-reason" />
+          maxLength={500} required rows={3} disabled={locked} data-testid="input-personal-break-reason" />
       </div>
       <div className="space-y-2">
         <Label htmlFor="personal-break-change-reason">{isEdit ? 'Why are you changing this break?' : 'Why are you recording this break?'}</Label>
         <Textarea id="personal-break-change-reason" value={changeReason} onChange={event => setChangeReason(event.target.value)}
-          maxLength={500} required rows={2} disabled={submitting} data-testid="input-personal-break-change-reason" />
+          maxLength={500} required rows={2} disabled={locked} data-testid="input-personal-break-change-reason" />
         <p className="text-xs text-muted-foreground">This explanation is stored in the break's audit history, separately from its reason.</p>
       </div>
       <div className="grid grid-cols-1 gap-3">
         <div className="space-y-2">
           <Label htmlFor="personal-break-start">Start in {timezone}</Label>
-          <Input id="personal-break-start" type="datetime-local" step="0.000001" value={startLocal}
-            disabled={submitting} onChange={event => { setStartDirty(true); setStartOccurrence(null); setStartLocal(event.target.value); }}
+          <Input id="personal-break-start" type="datetime-local" step="0.001" value={browserDateTimeValue(startLocal)}
+            disabled={locked} onChange={event => { setStartDirty(true); setStartOccurrence(null); setStartLocal(event.target.value); }}
             data-testid="input-personal-break-start" />
-          {exactTimeChoices('Start', startCandidates, startOccurrence, setStartOccurrence, 'personal-break-start-occurrence')}
+          {isEdit && !startDirty && editing && <p className="text-xs font-mono text-muted-foreground"
+            data-testid="personal-break-start-exact-value">Saved exact time: {startLocal} ({timezone})</p>}
+          <p className="text-xs text-muted-foreground">Saved fractional seconds stay exact unless you change this field.</p>
+          {exactTimeChoices('Start', startCandidates, startOccurrence, index => { setStartDirty(true); setStartOccurrence(index); }, 'personal-break-start-occurrence')}
           {startLocal && !startCandidates.length && <p role="alert">This local time does not exist in {timezone}. Choose another time.</p>}
         </div>
         <div className="space-y-2">
           <Label htmlFor="personal-break-end">End (optional) in {timezone}</Label>
-          <Input id="personal-break-end" type="datetime-local" step="0.000001" value={endLocal}
-            disabled={submitting} onChange={event => { setEndDirty(true); setEndOccurrence(null); setEndLocal(event.target.value); }}
+          <Input id="personal-break-end" type="datetime-local" step="0.001" value={browserDateTimeValue(endLocal)}
+            disabled={locked} onChange={event => { setEndDirty(true); setEndOccurrence(null); setEndLocal(event.target.value); }}
             data-testid="input-personal-break-end" />
-          {exactTimeChoices('End', endCandidates, endOccurrence, setEndOccurrence, 'personal-break-end-occurrence')}
+          {isEdit && !endDirty && editing?.endAt && <p className="text-xs font-mono text-muted-foreground"
+            data-testid="personal-break-end-exact-value">Saved exact time: {endLocal} ({timezone})</p>}
+          <p className="text-xs text-muted-foreground">Saved fractional seconds stay exact unless you change this field.</p>
+          {exactTimeChoices('End', endCandidates, endOccurrence, index => { setEndDirty(true); setEndOccurrence(index); }, 'personal-break-end-occurrence')}
           {endLocal && !endCandidates.length && <p role="alert">This local time does not exist in {timezone}. Choose another time.</p>}
         </div>
       </div>
@@ -492,9 +559,27 @@ export function PersonalDeviationForm({ open, onOpenChange, ownerId, timezone, p
         Retroactive entry: this break starts in the past.
       </p>}
       {error && <p role="alert" data-testid="personal-break-form-error">{error}</p>}
+      {uncertainCreate && <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm" data-testid="personal-break-uncertain-create">
+        <p>The create request may have saved, but its response was not confirmed. Your draft is preserved and another submission is blocked until saved breaks are reloaded.</p>
+        {reloadMessage && <p role="status" className="mt-2" data-testid="personal-break-reload-status">{reloadMessage}</p>}
+        {matchingSaved && <div className="mt-2 rounded border p-2">
+          <p className="font-medium">Possible saved match: {matchingSaved.reason}</p>
+          <p>{formatBreakTime(matchingSaved.startAt, timezone)} – {matchingSaved.endAt ? formatBreakTime(matchingSaved.endAt, timezone) : 'No planned end'} ({timezone})</p>
+          <p>{matchingSaved.practiceIds.map(id => practices.find(practice => practice.domainId === id)?.displayName ?? `Saved practice (${id})`).join(', ')}</p>
+          <Button type="button" className="mt-2" onClick={() => onOpenChange(false)} data-testid="button-close-matched-break">
+            Close and review saved break
+          </Button>
+        </div>}
+        {!matchingSaved && <Button type="button" variant="outline" className="mt-2" disabled={reloadSaving || !onReloadAfterUncertainCreate}
+          onClick={() => void reloadAfterUncertainCreate()} data-testid="button-reload-uncertain-breaks">
+          {reloadSaving ? 'Reloading…' : 'Reload saved breaks before retrying'}
+        </Button>}
+      </div>}
+      {!uncertainCreate && reloadMessage && <p role="status" data-testid="personal-break-reload-status">{reloadMessage}</p>}
       <DialogFooter>
-        <Button variant="outline" disabled={submitting} onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button disabled={submitting || tooManySelected || !isActivityOwner(ownerId)}
+        <Button variant="outline" disabled={submitting || (!!uncertainCreate && !matchingSaved)}
+          onClick={() => onOpenChange(false)}>{matchingSaved ? 'Close form' : 'Cancel'}</Button>
+        <Button disabled={submitting || !!uncertainCreate || tooManySelected || !isActivityOwner(ownerId)}
           onClick={() => void handleSubmit()} data-testid="button-save-personal-break">
           {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Save break'}
         </Button>

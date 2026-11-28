@@ -44,6 +44,11 @@ export function formatBreakTime(instant: string | null, timezone: string): strin
   return `${parts}.${digits}`;
 }
 
+/** Native datetime-local controls in Chromium accept millisecond precision, not microseconds. */
+export function browserDateTimeValue(value: string): string {
+  return value.replace(/\.(\d{3})\d+$/, ".$1");
+}
+
 function parseWallTime(value: string) {
   const match = WALL_TIME.exec(value);
   if (!match) return null;
@@ -96,6 +101,13 @@ export function resolveWallTime(value: string, timezone: string, occurrence = 0)
   const candidates = wallTimeCandidates(value, timezone);
   if (candidates.length === 1) return candidates[0].instant;
   return candidates.length > 1 ? candidates[occurrence]?.instant ?? null : null;
+}
+
+/** Keep an unchanged saved instant verbatim; otherwise honor the chosen fold occurrence. */
+export function resolveBreakTime(value: string, timezone: string, occurrence: number | null,
+  originalInstant: string | null, changed: boolean): string | null {
+  if (originalInstant && !changed) return originalInstant;
+  return resolveWallTime(value, timezone, occurrence ?? -1);
 }
 
 export function sameInstant(left: string, right: string): boolean {

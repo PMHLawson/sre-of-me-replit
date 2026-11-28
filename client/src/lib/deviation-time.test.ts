@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  allSelection, compareBreakInstants, formatBreakTime, orderedSelection,
+  allSelection, compareBreakInstants, formatBreakTime, orderedSelection, resolveBreakTime,
   sameInstant, wallTimeCandidates,
 } from "./deviation-time";
 
@@ -23,6 +23,13 @@ describe("saved-timezone break time conversion", () => {
     const candidates = wallTimeCandidates(local, "America/New_York");
     expect(candidates[1].instant).toBe(original);
     expect(sameInstant(candidates[1].instant, original)).toBe(true);
+  });
+
+  it("preserves an untouched repeated-hour instant and saves the explicitly selected occurrence", () => {
+    const original = "2026-11-01T05:30:12.123456Z";
+    const local = formatBreakTime(original, "America/New_York");
+    expect(resolveBreakTime(local, "America/New_York", 1, original, false)).toBe(original);
+    expect(resolveBreakTime(local, "America/New_York", 1, original, true)).toBe("2026-11-01T06:30:12.123456Z");
   });
 
   it("compares equivalent offset representations at microsecond precision", () => {

@@ -44,11 +44,10 @@ function BreakCard({ deviation, names, timezone, onEdit, onEnd, onDelete }: {
 }) {
   const selectedNames = deviation.scope === "all" ? ["All practices"] :
     deviation.practiceIds.map(id => names.get(id) ?? `Saved practice (${id})`);
-  const retroactive = Date.parse(deviation.startAt) < Date.now();
+  const futureStart = Date.parse(deviation.startAt) > Date.now();
   return <article className="rounded-2xl border border-border/60 bg-card p-4 space-y-3" data-testid={`personal-break-${deviation.deviationId}`}>
     <div className="flex flex-wrap items-center gap-2">
       <h3 className="font-semibold">{deviation.reason}</h3>
-      {retroactive && <span className="rounded-full bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300">Retroactive</span>}
       {deviation.endedAt && <span className="rounded-full bg-muted px-2 py-1 text-xs">Ended</span>}
     </div>
     <p className="font-mono text-sm">{formatBreakTime(deviation.startAt, timezone)} – {deviation.endAt ? formatBreakTime(deviation.endAt, timezone) : "No planned end"} ({timezone})</p>
@@ -62,7 +61,7 @@ function BreakCard({ deviation, names, timezone, onEdit, onEnd, onDelete }: {
         <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
       </Button>
       {deviation.scope !== "selected" && <p className="text-xs text-muted-foreground">This saved break uses the older all-practices scope and remains endable and deletable.</p>}
-      {!deviation.endedAt && <Button size="sm" variant="outline" onClick={() => onEnd(deviation)}
+      {!deviation.endedAt && !futureStart && <Button size="sm" variant="outline" onClick={() => onEnd(deviation)}
         data-testid={`button-end-personal-break-${deviation.deviationId}`}><X className="mr-1 h-3.5 w-3.5" /> End now</Button>}
       <Button size="sm" variant="ghost" className="text-status-critical" onClick={() => onDelete(deviation)}
         data-testid={`button-delete-personal-break-${deviation.deviationId}`}><Trash2 className="mr-1 h-3.5 w-3.5" /> Delete</Button>
@@ -136,6 +135,12 @@ export function PersonalDeviationSection({ ownerId }: { ownerId: string }) {
     await queryClient.invalidateQueries({ queryKey: [PERSONAL_DEVIATIONS_QUERY, ownerId] });
     return isActivityOwner(ownerId) ? saved : null;
   };
+  const reloadSavedBreaks = async (): Promise<PersonalDeviation[]> => {
+    if (!isActivityOwner(ownerId)) throw new PersonalDeviationApiError(401);
+    const rows = await queryClient.fetchQuery({ ...personalDeviationsQuery(ownerId), staleTime: 0 });
+    if (!isActivityOwner(ownerId)) throw new PersonalDeviationApiError(401);
+    return rows;
+  };
   const runLifecycle = async (event: React.MouseEvent, operation: "end" | "delete") => {
     event.preventDefault();
     if (!confirmation || confirmation.operation !== operation || actionSaving || !changeReason.trim() || !isActivityOwner(ownerId)) return;
@@ -157,6 +162,7 @@ export function PersonalDeviationSection({ ownerId }: { ownerId: string }) {
   if (!ownsCurrentAccount) return null;
   const retry = () => {
     void domainsQuery.refetch(); void boundaryQuery.refetch(); void deviationsQuery.refetch();
+    for (const query of availabilityQueries) void query.refetch();
   };
   if (domainsQuery.isPending || boundaryQuery.isPending || deviationsQuery.isPending ||
     (domainsQuery.isSuccess && availabilityQueries.some(query => query.isPending)))
@@ -187,7 +193,8 @@ export function PersonalDeviationSection({ ownerId }: { ownerId: string }) {
       onEnd={row => { setConfirmation({ operation: "end", deviation: row }); setChangeReason(""); setActionError(null); }}
       onDelete={row => { setConfirmation({ operation: "delete", deviation: row }); setChangeReason(""); setActionError(null); }} />)}</div>}
     <PersonalDeviationForm key={`${ownerId}-${editing?.deviationId ?? "new"}`} open={formOpen} onOpenChange={setFormOpen}
-      ownerId={ownerId} timezone={timezone!} practices={practices} editing={editing} onSubmit={submitForm} />
+      ownerId={ownerId} timezone={timezone!} practices={practices} editing={editing} onSubmit={submitForm}
+      onReloadAfterUncertainCreate={reloadSavedBreaks} />
     <AlertDialog open={!!confirmation} onOpenChange={open => { if (!open && !actionSaving) setConfirmation(null); }}>
       <AlertDialogContent>
         <AlertDialogHeader>

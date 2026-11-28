@@ -32,4 +32,37 @@ describe("personal break section", () => {
     expect(html).not.toContain('data-testid="section-deviations"');
     client.clear();
   });
+
+  it("keeps ordinary historical entries unlabelled and offers deletion rather than End now for a future break", () => {
+    bindActivityOwner("owner-a");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const domains = ["fitness"].map(domainId => ({
+      domainId, displayName: "Fitness", scoreAvailability: "not_calculated" as const,
+      currentPolicyVersionId: null, policyVersions: [],
+    }));
+    client.setQueryData(personalDomainsQuery("owner-a").queryKey, domains);
+    client.setQueryData(personalDomainBoundaryQuery("owner-a").queryKey, { timezone: "America/New_York", dayStartHour: 6 });
+    client.setQueryData(personalActivityEligibilityQuery("owner-a", "fitness").queryKey, {
+      domainId: "fitness", canCreate: true, reason: null, effectivePolicyVersionId: null,
+    });
+    client.setQueryData(personalDeviationsQuery("owner-a").queryKey, [
+      {
+        deviationId: "ordinary-past", startAt: "2025-01-01T12:00:00.000Z", endAt: "2025-01-02T12:00:00.000Z",
+        endedAt: null, deletedAt: null, scope: "selected", type: "stitch", reason: "Ordinary past break",
+        policy: {}, provenance: {}, practiceIds: ["fitness"],
+      },
+      {
+        deviationId: "scheduled-future", startAt: "2035-01-01T12:00:00.000Z", endAt: "2035-01-02T12:00:00.000Z",
+        endedAt: null, deletedAt: null, scope: "selected", type: "stitch", reason: "Scheduled break",
+        policy: {}, provenance: {}, practiceIds: ["fitness"],
+      },
+    ]);
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}>
+      <DeviationSection personalOwnerId="owner-a" />
+    </QueryClientProvider>);
+    expect(html).not.toContain("Retroactive");
+    expect(html).not.toContain('data-testid="button-end-personal-break-scheduled-future"');
+    expect(html).toContain('data-testid="button-delete-personal-break-scheduled-future"');
+    client.clear();
+  });
 });
