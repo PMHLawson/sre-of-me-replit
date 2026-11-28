@@ -1,9 +1,24 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bindActivityOwner } from "@/lib/activities-api";
 import type { PersonalDeviation } from "@/lib/deviation-v2-api";
 import { PersonalDeviationForm, PersonalDeviationPracticePicker, type PersonalDeviationPracticeOption } from "./deviation-form";
+
+vi.mock("@/components/ui/dialog", async () => {
+  const { createElement, Fragment } = await import("react");
+  type DialogProps = { open?: boolean; children?: React.ReactNode; [key: string]: unknown };
+  const wrapper = (tag: string) => ({ children, ...props }: DialogProps) =>
+    createElement(tag, props as React.HTMLAttributes<HTMLElement>, children);
+  return {
+    Dialog: ({ open, children }: DialogProps) => open ? createElement(Fragment, null, children) : null,
+    DialogContent: wrapper("div"),
+    DialogHeader: wrapper("header"),
+    DialogTitle: wrapper("h2"),
+    DialogFooter: wrapper("footer"),
+    DialogDescription: wrapper("p"),
+  };
+});
 
 afterEach(() => bindActivityOwner(null));
 
@@ -36,11 +51,22 @@ describe("personal break practice picker", () => {
     expect(html).toContain('type="checkbox" disabled=""');
   });
 
-  it("renders a precise browser step and does not label the default current-time entry retroactive", () => {
+  it("renders millisecond browser controls and does not label the default current-time entry retroactive", () => {
     bindActivityOwner("owner-a");
     const html = renderToStaticMarkup(<PersonalDeviationForm open onOpenChange={() => {}} ownerId="owner-a"
       timezone="America/New_York" practices={practices} onSubmit={async () => null} />);
-    expect(html.match(/type="datetime-local" step="0\.000001"/g)).toHaveLength(2);
+    const inputTag = (testId: string) =>
+      html.match(new RegExp(`<input\\b(?=[^>]*data-testid="${testId}")[^>]*>`))?.[0] ?? "";
+    const attribute = (tag: string, name: string) =>
+      tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1] ?? "";
+    const startInput = inputTag("input-personal-break-start");
+    const endInput = inputTag("input-personal-break-end");
+    expect(startInput).not.toBe("");
+    expect(endInput).not.toBe("");
+    expect(attribute(startInput, "step")).toBe("0.001");
+    expect(attribute(endInput, "step")).toBe("0.001");
+    expect(attribute(startInput, "value")).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(attribute(endInput, "value")).toBe("");
     expect(html).toContain("Saved fractional seconds stay exact unless you change this field.");
     expect(html).not.toContain('data-testid="personal-break-retroactive"');
   });
@@ -62,6 +88,10 @@ describe("personal break practice picker", () => {
     };
     const html = renderToStaticMarkup(<PersonalDeviationForm open onOpenChange={() => {}} ownerId="owner-a"
       timezone="America/New_York" practices={practices} editing={editing} onSubmit={async () => editing} />);
+    const browserValues = Array.from(html.matchAll(
+      /<input\b[^>]*type="datetime-local"[^>]*value="([^"]*)"/g,
+    ), match => match[1]);
+    expect(browserValues).toEqual(["2026-11-01T01:30:12.123", "2026-11-01T02:30:12.654"]);
     expect(html).toContain("Saved exact time: 2026-11-01T01:30:12.123456 (America/New_York)");
     expect(html).toContain("Saved exact time: 2026-11-01T02:30:12.654321 (America/New_York)");
   });
