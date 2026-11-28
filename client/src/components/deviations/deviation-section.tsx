@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { DeviationForm } from './deviation-form';
+import { PersonalDeviationSection } from './personal-deviation-section';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
   'martial-arts': 'Martial Arts',
@@ -118,7 +119,7 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
   );
 }
 
-export function DeviationSection() {
+function LegacyDeviationSection() {
   const dataOwner = useAppStore(s => s.dataOwner);
   const deviations = useAppStore((s) => s.deviations);
   const deviationsLoaded = useAppStore((s) => s.deviationsLoaded);
@@ -366,4 +367,9 @@ export function DeviationSection() {
       </AlertDialog>
     </section>
   );
+}
+
+export function DeviationSection({ personalOwnerId }: { personalOwnerId?: string } = {}) {
+  if (personalOwnerId) return <PersonalDeviationSection key={personalOwnerId} ownerId={personalOwnerId} />;
+  return <LegacyDeviationSection />;
 }
