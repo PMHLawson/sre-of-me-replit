@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { DeviationForm } from './deviation-form';
 import { PersonalDeviationSection } from './personal-deviation-section';
+import { isActivityOwner } from '@/lib/activities-api';
 
 const DOMAIN_LABEL: Record<Domain, string> = {
   'martial-arts': 'Martial Arts',
@@ -119,7 +120,10 @@ function DeviationRow({ deviation, variant, onEdit, onEnd, onDelete }: Deviation
   );
 }
 
-function LegacyDeviationSection() {
+function LegacyDeviationSection({ personalOwnerId, entryPoint }: {
+  personalOwnerId?: string;
+  entryPoint: 'dashboard' | 'history';
+}) {
   const dataOwner = useAppStore(s => s.dataOwner);
   const deviations = useAppStore((s) => s.deviations);
   const deviationsLoaded = useAppStore((s) => s.deviationsLoaded);
@@ -188,7 +192,7 @@ function LegacyDeviationSection() {
   };
 
   return (
-    <section className="space-y-3" data-testid="section-deviations">
+    <section className="space-y-3" data-testid="section-deviations" data-entry-point={entryPoint}>
       <div className="flex items-center justify-between px-2">
         <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-widest">
           Deviations
@@ -266,15 +270,33 @@ function LegacyDeviationSection() {
         </>
       )}
 
-      <button className="underline" onClick={() => setBrowse(v => !v)}>{browse ? 'Hide' : 'Browse'} saved deviation history</button>
-      {browse && <div className="space-y-3" data-testid="deviation-history">
-        <p>{pages.length} shown deviations{!complete ? ' · more may be available' : ''}</p>
-        {loading && <p role="status">Loading…</p>}
-        {error && <div role="alert"><p>{error}</p><button onClick={() => void fetchPages(loaded)}>Try again</button></div>}
-        {pages.map(d => <div key={d.id} className="border p-3 rounded"><p>{DOMAIN_LABEL[d.domain as Domain]} · {formatRange(d.startAt, d.endAt)}</p>
-          <DeviationText deviation={d} /></div>)}
-        {loaded && !complete && <button disabled={loading} onClick={() => void fetchPages(true)}>Load more deviations</button>}
-        {loaded && !error && !pages.length && <p>No saved deviations.</p>}
+      <button
+        type="button"
+        className="underline"
+        onClick={() => setBrowse(v => !v)}
+        aria-expanded={browse}
+        aria-controls={`deviation-history-${entryPoint}`}
+        data-testid="button-browse-deviation-history"
+      >
+        {browse ? 'Hide' : 'Browse'} saved deviation history
+      </button>
+      {browse && <div className="space-y-5" id={`deviation-history-${entryPoint}`} data-testid="deviation-history">
+        <section className="space-y-3" data-testid="saved-declared-deviation-history" aria-labelledby={`declared-history-${entryPoint}`}>
+          <h3 id={`declared-history-${entryPoint}`} className="text-sm font-semibold">Declared deviations</h3>
+          <p>{pages.length} shown deviations{!complete ? ' · more may be available' : ''}</p>
+          {loading && <p role="status">Loading…</p>}
+          {error && <div role="alert"><p>{error}</p><button onClick={() => void fetchPages(loaded)}>Try again</button></div>}
+          {pages.map(d => <div key={d.id} className="border p-3 rounded"><p>{DOMAIN_LABEL[d.domain as Domain]} · {formatRange(d.startAt, d.endAt)}</p>
+            <DeviationText deviation={d} /></div>)}
+          {loaded && !complete && <button disabled={loading} onClick={() => void fetchPages(true)}>Load more deviations</button>}
+          {loaded && !error && !pages.length && <p>No saved deviations.</p>}
+        </section>
+        {personalOwnerId && <section className="space-y-3 border-t border-border/50 pt-5" data-testid="personal-break-entry">
+          <p className="text-sm text-muted-foreground">
+            Personal breaks use selected practices and are separate from declared deviations.
+          </p>
+          <PersonalDeviationSection key={personalOwnerId} ownerId={personalOwnerId} createLabel="Record deviation" />
+        </section>}
       </div>}
       <DeviationForm
         open={formOpen}
@@ -369,7 +391,22 @@ function LegacyDeviationSection() {
   );
 }
 
-export function DeviationSection({ personalOwnerId }: { personalOwnerId?: string } = {}) {
-  if (personalOwnerId) return <PersonalDeviationSection key={personalOwnerId} ownerId={personalOwnerId} />;
-  return <LegacyDeviationSection />;
+export function verifiedPersonalDeviationOwner(
+  dataOwner: string | null | undefined,
+  demo: boolean,
+  requestedOwnerId?: string,
+): string | undefined {
+  const ownerId = requestedOwnerId ?? dataOwner ?? undefined;
+  if (demo || !ownerId || (dataOwner && ownerId !== dataOwner) || !isActivityOwner(ownerId)) return undefined;
+  return ownerId;
+}
+
+export function DeviationSection({ personalOwnerId, entryPoint = 'dashboard' }: {
+  personalOwnerId?: string;
+  entryPoint?: 'dashboard' | 'history';
+} = {}) {
+  const dataOwner = useAppStore(state => state.dataOwner);
+  const demo = useAppStore(state => state.demoState !== 'default');
+  const verifiedOwnerId = verifiedPersonalDeviationOwner(dataOwner, demo, personalOwnerId);
+  return <LegacyDeviationSection personalOwnerId={verifiedOwnerId} entryPoint={entryPoint} />;
 }

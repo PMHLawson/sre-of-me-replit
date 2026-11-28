@@ -231,7 +231,7 @@ export default function History() {
         )}
         <p className="text-sm text-muted-foreground">Practice records include saved future dates. Deviation history is listed separately below.
           Loading older records does not change current scores.</p>
-        <DeviationSection />
+        <DeviationSection entryPoint="history" />
         <RecentlyDeletedSection />
       </main>
 

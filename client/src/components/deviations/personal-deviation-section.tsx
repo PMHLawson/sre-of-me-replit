@@ -70,7 +70,10 @@ function BreakCard({ deviation, names, timezone, onEdit, onEnd, onDelete }: {
 }
 
 /** V2 signed-in break lifecycle; the legacy deviation surface remains separate. */
-export function PersonalDeviationSection({ ownerId }: { ownerId: string }) {
+export function PersonalDeviationSection({ ownerId, createLabel = "Record break" }: {
+  ownerId: string;
+  createLabel?: string;
+}) {
   const queryClient = useQueryClient();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<PersonalDeviation | null>(null);
@@ -180,7 +183,7 @@ export function PersonalDeviationSection({ ownerId }: { ownerId: string }) {
       <div><h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Personal breaks</h2>
         <p className="text-xs text-muted-foreground">Times use your saved timezone: {timezone}.</p></div>
       <Button size="sm" onClick={openCreate} disabled={!practices.some(practice => practice.active)} data-testid="button-create-personal-break">
-        <Plus className="mr-1 h-4 w-4" /> Record break
+        <Plus className="mr-1 h-4 w-4" /> {createLabel}
       </Button>
     </div>
     {!practices.some(practice => practice.active) && <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">

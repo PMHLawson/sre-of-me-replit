@@ -5,12 +5,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { bindActivityOwner, personalActivityEligibilityQuery } from "@/lib/activities-api";
 import { personalDomainBoundaryQuery, personalDomainsQuery } from "@/lib/domains-api";
 import { personalDeviationsQuery } from "@/lib/deviation-v2-api";
-import { DeviationSection } from "./deviation-section";
+import { useAppStore } from "@/store";
+import { DeviationSection, verifiedPersonalDeviationOwner } from "./deviation-section";
+import { PersonalDeviationSection } from "./personal-deviation-section";
 
-afterEach(() => bindActivityOwner(null));
+afterEach(() => {
+  bindActivityOwner(null);
+  useAppStore.setState({ dataOwner: null, demoState: "default" });
+});
 
-describe("personal break section", () => {
-  it("mounts only for the verified personal route and uses the saved account timezone", () => {
+describe("personal break entry points", () => {
+  it("keeps the Your domains shortcut and saved timezone on the same shared section", () => {
     bindActivityOwner("owner-a");
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     const domains = ["martial-arts", "meditation", "fitness", "music", "custom-cooking"].map((domainId, index) => ({
@@ -24,13 +29,39 @@ describe("personal break section", () => {
       domainId: domain.domainId, canCreate: true, reason: null, effectivePolicyVersionId: null,
     });
     const html = renderToStaticMarkup(<QueryClientProvider client={client}>
-      <DeviationSection personalOwnerId="owner-a" />
+      <PersonalDeviationSection ownerId="owner-a" />
     </QueryClientProvider>);
     expect(html).toContain('data-testid="section-personal-breaks"');
     expect(html).toContain("America/New_York");
     expect(html).toContain("Record break");
-    expect(html).not.toContain('data-testid="section-deviations"');
     client.clear();
+  });
+
+  it("keeps declared deviations beside a lazy personal-break entry in the expanded history", () => {
+    bindActivityOwner("owner-a");
+    useAppStore.setState({ dataOwner: "owner-a", demoState: "default" });
+    const html = renderToStaticMarkup(<DeviationSection entryPoint="dashboard" />);
+    expect(html).toContain('data-testid="section-deviations"');
+    expect(html).toContain('data-entry-point="dashboard"');
+    expect(html).toContain('data-testid="button-declare-deviation"');
+    expect(html).toContain("Browse saved deviation history");
+    expect(html).not.toContain('data-testid="section-personal-breaks"');
+    expect(html).not.toContain('data-testid="personal-break-entry"');
+  });
+
+  it("only resolves the currently bound owner outside demo mode", () => {
+    bindActivityOwner("owner-a");
+    expect(verifiedPersonalDeviationOwner("owner-a", false)).toBe("owner-a");
+    expect(verifiedPersonalDeviationOwner("owner-b", false)).toBeUndefined();
+    expect(verifiedPersonalDeviationOwner("owner-a", true)).toBeUndefined();
+    expect(verifiedPersonalDeviationOwner("owner-a", false, "owner-b")).toBeUndefined();
+
+    bindActivityOwner("owner-b");
+    expect(verifiedPersonalDeviationOwner("owner-a", false)).toBeUndefined();
+    expect(verifiedPersonalDeviationOwner("owner-b", false)).toBe("owner-b");
+
+    bindActivityOwner(null);
+    expect(verifiedPersonalDeviationOwner("owner-b", false)).toBeUndefined();
   });
 
   it("keeps ordinary historical entries unlabelled and offers deletion rather than End now for a future break", () => {
@@ -58,7 +89,7 @@ describe("personal break section", () => {
       },
     ]);
     const html = renderToStaticMarkup(<QueryClientProvider client={client}>
-      <DeviationSection personalOwnerId="owner-a" />
+      <PersonalDeviationSection ownerId="owner-a" />
     </QueryClientProvider>);
     expect(html).not.toContain("Retroactive");
     expect(html).not.toContain('data-testid="button-end-personal-break-scheduled-future"');

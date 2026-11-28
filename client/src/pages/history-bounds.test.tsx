@@ -49,4 +49,8 @@ describe("history presentation completeness", () => {
     const output = html();
     expect(output).toContain("Could not load practice history"); expect(output).not.toContain("No active practice records.");
   });
+  it("uses the shared deviation entry point on History", () => {
+    expect(html()).toContain('data-entry-point="history"');
+    expect(html()).toContain("Browse saved deviation history");
+  });
 });
