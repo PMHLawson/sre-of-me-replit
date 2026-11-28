@@ -51,6 +51,16 @@ describe("personal break practice picker", () => {
     expect(html).toContain('type="checkbox" disabled=""');
   });
 
+  it("shows an over-limit selection count without trimming the selection", () => {
+    const savedSelections = [...practices.map(practice => practice.domainId),
+      ...Array.from({ length: 96 }, (_, index) => `saved-practice-${index}`)];
+    const html = renderToStaticMarkup(<PersonalDeviationPracticePicker practices={practices}
+      selectedIds={savedSelections} onChange={() => {}} />);
+    expect(savedSelections).toHaveLength(101);
+    expect(html).toContain("Selected: 101 practices (limit 100).");
+    expect(html).toContain("Choose which 100 or fewer practices to keep. This selection has not been trimmed.");
+  });
+
   it("renders millisecond browser controls and does not label the default current-time entry retroactive", () => {
     bindActivityOwner("owner-a");
     const html = renderToStaticMarkup(<PersonalDeviationForm open onOpenChange={() => {}} ownerId="owner-a"

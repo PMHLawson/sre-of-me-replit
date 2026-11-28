@@ -281,22 +281,23 @@ function LegacyDeviationSection({ personalOwnerId, entryPoint }: {
         {browse ? 'Hide' : 'Browse'} saved deviation history
       </button>
       {browse && <div className="space-y-5" id={`deviation-history-${entryPoint}`} data-testid="deviation-history">
+        {personalOwnerId && <section className="space-y-3 border-t border-border/50 pt-5" data-testid="personal-break-entry">
+          <p className="text-sm text-muted-foreground">
+            Personal breaks apply to selected practices and are separate from single-domain declarations.
+          </p>
+          <PersonalDeviationSection key={personalOwnerId} ownerId={personalOwnerId}
+            sectionLabel="Deviations for selected practices" createLabel="Record deviation" />
+        </section>}
         <section className="space-y-3" data-testid="saved-declared-deviation-history" aria-labelledby={`declared-history-${entryPoint}`}>
-          <h3 id={`declared-history-${entryPoint}`} className="text-sm font-semibold">Declared deviations</h3>
-          <p>{pages.length} shown deviations{!complete ? ' · more may be available' : ''}</p>
+          <h3 id={`declared-history-${entryPoint}`} className="text-sm font-semibold">Single-domain declarations</h3>
+          <p>{pages.length} shown single-domain declarations{!complete ? ' · more may be available' : ''}</p>
           {loading && <p role="status">Loading…</p>}
           {error && <div role="alert"><p>{error}</p><button onClick={() => void fetchPages(loaded)}>Try again</button></div>}
           {pages.map(d => <div key={d.id} className="border p-3 rounded"><p>{DOMAIN_LABEL[d.domain as Domain]} · {formatRange(d.startAt, d.endAt)}</p>
             <DeviationText deviation={d} /></div>)}
           {loaded && !complete && <button disabled={loading} onClick={() => void fetchPages(true)}>Load more deviations</button>}
-          {loaded && !error && !pages.length && <p>No saved deviations.</p>}
+          {loaded && !error && !pages.length && <p>No saved single-domain declarations.</p>}
         </section>
-        {personalOwnerId && <section className="space-y-3 border-t border-border/50 pt-5" data-testid="personal-break-entry">
-          <p className="text-sm text-muted-foreground">
-            Personal breaks use selected practices and are separate from declared deviations.
-          </p>
-          <PersonalDeviationSection key={personalOwnerId} ownerId={personalOwnerId} createLabel="Record deviation" />
-        </section>}
       </div>}
       <DeviationForm
         open={formOpen}
@@ -401,6 +402,10 @@ export function verifiedPersonalDeviationOwner(
   return ownerId;
 }
 
+export function legacyDeviationPresentationKey(entryPoint: 'dashboard' | 'history', ownerId: string | undefined, demo: boolean) {
+  return `${entryPoint}:${demo ? 'demo' : ownerId ?? 'signed-out'}`;
+}
+
 export function DeviationSection({ personalOwnerId, entryPoint = 'dashboard' }: {
   personalOwnerId?: string;
   entryPoint?: 'dashboard' | 'history';
@@ -408,5 +413,9 @@ export function DeviationSection({ personalOwnerId, entryPoint = 'dashboard' }: 
   const dataOwner = useAppStore(state => state.dataOwner);
   const demo = useAppStore(state => state.demoState !== 'default');
   const verifiedOwnerId = verifiedPersonalDeviationOwner(dataOwner, demo, personalOwnerId);
-  return <LegacyDeviationSection personalOwnerId={verifiedOwnerId} entryPoint={entryPoint} />;
+  if (personalOwnerId !== undefined) {
+    return verifiedOwnerId ? <PersonalDeviationSection key={verifiedOwnerId} ownerId={verifiedOwnerId} /> : null;
+  }
+  return <LegacyDeviationSection key={legacyDeviationPresentationKey(entryPoint, verifiedOwnerId, demo)}
+    personalOwnerId={verifiedOwnerId} entryPoint={entryPoint} />;
 }

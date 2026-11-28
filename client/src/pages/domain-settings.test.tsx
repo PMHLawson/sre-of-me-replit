@@ -2,8 +2,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { bindActivityOwner, personalActivityEligibilityQuery } from "@/lib/activities-api";
 import { DomainsApiError, parsePersonalDomain, personalDomainBoundaryQuery, personalDomainsQuery } from "@/lib/domains-api";
+import { personalDeviationsQuery } from "@/lib/deviation-v2-api";
 import DomainSettingsPage, { openPersonalDomainDraft, PersonalDomainDraftSlot, PersonalConfigurationView, PersonalDomainActions,
   PersonalDomainActivityLinks, PersonalDomainDetail, PersonalDomainsBackLink, PersonalDomainsList, PersonalDomainsNotice } from "./domain-settings";
 
@@ -42,6 +44,7 @@ function fixture() {
       active: true, status: "unknown", message: "Reference is unknown; no minimum or percentage inferred.", conditions: [] }] }] };
 }
 const parsed = () => parsePersonalDomain(fixture(), "owner-a", "custom-five");
+afterEach(() => bindActivityOwner(null));
 describe("personal domain configuration rendering", () => {
   it("offers custom activity entry and raw history only through the exact owned domain availability", () => {
     const html = renderToStaticMarkup(<Router ssrPath="/domains/custom-five"><PersonalDomainActivityLinks domainId="custom-five"
@@ -226,6 +229,25 @@ describe("personal domain form entry points", () => {
     expect(html).toContain("Sign in to view your domains");
     expect(html).not.toContain('data-testid="domain-policy-form"');
     expect(html).not.toContain("Add domain"); client.clear();
+  });
+  it("renders direct personal break controls through the real Your domains caller without legacy declarations", () => {
+    bindActivityOwner("owner-a");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    client.setQueryData(["/api/auth/user"], { id: "owner-a" });
+    client.setQueryData(personalDomainsQuery("owner-a").queryKey, [parsed()]);
+    client.setQueryData(personalDomainBoundaryQuery("owner-a").queryKey, { timezone: "America/New_York", dayStartHour: 6 });
+    client.setQueryData(personalDeviationsQuery("owner-a").queryKey, []);
+    client.setQueryData(personalActivityEligibilityQuery("owner-a", "custom-five").queryKey, {
+      domainId: "custom-five", canCreate: true, reason: null, effectivePolicyVersionId: "version-one",
+    });
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}>
+      <Router ssrPath="/domains"><DomainSettingsPage /></Router>
+    </QueryClientProvider>);
+    expect(html).toContain('data-testid="section-personal-breaks"');
+    expect(html).toContain("Record break");
+    expect(html).not.toContain('data-testid="button-declare-deviation"');
+    expect(html).not.toContain("Browse saved deviation history");
+    client.clear();
   });
   it("keeps in-page navigation from bypassing the pending or uncertain form gate", () => {
     const html = renderToStaticMarkup(<Router ssrPath="/domains"><PersonalDomainsBackLink editing /><PersonalDomainsList domains={[parsed()]} navigationPaused /></Router>);

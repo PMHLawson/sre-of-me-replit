@@ -16,7 +16,7 @@ import {
   PERSONAL_DEVIATIONS_QUERY, personalDeviationsQuery, PersonalDeviationApiError,
 } from "@/lib/deviation-v2-api";
 import type { PersonalDeviation, PersonalDeviationCreate, PersonalDeviationEdit } from "@/lib/deviation-v2-api";
-import { formatBreakTime } from "@/lib/deviation-time";
+import { formatBreakTime, sameInstant } from "@/lib/deviation-time";
 import { PersonalDeviationForm, type PersonalDeviationPracticeOption } from "./deviation-form";
 
 type LifecycleConfirmation = { operation: "end" | "delete"; deviation: PersonalDeviation };
@@ -50,7 +50,17 @@ function BreakCard({ deviation, names, timezone, onEdit, onEnd, onDelete }: {
       <h3 className="font-semibold">{deviation.reason}</h3>
       {deviation.endedAt && <span className="rounded-full bg-muted px-2 py-1 text-xs">Ended</span>}
     </div>
-    <p className="font-mono text-sm">{formatBreakTime(deviation.startAt, timezone)} – {deviation.endAt ? formatBreakTime(deviation.endAt, timezone) : "No planned end"} ({timezone})</p>
+    <div className="space-y-1 font-mono text-sm">
+      <p>Starts: {formatBreakTime(deviation.startAt, timezone)} ({timezone})</p>
+      {deviation.endedAt ? <>
+        <p>Actual end: {formatBreakTime(deviation.endedAt, timezone)} ({timezone})</p>
+        {deviation.endAt && !sameInstant(deviation.endAt, deviation.endedAt) ?
+          <p>Planned end: {formatBreakTime(deviation.endAt, timezone)} ({timezone})</p> :
+          !deviation.endAt && <p>No planned end.</p>}
+      </> : deviation.endAt ?
+        <p>{futureStart ? "Scheduled end" : "Planned end"}: {formatBreakTime(deviation.endAt, timezone)} ({timezone})</p> :
+        <p>No planned end.</p>}
+    </div>
     <div className="flex flex-wrap gap-2" aria-label="Selected practices">
       {selectedNames.map((name, index) => <span key={`${deviation.practiceIds[index]}-${index}`}
         className="rounded-full border border-border/60 px-2 py-1 text-xs">{name}</span>)}
@@ -70,9 +80,10 @@ function BreakCard({ deviation, names, timezone, onEdit, onEnd, onDelete }: {
 }
 
 /** V2 signed-in break lifecycle; the legacy deviation surface remains separate. */
-export function PersonalDeviationSection({ ownerId, createLabel = "Record break" }: {
+export function PersonalDeviationSection({ ownerId, createLabel = "Record break", sectionLabel = "Personal breaks" }: {
   ownerId: string;
   createLabel?: string;
+  sectionLabel?: string;
 }) {
   const queryClient = useQueryClient();
   const [formOpen, setFormOpen] = useState(false);
@@ -179,8 +190,8 @@ export function PersonalDeviationSection({ ownerId, createLabel = "Record break"
 
   const deviations = deviationsQuery.data ?? [];
   return <section className="space-y-3" data-testid="section-personal-breaks">
-    <div className="flex items-center justify-between gap-3 px-2">
-      <div><h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Personal breaks</h2>
+     <div className="flex items-center justify-between gap-3 px-2">
+       <div><h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{sectionLabel}</h2>
         <p className="text-xs text-muted-foreground">Times use your saved timezone: {timezone}.</p></div>
       <Button size="sm" onClick={openCreate} disabled={!practices.some(practice => practice.active)} data-testid="button-create-personal-break">
         <Plus className="mr-1 h-4 w-4" /> {createLabel}

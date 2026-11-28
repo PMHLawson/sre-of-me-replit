@@ -349,7 +349,13 @@ export function PersonalDeviationPracticePicker({ practices, selectedIds, onChan
       {!practices.some(practice => practice.active) && !editing &&
         <p className="text-sm text-muted-foreground">No active personal practices are available.</p>}
     </fieldset>
-    <p className="text-xs text-muted-foreground">Select at least one. A maximum of 100 practices can be submitted; saved selections above that limit are never trimmed.</p>
+    <p className="text-sm text-muted-foreground" aria-live="polite" data-testid="text-break-practice-count">
+      Selected: {selectedIds.length} {selectedIds.length === 1 ? "practice" : "practices"} (limit 100).
+    </p>
+    {selectedIds.length > 100 && <p role="alert" data-testid="alert-break-practice-limit">
+      Choose which 100 or fewer practices to keep. This selection has not been trimmed.
+    </p>}
+    <p className="text-xs text-muted-foreground">Select at least one. Saved selections above the limit remain intact until you deliberately save a new selection.</p>
   </div>;
 }
 
